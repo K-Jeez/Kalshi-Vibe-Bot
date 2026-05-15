@@ -35,10 +35,10 @@ export const Settings: React.FC = () => {
 
   useEffect(() => {
     if (!cur) return
-    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 1))))
+    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 3))))
     setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
     setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 51))))
-    setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 20))))
+    setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 30))))
   }, [cur])
 
   useEffect(() => {

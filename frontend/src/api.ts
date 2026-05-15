@@ -248,7 +248,7 @@ export interface TuningSnapshot {
   min_edge_to_buy_pct: number
   /** When false, the bot never auto-exits for stop-loss drawdown. */
   stop_loss_selling_enabled?: boolean
-  /** Minimum xAI win probability (0–100) on the purchased side; default 51 ⇒ >50%. */
+  /** Minimum xAI win probability (0–100) on the purchased side; clamped >50% server-side. */
   min_ai_win_prob_buy_side_pct?: number
   /** Max open legs before new-entry market scan + xAI pauses. */
   max_open_positions?: number

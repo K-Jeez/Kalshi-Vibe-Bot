@@ -105,9 +105,8 @@ async def set_strategy_knobs(req: StrategyKnobsRequest, db: Session = Depends(ge
         row.stop_loss_drawdown_pct = _clamp("stop_loss_drawdown_pct", float(req.stop_loss_drawdown_pct))
     if req.min_ai_win_prob_buy_side_pct is not None:
         v = int(req.min_ai_win_prob_buy_side_pct)
-        row.min_ai_win_prob_buy_side_pct = max(
-            DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT, min(99, v)
-        )
+        # Floor 51 = strictly above 50% on the buy side; cap 99 matches ``config.py`` validator.
+        row.min_ai_win_prob_buy_side_pct = max(51, min(99, v))
     if req.max_open_positions is not None:
         row.max_open_positions = max(1, min(500, int(req.max_open_positions)))
     row.updated_at = utc_now()

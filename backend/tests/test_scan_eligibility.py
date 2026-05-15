@@ -135,13 +135,13 @@ class TestScanEligibility(unittest.TestCase):
         self.assertEqual(label, "At open position limit (3/3)")
 
     def test_open_position_limit_allows_below_cap(self):
-        settings = type("S", (), {"bot_max_open_positions": 20})()
+        settings = type("S", (), {"bot_max_open_positions": 30})()
         active, label = compute_order_search_scan_labels(
             "play",
             settings,
             100.0,
             total_portfolio_value_usd=500.0,
-            open_position_count=19,
+            open_position_count=29,
         )
         self.assertTrue(active)
         self.assertIn("searching for new positions", label)

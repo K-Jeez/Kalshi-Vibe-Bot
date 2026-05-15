@@ -11,9 +11,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Single source for tuning fallbacks (SQLite NULL / missing ORM attr); keep in sync with ``Settings`` defaults below.
-DEFAULT_MIN_EDGE_TO_BUY_PCT = 1
-DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 51
-DEFAULT_MAX_OPEN_POSITIONS = 20
+DEFAULT_MIN_EDGE_TO_BUY_PCT = 3
+DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
+DEFAULT_MAX_OPEN_POSITIONS = 30
 
 
 class Settings(BaseSettings):
@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     paper_starting_balance: float = 1000.0  # starting cash for paper mode (USD)
     # Minimum edge (percentage points: AI prob for buy side minus market-implied ask %) to execute a buy.
     min_edge_to_buy_pct: int = DEFAULT_MIN_EDGE_TO_BUY_PCT
-    # Minimum xAI win probability (0–100) on the **purchased** side before a buy (51 ⇒ strictly above 50%).
+    # Minimum xAI win probability (0–100) on the **purchased** side before a buy (clamped 51–99; default 60).
     min_ai_win_prob_buy_side_pct: int = DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
 
     # ── Bot scan configuration ───────────────────────────────────────────────────

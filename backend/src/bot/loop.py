@@ -16,7 +16,10 @@ from src.clients.kalshi_client import (
     open_position_mark_dollars,
 )
 from src.app_state import kalshi_ui_reconcile_lock
-from src.config import DEFAULT_MIN_EDGE_TO_BUY_PCT
+from src.config import (
+    DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
+    DEFAULT_MIN_EDGE_TO_BUY_PCT,
+)
 from src.logger import setup_logging
 from src.util.datetimes import ensure_utc, utc_iso_z, utc_now
 from src.reconcile.ledger_fifo import fifo_cost_for_next_sell
@@ -1556,7 +1559,13 @@ async def scan_and_trade(
                             trade_side, ai_yes, y_ask_f, n_ask_f, float(yes_price), float(no_price)
                         )
                         min_edge_base = float(getattr(settings, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT))
-                        min_ai_base = int(getattr(settings, "min_ai_win_prob_buy_side_pct", 51))
+                        min_ai_base = int(
+                            getattr(
+                                settings,
+                                "min_ai_win_prob_buy_side_pct",
+                                DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
+                            )
+                        )
                         eff_min_edge, eff_min_ai, risk_tier = effective_buy_gate_thresholds(
                             side=trade_side,
                             ai_yes_pct=ai_yes,
