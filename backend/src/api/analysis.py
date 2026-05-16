@@ -98,8 +98,10 @@ def serialize_decision_log_to_analysis(log: DecisionLog) -> dict:
         "yes_confidence": log.yes_confidence or 50,
         "no_confidence": log.no_confidence or 50,
         "escalated_to_xai": log.escalated_to_xai or False,
+        "escalated_to_ai": bool(log.escalated_to_xai),
         "edge": edge_pct,
         "xai_analysis": xai,
+        "ai_analysis": xai,
         "timestamp": utc_iso_z(log.timestamp),
     }
     if action_taken is not None:
@@ -324,11 +326,13 @@ async def get_analyses_stats(since_hours: int = 168, db: Session = Depends(get_d
             )
         )
         total_analyses = base.count()
-        escalated_to_xai = base.filter(DecisionLog.escalated_to_xai.is_(True)).count()
+        escalated_to_ai = base.filter(DecisionLog.escalated_to_xai.is_(True)).count()
         return {
             "since_hours": hrs,
             "total_analyses": total_analyses,
-            "escalated_to_xai": escalated_to_xai,
+            # Legacy key name (DB column ``escalated_to_xai``); count is all LLM escalations.
+            "escalated_to_xai": escalated_to_ai,
+            "escalated_to_ai": escalated_to_ai,
         }
     except Exception as e:
         logger.error("Analyses stats error: %s", e)

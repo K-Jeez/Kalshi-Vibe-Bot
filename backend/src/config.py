@@ -57,15 +57,15 @@ class Settings(BaseSettings):
     paper_starting_balance: float = 1000.0  # starting cash for paper mode (USD)
     # Minimum edge (percentage points: AI prob for buy side minus market-implied ask %) to execute a buy.
     min_edge_to_buy_pct: int = DEFAULT_MIN_EDGE_TO_BUY_PCT
-    # Minimum xAI win probability (0–100) on the **purchased** side before a buy (clamped 51–99; default 60).
+    # Minimum AI win probability (0–100) on the **purchased** side before a buy (clamped 51–99; default 60).
     min_ai_win_prob_buy_side_pct: int = DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
 
     # ── Bot scan configuration ───────────────────────────────────────────────────
     bot_scan_interval: int = 10              # seconds between full market scans
     # Max wall time for one ``scan_and_trade`` sweep in play mode (0 = unlimited). Prevents a hung sweep from silencing the loop forever.
     bot_loop_scan_timeout_sec: int = 1800
-    # Max xAI scan units (batch or single) per play sweep; 0 = no cap. When set, units are ordered by
-    # highest 24h volume among member markets so liquid lines get Grok first; remaining units wait for later sweeps.
+    # Max AI scan units (batch or single) per play sweep; 0 = no cap. When set, units are ordered by
+    # highest 24h volume among member markets so liquid lines are analyzed first; remaining units wait for later sweeps.
     bot_max_scan_queue_units_per_sweep: int = 0
     bot_min_volume: float = 1000.0           # minimum 24h contract volume (tradeability scan)
     # Vetting: BUY window prefers ``expected_expiration_time`` (event end); if missing or past, falls back to
@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     # After a stop-loss exit, skip new entries on that ticker for this many minutes (0 = off).
     reentry_cooldown_minutes: int = 120
     # Min gross upside (1 − native ask) on the purchased leg: scan filter + pre-buy gate (0 disables gate).
-    # When > 0, scan requires at least one leg to be liquid and meet this floor (avoids xAI on skewed books).
+    # When > 0, scan requires at least one leg to be liquid and meet this floor (avoids LLM calls on skewed books).
     local_min_residual_payoff: float = 0.10
 
     # ── Exit hygiene ──────────────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     stop_loss_drawdown_pct: float = 0.80
     # When False, the bot never auto-exits for stop-loss (manual sells still allowed). Default off until enabled in Settings.
     stop_loss_selling_enabled: bool = False
-    # Max simultaneous open positions (per trade mode); at or over this, market scan + xAI for new entries pauses.
+    # Max simultaneous open positions (per trade mode); at or over this, market scan + AI analysis for new entries pauses.
     bot_max_open_positions: int = DEFAULT_MAX_OPEN_POSITIONS
     # Periodically ``GET /markets`` for recent closed rows missing ``kalshi_market_result`` (0 = disable).
     closed_resolution_refresh_interval_sec: int = 450

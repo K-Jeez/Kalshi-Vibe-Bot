@@ -38,6 +38,10 @@ _RETRYABLE_GEMINI_HTTP = frozenset({408, 429, 500, 502, 503, 504})
 _GEMINI_HTTP_MAX_RETRIES = 3
 _GEMINI_CHAT_TIMEOUT_SEC = 55.0
 _GEMINI_EVENT_BATCH_TIMEOUT_SEC = 150.0
+# Output token caps (thinking disabled via thinkingBudget=0).
+_GEMINI_SINGLE_MAX_OUTPUT_TOKENS = 1024
+_GEMINI_BATCH_MAX_OUTPUT_TOKENS = 4096
+_GEMINI_MAX_OUTPUT_RETRY_MULTIPLIER = 2
 
 _gemini_shared_http: Optional[httpx.AsyncClient] = None
 
@@ -65,11 +69,14 @@ def _gemini_retry_delay_seconds(attempt_index: int) -> float:
     return base + random.uniform(0.15, 0.85)
 
 
-def _extract_gemini_text(data: dict) -> str:
+def _extract_gemini_text(data: dict) -> Tuple[str, str]:
+    """Return ``(text, finish_reason)`` from a generateContent response."""
     candidates = data.get("candidates") or []
     if not candidates:
         raise ValueError("No candidates in Gemini response")
-    content = candidates[0].get("content") or {}
+    c0 = candidates[0]
+    finish = str(c0.get("finishReason") or "")
+    content = c0.get("content") or {}
     parts = content.get("parts") or []
     texts: List[str] = []
     for part in parts:
@@ -77,7 +84,7 @@ def _extract_gemini_text(data: dict) -> str:
             texts.append(str(part["text"]))
     if not texts:
         raise ValueError("No text in Gemini response")
-    return "\n".join(texts)
+    return "\n".join(texts), finish
 
 
 async def _post_gemini_generate_with_retries(
@@ -98,14 +105,18 @@ async def _post_gemini_generate_with_retries(
         "x-goog-api-key": api_key,
         "Content-Type": "application/json",
     }
+    gen_cfg: dict = {
+        "temperature": max(0.01, float(temperature)),
+        "maxOutputTokens": int(max_output_tokens),
+        "responseMimeType": "application/json",
+        # gemini-2.5-flash defaults to heavy "thinking" that can consume the whole output budget
+        # and truncate JSON; disable for structured trading outputs.
+        "thinkingConfig": {"thinkingBudget": 0},
+    }
     payload: dict = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-        "generationConfig": {
-            "temperature": max(0.01, float(temperature)),
-            "maxOutputTokens": int(max_output_tokens),
-            "responseMimeType": "application/json",
-        },
+        "generationConfig": gen_cfg,
     }
     last_msg = "Request failed"
     http = _gemini_http()
@@ -166,6 +177,47 @@ async def _post_gemini_generate_with_retries(
             _logger.error("Gemini error for '%s': %s", log_label[:80], e)
             return ("err", str(e))
     return ("err", last_msg)
+
+
+async def _gemini_generate_json_text(
+    *,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_output_tokens: int,
+    timeout_sec: float,
+    log_label: str,
+) -> Tuple[str, str]:
+    """Call Gemini and return ``(text, finish_reason)``; retries once on ``MAX_TOKENS``."""
+    cap = int(max_output_tokens)
+    for attempt in range(2):
+        tok = cap if attempt == 0 else min(8192, cap * _GEMINI_MAX_OUTPUT_RETRY_MULTIPLIER)
+        outcome, resp_or_msg = await _post_gemini_generate_with_retries(
+            api_key=api_key,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            max_output_tokens=tok,
+            timeout_sec=timeout_sec,
+            log_label=log_label,
+            max_attempts=_GEMINI_HTTP_MAX_RETRIES,
+        )
+        if outcome != "ok":
+            raise RuntimeError(str(resp_or_msg))
+        data = resp_or_msg.json()
+        text, finish = _extract_gemini_text(data)
+        if finish != "MAX_TOKENS":
+            return text, finish
+        _logger.warning(
+            "Gemini MAX_TOKENS for '%s' at %d output tokens; %s",
+            log_label[:80],
+            tok,
+            "retrying with higher cap" if attempt == 0 else "using truncated body",
+        )
+    return text, finish
 
 
 class GeminiClient:
@@ -238,22 +290,16 @@ class GeminiClient:
         )
 
         try:
-            outcome, resp_or_msg = await _post_gemini_generate_with_retries(
+            content, _finish = await _gemini_generate_json_text(
                 api_key=self.api_key,
                 model=self.model,
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=temperature,
-                max_output_tokens=650,
+                max_output_tokens=_GEMINI_SINGLE_MAX_OUTPUT_TOKENS,
                 timeout_sec=_GEMINI_CHAT_TIMEOUT_SEC,
                 log_label=market_title,
-                max_attempts=_GEMINI_HTTP_MAX_RETRIES,
             )
-            if outcome != "ok":
-                return _error_response(str(resp_or_msg))
-            resp = resp_or_msg
-            data = resp.json()
-            content = _extract_gemini_text(data)
             result = _parse_json(content)
             _logger.debug(
                 "Gemini direction=%s ai_yes_pct=%s for '%s'",
@@ -319,22 +365,16 @@ class GeminiClient:
         fallback_best = str(legs[0].get("market_id") or "")
 
         try:
-            outcome, resp_or_msg = await _post_gemini_generate_with_retries(
+            content, _finish = await _gemini_generate_json_text(
                 api_key=self.api_key,
                 model=self.model,
                 system_prompt=EVENT_BATCH_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=temperature,
-                max_output_tokens=2200,
+                max_output_tokens=_GEMINI_BATCH_MAX_OUTPUT_TOKENS,
                 timeout_sec=_GEMINI_EVENT_BATCH_TIMEOUT_SEC,
                 log_label=f"batch:{event_ticker}",
-                max_attempts=_GEMINI_HTTP_MAX_RETRIES,
             )
-            if outcome != "ok":
-                return {**_error_response(str(resp_or_msg)), "best_market_id": fallback_best}
-            resp = resp_or_msg
-            data = resp.json()
-            content = _extract_gemini_text(data)
             parsed = _parse_event_batch_json(content, allowed_ids=allowed, ladder_stat_line_batch=ladder)
             _logger.debug(
                 "Gemini event batch %s best=%s dir=%s",

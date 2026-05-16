@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react'
-import { apiClient } from '../api'
+import { apiClient, aiProviderDisplayName } from '../api'
 import { useDashboardDataCache } from '../context/DashboardDataCache'
 import {
   TrendingUp,
@@ -195,7 +195,8 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
         'Play mode: market scan is off until total balance reaches at least $5 (matches banner label).',
     })
   }
-  if (xaiUsd !== null) {
+  const activeProvider = String(portfolio.ai_provider || 'gemini').toLowerCase()
+  if (xaiUsd !== null && activeProvider === 'xai') {
     totalBalanceSublines.push({
       text: `xAI prepaid $${xaiUsd.toFixed(2)}`,
       alert: xaiSublineAlert,
@@ -204,6 +205,7 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
     })
   }
 
+  const aiProviderLabel = aiProviderDisplayName(portfolio.ai_provider)
   const scanActive = portfolio.order_search_active === true
   const scanLabel =
     typeof portfolio.order_search_label === 'string' && portfolio.order_search_label.trim() !== ''
@@ -245,7 +247,7 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
     <div className="space-y-4">
       <div
         className="ui-surface-sm flex items-center gap-3 px-3 py-2.5 sm:px-4"
-        title="Whether the bot will pull open markets and call xAI for new entries on the next scan tick."
+        title={`Whether the bot will pull open markets and run ${aiProviderLabel} analysis for new entries on the next scan tick.`}
       >
         <span
           className={`h-2.5 w-2.5 shrink-0 rounded-full shadow-md ${

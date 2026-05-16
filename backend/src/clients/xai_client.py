@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import httpx
 
 from src.bot.event_batch_partition import legs_are_all_line_ladder_partition
+from src.clients.ai_json_parse import loads_json_object
 from src.logger import setup_logging
 from src.reconcile.open_positions import normalize_market_id
 
@@ -657,17 +658,9 @@ def _parse_event_batch_json(
     allowed_ids: Set[str],
     ladder_stat_line_batch: bool = False,
 ) -> dict:
-    raw = content.strip()
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            return {**_error_response("No JSON in response"), "best_market_id": ""}
-        try:
-            result = json.loads(match.group())
-        except json.JSONDecodeError:
-            return {**_error_response("Invalid JSON in response"), "best_market_id": ""}
+    result = loads_json_object(content, log_label="event_batch")
+    if result is None:
+        return {**_error_response("Invalid JSON in response"), "best_market_id": ""}
 
     raw_best = str(result.get("best_market_id") or "").strip()
     best_norm = normalize_market_id(raw_best).upper()
@@ -730,18 +723,9 @@ def _parse_event_batch_json(
 
 def _parse_json(content: str) -> dict:
     """Extract and validate JSON from model response."""
-    raw = content.strip()
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if not match:
-            _logger.warning("No JSON found in xAI response: %s", raw[:200])
-            return _error_response("No JSON in response")
-        try:
-            result = json.loads(match.group())
-        except json.JSONDecodeError:
-            return _error_response("Invalid JSON in response")
+    result = loads_json_object(content, log_label="market")
+    if result is None:
+        return _error_response("No JSON in response")
 
     direction = str(result.get("direction", "SKIP") or "SKIP").strip().upper()
     if direction not in ("YES", "NO", "SKIP"):

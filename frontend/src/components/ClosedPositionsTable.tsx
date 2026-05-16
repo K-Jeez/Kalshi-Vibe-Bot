@@ -488,7 +488,7 @@ export const ClosedPositionsTable: React.FC<ClosedPositionsTableProps> = ({
                         ) : (
                           <p className="text-sm text-white">
                             No matching saved decision log for this ticker (older bots logged raw Kalshi ids that did not match
-                            position rows; new scans log normalized ids). If you expected Grok output here, try Reconcile or a
+                            position rows; new scans log normalized ids). If you expected AI analysis here, try Reconcile or a
                             manual analyze on this contract — otherwise history may never have been persisted for this key.
                           </p>
                         )}

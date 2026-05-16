@@ -17,7 +17,7 @@ class AppState:
     decision_engine: Optional[Any] = None
     kalshi_client: Optional[Any] = None
     bot_loop_task: Optional[asyncio.Task] = None
-    # Dashboard: market scan + xAI eligibility (updated from bot loop and GET /portfolio).
+    # Dashboard: market scan + AI analysis eligibility (updated from bot loop and GET /portfolio).
     order_search_active: bool = False
     order_search_label: str = "Starting…"
     # Serialize UI-triggered Kalshi portfolio pulls (``/portfolio`` + ``/positions`` in parallel

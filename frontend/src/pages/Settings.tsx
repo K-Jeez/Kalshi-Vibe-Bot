@@ -60,7 +60,7 @@ export const Settings: React.FC = () => {
     const mx = Number(maxOpenPositionsDraft)
     if (!Number.isFinite(me) || !Number.isFinite(sl) || !Number.isFinite(ma) || !Number.isFinite(mx)) {
       alert(
-        'Enter whole numbers for minimum edge, stop-loss drawdown, min xAI win % on the buy side, and max open positions.',
+        'Enter whole numbers for minimum edge, stop-loss drawdown, min AI win % on the buy side, and max open positions.',
       )
       return
     }
@@ -228,8 +228,16 @@ export const Settings: React.FC = () => {
           <div className="flex flex-wrap gap-3">
             {(
               [
-                { id: 'gemini' as const, label: 'Gemini (default)', hint: 'Free tier · gemini-2.5-flash' },
-                { id: 'xai' as const, label: 'xAI (Grok)', hint: 'Paid · uses XAI_API_KEY' },
+                {
+                  id: 'gemini' as const,
+                  label: 'Gemini (default)',
+                  hint: `Free tier · ${cur.gemini_model ?? 'gemini-2.5-flash'}`,
+                },
+                {
+                  id: 'xai' as const,
+                  label: 'xAI (Grok)',
+                  hint: `Paid · ${cur.xai_model ?? 'grok-3'} · XAI_API_KEY`,
+                },
               ] as const
             ).map((opt) => {
               const selected = (cur.ai_provider ?? 'gemini') === opt.id
@@ -258,13 +266,13 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Position size uses <strong className="text-white">full Kelly</strong> from Grok&apos;s P(YES) and executable
+            Position size uses <strong className="text-white">full Kelly</strong> from the active model&apos;s P(YES) and executable
             asks (whole contracts, capped by deployable cash at execution; if Kelly rounds to zero but edge at the ask
-            remains, the bot buys <strong className="text-white">one</strong> contract when cash allows). Buys run only when edge (percentage points) is at least your minimum, xAI win probability on the
+            remains, the bot buys <strong className="text-white">one</strong> contract when cash allows). Buys run only when edge (percentage points) is at least your minimum, AI win probability on the
             purchased side meets your floor (default 51% = strictly above 50%), open legs are below your max open
-            positions cap (then Kalshi fetch + xAI for new entries pauses), and stop-loss compares{' '}
+            positions cap (then Kalshi fetch + AI analysis for new entries pauses), and stop-loss compares{' '}
             <strong className="text-white">open cash basis</strong> to dashboard{' '}
-            <strong className="text-white">Est. Value</strong> (after grace) when auto sells are enabled. When the book is very skeptical of the buy side but xAI is much more
+            <strong className="text-white">Est. Value</strong> (after grace) when auto sells are enabled. When the book is very skeptical of the buy side but the model is much more
             bullish, the bot applies a fixed stricter edge and AI floor (not configurable here).
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
@@ -294,7 +302,7 @@ export const Settings: React.FC = () => {
                 </label>
                 <label className="flex min-h-0 flex-col gap-1">
                   <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Min xAI win % on buy side (51–99)
+                    Min AI win % on buy side (51–99)
                   </span>
                   <input
                     type="text"

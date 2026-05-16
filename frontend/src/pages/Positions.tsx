@@ -113,7 +113,8 @@ export const AIAnalysis: React.FC = () => {
           analysisStats.since_hours >= 24
             ? `${days} day${days === 1 ? '' : 's'}`
             : `${analysisStats.since_hours} hour${analysisStats.since_hours === 1 ? '' : 's'}`
-        return `${analysisStats.escalated_to_xai.toLocaleString()} escalated to xAI · ${analysisStats.total_analyses.toLocaleString()} analyses (last ${period})`
+        const escalated = analysisStats.escalated_to_ai ?? analysisStats.escalated_to_xai
+        return `${escalated.toLocaleString()} sent to AI · ${analysisStats.total_analyses.toLocaleString()} analyses (last ${period})`
       })()
     : null
 

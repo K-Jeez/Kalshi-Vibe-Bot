@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """REST tuning endpoints: stop-loss, minimum edge, and runtime sync for the bot."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from src.api.broadcast import broadcast_update
@@ -55,6 +55,8 @@ def tuning_state_payload(row) -> dict:
         ),
         "max_open_positions": _coalesce_int(row, "max_open_positions", DEFAULT_MAX_OPEN_POSITIONS),
         "ai_provider": _coalesce_ai_provider(row),
+        "gemini_model": str(getattr(app_settings, "gemini_model", "gemini-2.5-flash")),
+        "xai_model": str(getattr(app_settings, "xai_model", "grok-3")),
         "updated_at": utc_iso_z(row.updated_at),
     }
 
@@ -114,7 +116,7 @@ async def get_tuning_state(db: Session = Depends(get_db)):
 
 @router.post("/tuning/strategy-knobs")
 async def set_strategy_knobs(req: StrategyKnobsRequest, db: Session = Depends(get_db)):
-    """Persist minimum edge, stop-loss drawdown, and/or xAI buy-side win-prob floor; bot uses values after commit."""
+    """Persist minimum edge, stop-loss drawdown, and/or AI buy-side win-prob floor; bot uses values after commit."""
     row = ensure_tuning_state(db)
     if req.min_edge_to_buy_pct is not None:
         row.min_edge_to_buy_pct = int(_clamp("min_edge_to_buy_pct", float(req.min_edge_to_buy_pct)))
@@ -135,9 +137,24 @@ async def set_strategy_knobs(req: StrategyKnobsRequest, db: Session = Depends(ge
     return payload
 
 
+def _require_api_key_for_provider(provider: str) -> None:
+    prov = normalize_ai_provider(provider)
+    if prov == "xai" and not (getattr(app_settings, "xai_api_key", None) or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="XAI_API_KEY is not set in backend/.env — required when using xAI (Grok).",
+        )
+    if prov == "gemini" and not (getattr(app_settings, "gemini_api_key", None) or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="GEMINI_API_KEY is not set in backend/.env — required when using Gemini.",
+        )
+
+
 @router.post("/tuning/ai-provider")
 async def set_ai_provider(req: AiProviderRequest, db: Session = Depends(get_db)):
     """Switch market-analysis provider (Gemini vs xAI); bot uses the new provider immediately."""
+    _require_api_key_for_provider(req.provider)
     row = ensure_tuning_state(db)
     row.ai_provider = normalize_ai_provider(req.provider)
     row.updated_at = utc_now()

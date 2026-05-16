@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Kalshi Vibe Bot",
-    description="Binary Kalshi markets: local liquidity vetting, xAI (Grok) P(YES) + edge, full Kelly sizing, stop-loss-only exits.",
+    description="Binary Kalshi markets: local liquidity vetting, Gemini or xAI (Grok) P(YES) + edge, full Kelly sizing, stop-loss-only exits.",
     version=APP_VERSION,
     lifespan=lifespan,
 )

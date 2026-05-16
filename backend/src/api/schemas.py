@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, model_validator
 
 
@@ -14,11 +16,11 @@ class StopLossSellingRequest(BaseModel):
 
 
 class AiProviderRequest(BaseModel):
-    provider: str
+    provider: Literal["gemini", "xai"]
 
 
 class StrategyKnobsRequest(BaseModel):
-    """Minimum edge, stop-loss drawdown fraction, xAI buy-side win-prob floor, and/or max open positions (at least one required)."""
+    """Minimum edge, stop-loss drawdown fraction, AI buy-side win-prob floor, and/or max open positions (at least one required)."""
 
     min_edge_to_buy_pct: float | int | None = None
     stop_loss_drawdown_pct: float | None = None

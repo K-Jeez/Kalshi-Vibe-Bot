@@ -23,6 +23,8 @@ def test_tuning_state_payload_has_strategy_fields():
     )
     p = tuning_state_payload(row)
     assert p["ai_provider"] == "gemini"
+    assert "gemini_model" in p
+    assert "xai_model" in p
     assert abs(p["stop_loss_drawdown_pct"] - 0.80) < 1e-6
     assert p["min_edge_to_buy_pct"] == 1
     assert p["stop_loss_selling_enabled"] is True

@@ -37,7 +37,9 @@ export interface Portfolio {
   kalshi_resting_order_count?: number
   resting_buy_collateral_estimate_usd?: number
   kalshi_resting_orders_preview?: KalshiRestingOrderPreview[]
-  /** True when the bot would fetch markets and escalate to xAI this tick (Play + gates in scan_eligibility). */
+  /** Active AI provider for market analysis (``gemini`` | ``xai``). */
+  ai_provider?: AiProvider
+  /** True when the bot would fetch markets and run AI analysis this tick (Play + gates in scan_eligibility). */
   order_search_active?: boolean
   /** Short status for the dashboard scan indicator. */
   order_search_label?: string
@@ -147,11 +149,11 @@ export interface XAIAnalysis {
   key_factors: string[]
   edge?: number
   error?: string
-  /** One Grok call compared sibling Kalshi markets under the same event. */
+  /** One model call compared sibling Kalshi markets under the same event. */
   event_batch?: boolean
   event_ticker?: string
   event_leg_count?: number
-  /** Market ids included in that batch xAI call (partition-aware cooldown). */
+  /** Market ids included in that batch AI call (partition-aware cooldown). */
   event_batch_market_ids?: string[]
   /** When legs are mutually exclusive (e.g. 1X2), model P(YES) per market_id (sums ~100%). */
   outcome_probability_pct_by_market_id?: Record<string, number>
@@ -185,9 +187,14 @@ export interface DecisionAnalysis {
   market_title: string
   timestamp: string
   escalated_to_xai: boolean
+  /** Same as ``escalated_to_xai`` (provider-neutral name). */
+  escalated_to_ai?: boolean
   /** Legacy field: same as ``edge_pct`` when present. */
   edge: number
+  /** LLM response blob (legacy key name; used for Gemini and xAI). */
   xai_analysis?: XAIAnalysis
+  /** Alias of ``xai_analysis``. */
+  ai_analysis?: XAIAnalysis
   action_taken?: AnalysisActionTaken
   /** Mid prices / liquidity snapshot at analysis time (when persisted). */
   yes_price?: number
@@ -205,7 +212,18 @@ export interface ClosedPositionsResponse {
 export interface AnalysesStats {
   since_hours: number
   total_analyses: number
+  /** LLM-escalated analyses (legacy API key; same count as ``escalated_to_ai``). */
   escalated_to_xai: number
+  /** LLM-escalated analyses (Gemini or xAI). */
+  escalated_to_ai?: number
+}
+
+/** Human label for an analysis provider id (``xai_analysis.provider`` or settings). */
+export function aiProviderDisplayName(provider?: string | null): string {
+  const p = String(provider || '').toLowerCase()
+  if (p === 'xai') return 'xAI'
+  if (p === 'gemini') return 'Gemini'
+  return 'AI'
 }
 
 export interface BotStateInfo {
@@ -256,6 +274,9 @@ export interface TuningSnapshot {
   max_open_positions?: number
   /** Active provider for market analysis: Gemini (default) or xAI (Grok). */
   ai_provider?: AiProvider
+  /** Model ids from server config (for Settings hints). */
+  gemini_model?: string
+  xai_model?: string
   updated_at?: string | null
 }
 
@@ -457,7 +478,7 @@ export const apiClient = {
     return data
   },
 
-  // Strategy tuning: min edge, stop-loss drawdown, min xAI win % on buy side, stop-loss master switch
+  // Strategy tuning: min edge, stop-loss drawdown, min AI win % on buy side, stop-loss master switch
   getTuningState: async (): Promise<TuningSnapshot> => {
     const { data } = await client.get('/tuning/state')
     return data

@@ -6,7 +6,7 @@ import math
 from typing import Optional, Tuple
 
 # Baked contrarian buy tier (not configurable): when the book is skeptical of the buy side but
-# xAI is much more bullish, require extra edge and a higher xAI win-prob floor on that side.
+# Model is much more bullish than the book, require extra edge and a higher AI win-prob floor on that side.
 _CONTRARIAN_IMPLIED_BUY_MAX_PCT = 25
 _CONTRARIAN_AI_OVER_IMPLIED_MIN_GAP_PCT = 15
 _CONTRARIAN_EXTRA_MIN_EDGE_PCT = 5
@@ -150,7 +150,7 @@ def kelly_contracts_for_order(
 
 
 def ai_win_prob_pct_on_buy_side(side: str, ai_yes_pct: int) -> int:
-    """xAI P(win) for the purchased contract side (YES leg or NO leg), 0–100 integer."""
+    """AI P(win) for the purchased contract side (YES leg or NO leg), 0–100 integer."""
     y = int(max(0, min(100, int(ai_yes_pct))))
     return y if str(side).upper() == "YES" else 100 - y
 
@@ -164,7 +164,7 @@ def contrarian_buy_tier_active(
     yes_mid: float,
     no_mid: float,
 ) -> bool:
-    """True when the market is very skeptical of the buy side but xAI is much more bullish (baked thresholds)."""
+    """True when the market is very skeptical of the buy side but the model is much more bullish (baked thresholds)."""
     implied = int(market_implied_pct_for_side(side, yes_ask, no_ask, yes_mid, no_mid))
     ai_buy = int(ai_win_prob_pct_on_buy_side(side, ai_yes_pct))
     return bool(

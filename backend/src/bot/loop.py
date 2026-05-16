@@ -116,7 +116,7 @@ async def _maybe_auto_refresh_closed_resolution(
 
 _CONTAINER_PATTERNS = ("KXMVE", "CROSSCATEGORY", "MULTIGAME")
 
-# Scan: skip xAI when Kalshi YES/NO snapshot mids are both extreme (token waste vs min AI win % gates).
+# Scan: skip LLM escalation when Kalshi YES/NO snapshot mids are both extreme (token waste vs min AI win % gates).
 # ``yes_price`` / ``no_price`` are dollars 0–1 on the normalized market dict.
 _EXTREME_SNAPSHOT_HI = 0.90  # strictly above → >90¢ on that outcome
 _EXTREME_SNAPSHOT_LO = 0.10  # strictly below → <10¢ on that outcome
@@ -398,11 +398,11 @@ def is_tradeable_market(
 
     When ``min_residual_payoff`` > 0 (``LOCAL_MIN_RESIDUAL_PAYOFF``), at least one leg must
     also clear the same **gross upside** floor as execution: ``(1 − native ask) ≥ floor`` on
-    that leg. This drops skewed books where only the expensive outcome is liquid (xAI would
+    that leg. This drops skewed books where only the expensive outcome is liquid (the model would
     almost always hit the post-analysis residual skip).
 
     Hardcoded **extreme snapshot** skip: ``yes_price``/``no_price`` in the dust/favorite regime
-    (YES>90¢ and NO<10¢, or NO>90¢ and YES<10¢) to avoid xAI spend the downstream gates would reject.
+    (YES>90¢ and NO<10¢, or NO>90¢ and YES<10¢) to avoid LLM spend the downstream gates would reject.
     """
     ticker = market.get("id", "").upper()
     if any(pat in ticker for pat in _CONTAINER_PATTERNS):
@@ -472,7 +472,7 @@ def get_bot_state_str(db_factory) -> str:
 
 
 def is_bot_playing(db_factory) -> bool:
-    """True only when dashboard mode is ``play`` (market scan + xAI + new trades)."""
+    """True only when dashboard mode is ``play`` (market scan + AI analysis + new trades)."""
     return get_bot_state_str(db_factory) == "play"
 
 
@@ -959,13 +959,15 @@ async def monitor_positions(
 async def scan_and_trade(
     kalshi_client, decision_engine, db_factory, broadcast_fn, settings
 ):
-    """Fetch markets, apply local filter, escalate to xAI, execute qualifying trades."""
+    """Fetch markets, apply local filter, escalate to the configured AI provider, execute qualifying trades."""
+    from src.ai_provider import ai_provider_log_label
     from src.api.portfolio import get_xai_prepaid_balance_usd_cached
     from src.bot.scan_eligibility import refresh_order_search_scan_ui
     from src.database.models import DecisionLog, EventSeriesLock, Position, Trade, get_paper_cash_balance
     from src.reconcile.open_positions import get_open_position
 
     db = db_factory()
+    ai_log = ai_provider_log_label(getattr(settings, "default_ai_provider", "gemini"))
     try:
         from src.database.models import get_vault_balance
 
@@ -1060,7 +1062,7 @@ async def scan_and_trade(
 
         # ── Persistent event-series lock ─────────────────────────────────────
         # If we've ever executed a trade in an event series, never enter any other sibling strike again.
-        # (Prevents contradictory YES/NO exposures across siblings; unlike xAI debounce this is "indefinite".)
+        # (Prevents contradictory YES/NO exposures across siblings; unlike AI debounce this is "indefinite".)
         locked_event_tickers: Set[str] = set()
         allowed_market_id_by_event: Dict[str, str] = {}
         for et, mid in (
@@ -1103,8 +1105,8 @@ async def scan_and_trade(
         }
 
         # Tiered re-analysis cooldown:
-        # - Markets that escalated to xAI: long debounce (API cost + stale signal window).
-        # - Local-only outcomes (no xAI): short debounce so one full sweep doesn't freeze
+        # - Markets that escalated to the AI provider: long debounce (API cost + stale signal window).
+        # - Local-only outcomes (no LLM call): short debounce so one full sweep doesn't freeze
         #   the entire universe for 15 minutes — that made capacity look broken.
         now = utc_now()
         xai_cutoff = now - timedelta(minutes=15)
@@ -1122,7 +1124,7 @@ async def scan_and_trade(
         recent_xai = {
             normalize_market_id(str(mid or "")).upper() for mid, _xa in recent_xai_rows
         }
-        # Event batch logs only the *chosen* market_id, but xAI compared the full set.
+        # Event batch logs only the *chosen* market_id, but the model compared the full sibling set.
         # Without sibling cooldown, the next sweep re-queues the same event and can buy more strikes.
         explicit_batch_legs, legacy_batch_events = _cooldown_market_ids_from_event_batch_xai_jsons(
             [xa for _mid, xa in recent_xai_rows]
@@ -1144,7 +1146,7 @@ async def scan_and_trade(
         recently_analyzed = recent_xai | recent_local_only | xai_batch_sibling_cooldown
 
         logger.debug(
-            "Scan cooldown: xAI_window=%d local_only_window=%d batch_event_sibling=%d (local_debounce=%ds)",
+            "Scan cooldown: ai_escalation_window=%d local_only_window=%d batch_event_sibling=%d (local_debounce=%ds)",
             len(recent_xai),
             len(recent_local_only),
             len(xai_batch_sibling_cooldown),
@@ -1212,7 +1214,7 @@ async def scan_and_trade(
                 )
                 _last_prog_log = now_mono
 
-            # Stop scanning when play/total balance/deployable/xAI prepaid gates no longer allow new entries.
+            # Stop scanning when play/total balance/deployable/prepaid gates no longer allow new entries.
             xai_prepaid_now = await get_xai_prepaid_balance_usd_cached()
             active_now, scan_label_now = refresh_order_search_scan_ui(
                 db,
@@ -1236,7 +1238,8 @@ async def scan_and_trade(
             if not is_bot_playing(db_factory):
                 logger.info(
                     "Scan aborted — bot left play mode (pause/stop); skipping remaining markets "
-                    "(no further xAI escalation this sweep)",
+                    "(no further %s escalation this sweep)",
+                    ai_log,
                 )
                 break
 
@@ -1280,8 +1283,9 @@ async def scan_and_trade(
                             batch_completed_this_sweep.add(dr)
                     if n_trim > 0:
                         logger.info(
-                            "Ladder xAI shortlist: %d -> %d leg(s) for event %s "
+                            "Ladder %s shortlist: %d -> %d leg(s) for event %s "
                             "(top %d by local volume/depth/spread rank)",
+                            ai_log,
                             before_l,
                             len(members),
                             et_key,
@@ -1584,7 +1588,7 @@ async def scan_and_trade(
                             action_taken = {
                                 "status": "no_trade",
                                 "summary": (
-                                    f"Skipped — xAI win prob on buy side {ai_buy}% < minimum {eff_min_ai}%"
+                                    f"Skipped — AI win prob on buy side {ai_buy}% < minimum {eff_min_ai}%"
                                     f"{risk_note}"
                                 ),
                                 "signal": signal,

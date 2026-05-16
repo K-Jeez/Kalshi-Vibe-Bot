@@ -1,4 +1,4 @@
-"""Order-search (market scan + xAI) eligibility for the bot loop and dashboard."""
+"""Order-search (market scan + AI analysis) eligibility for the bot loop and dashboard."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from src.app_state import app_state
 from src.ai_provider import normalize_ai_provider
 from src.config import DEFAULT_MAX_OPEN_POSITIONS
 
-# Do not fetch markets or call xAI when uninvested deployable cash is below this (USD).
+# Do not fetch markets or run AI analysis when uninvested deployable cash is below this (USD).
 MIN_DEPLOYABLE_USD_FOR_ORDER_SEARCH = 1.0
 
 # Total portfolio value (Kalshi portfolio_value live; paper cash + marks): halt scan when this low.

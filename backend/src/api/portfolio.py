@@ -706,6 +706,7 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
         "xai_prepaid_balance_usd": round(xai_prepaid, 2) if xai_prepaid is not None else None,
         "order_search_active": bool(scan_active),
         "order_search_label": str(scan_label),
+        "ai_provider": str(getattr(settings, "default_ai_provider", "gemini")),
         "stop_loss_selling_enabled": bool(getattr(settings, "stop_loss_selling_enabled", False)),
     }
     if settings.trading_mode == "live":

@@ -3,7 +3,7 @@ import {
   ChevronRight,
   BarChart2, Clock,
 } from 'lucide-react'
-import { DecisionAnalysis, AnalysisActionTaken } from '../api'
+import { DecisionAnalysis, AnalysisActionTaken, aiProviderDisplayName } from '../api'
 import { formatUtcIsoLocal } from '../formatUtcLocal'
 
 function _actionLine(at: AnalysisActionTaken | undefined): string | undefined {
@@ -49,17 +49,9 @@ export function formatDecisionBadge(d: DecisionAnalysis['decision']): string {
   return d
 }
 
-/** Human label for which AI provider performed this analysis (stored in ``xai_analysis.provider``). */
-export function analysisProviderLabel(a: DecisionAnalysis): string {
-  const p = String(a.xai_analysis?.provider || '').toLowerCase()
-  if (p === 'xai') return 'xAI'
-  if (p === 'gemini') return 'Gemini'
-  return 'AI'
-}
-
 /**
- * Upper-right badge: actual outcome (did we trade?), not only xAI's directional signal.
- * When xAI says BUY_YES but execution skips (edge gate, liquidity, etc.), still show SKIP.
+ * Upper-right badge: actual outcome (did we trade?), not only the model's directional signal.
+ * When the model says BUY_YES but execution skips (edge gate, liquidity, etc.), still show SKIP.
  */
 export function effectiveAnalysisBadgeDecision(a: DecisionAnalysis): DecisionAnalysis['decision'] {
   const at = a.action_taken
@@ -247,7 +239,7 @@ export const AnalysisDetailBody: React.FC<{ a: DecisionAnalysis }> = ({ a }) => 
       {a.escalated_to_xai && (
         <div className="mb-2 rounded-lg border border-brand-muted/30 bg-primary/35 p-3 space-y-2">
           <p className="text-[10px] text-sky-300/90 font-medium">
-            Analyzed by {analysisProviderLabel(a)}
+            Analyzed by {aiProviderDisplayName(a.xai_analysis?.provider ?? a.ai_analysis?.provider)}
             {a.xai_analysis?.model ? (
               <span className="text-white/50 font-normal"> · {a.xai_analysis.model}</span>
             ) : null}

@@ -698,7 +698,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                         ) : (
                           <p className="text-sm text-white">
                             No saved AI analysis for this ticker in your decision log yet — usually because this leg never went
-                            through a bot scan/xAI cycle on this app (common after Kalshi reconcile import). Let Play mode scan it,
+                            through a bot scan and AI analysis on this app (common after Kalshi reconcile import). Let Play mode scan it,
                             or run a manual analysis that persists a decision row for this market.
                           </p>
                         )}
