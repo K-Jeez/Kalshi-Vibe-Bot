@@ -274,9 +274,12 @@ Output strict JSON only:
     ]
 }}"""
 
+# Line-ladder batches: switch to a sibling leg when its P(YES) beats the model pick by at least this much.
+_LADDER_LIKELIHOOD_OVERRIDE_MIN_GAP_PCT = 5
+
 EVENT_BATCH_SYSTEM_PROMPT = """You compare multiple sibling Kalshi contracts under one event. Output **JSON only**.
 
-Pick **at most one** contract+side (market_id + YES/NO) based on fundamentals: which side is most likely to win **by that leg's close**. Do not optimize for relative mispricing across strikes.
+Pick **at most one** contract+side (market_id + YES/NO) based on fundamentals: which side is most likely to win **by that leg's close**. Do not optimize for relative mispricing, “better payout,” or higher edge on a **riskier** sibling strike when another listed leg is **clearly more likely** to win (e.g. a lower over-goals line you call “very likely”).
 
 When **three or more** legs are listed and they are **mutually exclusive** on the YES side (typical match-winner triplet including a **tie** contract), treat YES probabilities as a **partition**: only one leg can settle YES; your per-leg P(YES) estimates over those legs should sum to about **100%**, and **reasoning** must reflect draw risk explicitly. Still output **ai_probability_yes_pct** as **P(this contract settles YES)** for **best_market_id** (even when direction is NO — that field is always the YES-win chance for the chosen ticker).
 
@@ -294,7 +297,7 @@ NOW (UTC): {now_utc}
 {batch_config_block}Below are **separate Kalshi contracts** (each has its own YES/NO settlement). The bot may buy **only one** contract side in this entire event this round.
 
 {multi_outcome_block}{line_ladder_block}
-**Task:** Choose the **single** ``market_id`` and **YES** or **NO** that you believe is **most likely to win at resolution**—using fundamentals and **horizon-matched** news/data (see each leg’s expiry line). **Do not** optimize for “best value” vs sibling strikes.
+**Task:** Choose the **single** ``market_id`` and **YES** or **NO** that you believe is **most likely to win at resolution**—using fundamentals and **horizon-matched** news/data (see each leg’s expiry line). **Do not** optimize for “best value,” extra edge, or higher payout on a **less likely** sibling (e.g. do **not** buy Over 3.5 for “better return” when Over 2.5 is the side you judge **most likely** to win).
 
 **Horizon:** Siblings often share a similar **now → close** window—anchor reasoning and **real_time_context** to drivers valid **through that window**. Lookback length is **market-dependent**: intraday/near-term underlyings need very fresh inputs; slower domains may justify weeks–months only when they still bind settlement timing.
 
@@ -562,10 +565,15 @@ def _line_ladder_event_batch_block(legs: List[Dict[str, Any]]) -> str:
     return (
         "### Numeric line ladder (this batch)\n"
         f"**Market ids:** {joined}\n"
-        "These legs are **threshold / over-style** questions (often same player, different cutoffs). "
-        "**Several** can settle YES together if the realized stat clears multiple lines. "
-        "Do **not** fill ``outcome_probability_pct_by_market_id`` as a forced ~100% partition across these legs; "
-        "omit that field or set it null. Pick the **one** contract whose YES/NO you would buy for edge vs its own ask.\n\n"
+        "These legs are **threshold / over-style** questions (often same player or same total-goals ladder, different cutoffs). "
+        "**Several** can settle YES together if the realized stat clears multiple lines — probabilities are **independent**, "
+        "not a ~100% partition.\n"
+        "**Required:** fill ``outcome_probability_pct_by_market_id`` with your P(YES) for **every** listed ``market_id`` "
+        "(integers 0–100; they do **not** need to sum to 100).\n"
+        "**Pick rule:** choose ``best_market_id`` + direction for the leg whose **chosen side** has the **highest** win "
+        "probability among siblings — for YES picks, the leg with the **highest** P(YES); for NO picks, the leg with the "
+        "**lowest** P(YES) (highest P(NO)). If you call a lower line “very likely” / “highly likely,” you must pick that "
+        "line (YES on the lower over, or the corresponding NO on the highest line), not a riskier line for extra edge.\n\n"
     )
 
 
@@ -652,6 +660,58 @@ def _normalize_outcome_probability_pct_by_market_id(
     return out or None
 
 
+def _prioritize_line_ladder_likelihood(
+    parsed: Dict[str, Any],
+    *,
+    allowed_ids: Set[str],
+    min_gap_pct: int = _LADDER_LIKELIHOOD_OVERRIDE_MIN_GAP_PCT,
+) -> Dict[str, Any]:
+    """Prefer the sibling leg with highest P(chosen side wins); overrides model pick when gap is large enough."""
+    direction = str(parsed.get("direction") or "SKIP").upper()
+    if direction not in ("YES", "NO"):
+        return parsed
+
+    omap = parsed.get("outcome_probability_pct_by_market_id")
+    if not isinstance(omap, dict):
+        return parsed
+
+    present = {k: int(v) for k, v in omap.items() if k in allowed_ids}
+    if len(present) < 2:
+        return parsed
+
+    model_best = str(parsed.get("best_market_id") or "").strip().upper()
+    if not model_best or model_best not in present:
+        return parsed
+
+    if direction == "YES":
+        likelihood_best = max(present, key=present.get)
+    else:
+        likelihood_best = min(present, key=present.get)
+
+    model_p = present[model_best]
+    best_p = present[likelihood_best]
+    if likelihood_best == model_best:
+        return parsed
+    if direction == "YES":
+        if best_p < model_p + min_gap_pct:
+            return parsed
+    elif model_p < best_p + min_gap_pct:
+        return parsed
+
+    out = dict(parsed)
+    out["best_market_id"] = likelihood_best
+    out["ai_probability_yes_pct"] = best_p
+    side_label = "P(YES)" if direction == "YES" else "P(NO) implied via P(YES)"
+    note = (
+        f" [Likelihood priority: switched from {model_best} ({model_p}% P(YES)) to "
+        f"{likelihood_best} ({best_p}% P(YES)) — higher {side_label} among ladder legs; "
+        f"do not favor a riskier strike for extra edge when a sibling is more likely.]"
+    )
+    out["reasoning"] = (str(out.get("reasoning") or "").strip() + note).strip()
+    out["batch_likelihood_override"] = True
+    return out
+
+
 def _parse_event_batch_json(
     content: str,
     *,
@@ -686,7 +746,7 @@ def _parse_event_batch_json(
 
     ai_yes = _extract_ai_probability_yes_pct(result)
 
-    omap = None if ladder_stat_line_batch else _normalize_outcome_probability_pct_by_market_id(
+    omap = _normalize_outcome_probability_pct_by_market_id(
         result.get("outcome_probability_pct_by_market_id"),
         allowed_ids=allowed_ids,
     )
@@ -701,6 +761,13 @@ def _parse_event_batch_json(
         ssum = sum(omap.values())
         if 95 <= ssum <= 105:
             ai_yes = omap[best_out]
+    elif (
+        ladder_stat_line_batch
+        and omap
+        and best_out
+        and best_out in omap
+    ):
+        ai_yes = omap[best_out]
 
     key_factors = result.get("key_factors", [])
     if not isinstance(key_factors, list):
@@ -718,6 +785,8 @@ def _parse_event_batch_json(
     }
     if omap:
         out["outcome_probability_pct_by_market_id"] = omap
+    if ladder_stat_line_batch:
+        out = _prioritize_line_ladder_likelihood(out, allowed_ids=allowed_ids)
     return out
 
 
