@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from 'react'
-import { apiClient, aiProviderDisplayName } from '../api'
+import { apiClient, AiProvider, aiProviderDisplayName } from '../api'
+import { AiProviderLogo } from './AiProviderLogo'
 import { useDashboardDataCache } from '../context/DashboardDataCache'
 import {
   TrendingUp,
@@ -29,6 +30,8 @@ interface StatCardProps {
   /** Stacked muted rows under the main value (e.g. total balance health + xAI prepaid). */
   sublineRows?: StatSublineRow[]
   subtext?: string
+  /** Full-width row at the bottom of the tile (e.g. current AI provider). */
+  footer?: React.ReactNode
 }
 
 /** Dense layout so portfolio tiles fit one row on large screens. */
@@ -40,6 +43,7 @@ const StatCard: React.FC<StatCardProps> = ({
   topContent,
   sublineRows,
   subtext,
+  footer,
 }) => (
   <div className="ui-surface-sm min-w-0 p-3 transition hover:border-white/35 sm:p-3.5 lg:p-3 xl:p-3.5">
     <div className="flex items-start justify-between gap-2 min-w-0">
@@ -83,6 +87,7 @@ const StatCard: React.FC<StatCardProps> = ({
         {icon}
       </div>
     </div>
+    {footer ? <div className="mt-2 pt-2 border-t border-white/10 min-w-0">{footer}</div> : null}
   </div>
 )
 
@@ -196,6 +201,7 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
     })
   }
   const activeProvider = String(portfolio.ai_provider || 'gemini').toLowerCase()
+  const activeAiProvider: AiProvider = activeProvider === 'xai' ? 'xai' : 'gemini'
   if (xaiUsd !== null && activeProvider === 'xai') {
     totalBalanceSublines.push({
       text: `xAI prepaid $${xaiUsd.toFixed(2)}`,
@@ -347,6 +353,15 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
           value={portfolio.positions}
           icon={<CircleDollarSign className="text-purple-500" />}
           color="text-white"
+          footer={
+            <div
+              className="flex items-center gap-1.5 min-w-0"
+              title={`Active analyzer: ${aiProviderDisplayName(activeAiProvider)}`}
+            >
+              <span className="text-[10px] sm:text-[11px] text-white/85 shrink-0">Current AI Analyzer:</span>
+              <AiProviderLogo provider={activeAiProvider} className="h-6 w-6" />
+            </div>
+          }
         />
       </div>
 
