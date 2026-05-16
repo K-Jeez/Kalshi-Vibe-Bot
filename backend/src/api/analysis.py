@@ -14,6 +14,7 @@ from src.app_state import app_state
 from src.config import settings
 from src.database.models import DecisionLog, get_db, get_paper_cash_balance, get_vault_balance
 from src.logger import logger
+from src.analysis_payload import enrich_analysis_ai_provider
 from src.reconcile.open_positions import normalize_market_id
 
 router = APIRouter(tags=["analysis"])
@@ -106,6 +107,8 @@ def serialize_decision_log_to_analysis(log: DecisionLog) -> dict:
     }
     if action_taken is not None:
         row["action_taken"] = action_taken
+
+    enrich_analysis_ai_provider(row)
 
     sy = getattr(log, "snapshot_yes_price", None)
     sn = getattr(log, "snapshot_no_price", None)
@@ -305,6 +308,7 @@ async def analyze_market(
         )
         decision["trade_mode"] = settings.trading_mode
         _strip_ephemeral_analysis_fields(decision)
+        enrich_analysis_ai_provider(decision)
         await broadcast_update({"type": "analysis", "data": decision})
         return decision
     except Exception as e:

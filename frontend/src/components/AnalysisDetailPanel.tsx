@@ -3,7 +3,14 @@ import {
   ChevronRight,
   BarChart2, Clock,
 } from 'lucide-react'
-import { DecisionAnalysis, AnalysisActionTaken, aiProviderDisplayName } from '../api'
+import {
+  AiProvider,
+  DecisionAnalysis,
+  AnalysisActionTaken,
+  aiProviderDisplayName,
+  analysisAiProviderId,
+} from '../api'
+import { AiProviderLogo } from './AiProviderLogo'
 import { formatUtcIsoLocal } from '../formatUtcLocal'
 
 function _actionLine(at: AnalysisActionTaken | undefined): string | undefined {
@@ -196,7 +203,11 @@ export const AnalysisMarketSnapshot: React.FC<{ a: DecisionAnalysis }> = ({ a })
 }
 
 /** Same AI analysis block as the Dashboard feed card (without outer list chrome). */
-export const AnalysisDetailBody: React.FC<{ a: DecisionAnalysis }> = ({ a }) => {
+export const AnalysisDetailBody: React.FC<{
+  a: DecisionAnalysis
+  /** When the saved blob lacks provider (legacy rows), use active Settings provider. */
+  fallbackProvider?: AiProvider | null
+}> = ({ a, fallbackProvider }) => {
   const [ctxOpen, setCtxOpen] = React.useState(false)
   const badgeDecision = effectiveAnalysisBadgeDecision(a)
   const badgeYes = badgeDecision === 'BUY_YES'
@@ -217,6 +228,8 @@ export const AnalysisDetailBody: React.FC<{ a: DecisionAnalysis }> = ({ a }) => 
       ? 'bg-red-500/20 text-red-400 border-red-500/30'
       : 'bg-brand-muted/15 text-white border-brand-muted/30'
 
+  const analysisProvider = analysisAiProviderId(a, fallbackProvider)
+
   const time = formatUtcIsoLocal(a.timestamp, '—', {
     month: 'numeric',
     day: 'numeric',
@@ -231,15 +244,18 @@ export const AnalysisDetailBody: React.FC<{ a: DecisionAnalysis }> = ({ a }) => 
           <p className="text-sm font-medium text-white leading-snug">{a.market_title}</p>
           <AnalysisMarketSnapshot a={a} />
         </div>
-        <span className={`shrink-0 px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
-          {formatDecisionBadge(badgeDecision)}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          {analysisProvider ? <AiProviderLogo provider={analysisProvider} className="h-11 w-11" /> : null}
+          <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
+            {formatDecisionBadge(badgeDecision)}
+          </span>
+        </div>
       </div>
 
       {a.escalated_to_xai && (
         <div className="mb-2 rounded-lg border border-brand-muted/30 bg-primary/35 p-3 space-y-2">
           <p className="text-[10px] text-sky-300/90 font-medium">
-            Analyzed by {aiProviderDisplayName(a.xai_analysis?.provider ?? a.ai_analysis?.provider)}
+            Analyzed by {aiProviderDisplayName(analysisProvider ?? a.xai_analysis?.provider ?? a.ai_analysis?.provider)}
             {a.xai_analysis?.model ? (
               <span className="text-white/50 font-normal"> · {a.xai_analysis.model}</span>
             ) : null}

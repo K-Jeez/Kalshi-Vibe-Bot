@@ -272,6 +272,8 @@ class DecisionEngine:
 
         xai_analysis = {
             **{k: v for k, v in xai_raw.items() if k not in ("provider", "model")},
+            "provider": str(xai_raw.get("provider") or self.ai_provider),
+            "model": str(xai_raw.get("model") or getattr(self._active_client(), "model", "")),
             "event_batch": True,
             "event_ticker": event_ticker,
             "event_leg_count": len(legs),

@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     kalshi_markets_page_delay_sec: float = 0.05
 
     # ── AI providers ─────────────────────────────────────────────────────────────
-    # Default model for market analysis: ``gemini`` (free tier) or ``xai`` (Grok).
+    # Default provider for market analysis: ``gemini`` or ``xai`` (Grok).
     default_ai_provider: Literal["gemini", "xai"] = DEFAULT_AI_PROVIDER
     ai_temperature: float = 0.1
 

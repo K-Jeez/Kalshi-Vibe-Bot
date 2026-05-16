@@ -189,6 +189,8 @@ export interface DecisionAnalysis {
   escalated_to_xai: boolean
   /** Same as ``escalated_to_xai`` (provider-neutral name). */
   escalated_to_ai?: boolean
+  /** Model provider for this row (``gemini`` | ``xai``); set by API when blob omits it. */
+  ai_provider?: AiProvider
   /** Legacy field: same as ``edge_pct`` when present. */
   edge: number
   /** LLM response blob (legacy key name; used for Gemini and xAI). */
@@ -224,6 +226,25 @@ export function aiProviderDisplayName(provider?: string | null): string {
   if (p === 'xai') return 'xAI'
   if (p === 'gemini') return 'Gemini'
   return 'AI'
+}
+
+/** Provider that produced a saved analysis row (top-level field, blob, or optional fallback). */
+export function analysisAiProviderId(
+  a: Pick<DecisionAnalysis, 'xai_analysis' | 'ai_analysis' | 'ai_provider' | 'escalated_to_xai' | 'escalated_to_ai'>,
+  fallback?: AiProvider | null,
+): AiProvider | null {
+  const top = String(a.ai_provider ?? '').toLowerCase()
+  if (top === 'xai' || top === 'gemini') return top
+  const blob = a.xai_analysis ?? a.ai_analysis
+  const p = String(blob?.provider ?? '').toLowerCase()
+  if (p === 'xai' || p === 'gemini') return p
+  const model = String(blob?.model ?? '').toLowerCase()
+  if (model.includes('gemini')) return 'gemini'
+  if (model.includes('grok')) return 'xai'
+  const escalated = Boolean(a.escalated_to_xai || a.escalated_to_ai)
+  if (escalated && fallback) return fallback
+  if (escalated) return 'gemini'
+  return null
 }
 
 export interface BotStateInfo {

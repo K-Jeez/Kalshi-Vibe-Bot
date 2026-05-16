@@ -219,8 +219,10 @@ export const Settings: React.FC = () => {
         <h2 className="text-base font-semibold text-white">AI market analysis</h2>
         <p className="text-xs text-white/90 max-w-3xl">
           Choose which model analyzes incoming markets. Changes apply immediately to the running bot (no restart).
-          Gemini uses Google&apos;s free-tier <code className="text-cyan-200/90">gemini-2.5-flash</code>; xAI uses Grok
-          (paid, requires <code className="text-cyan-200/90">XAI_API_KEY</code>).
+          Both providers bill your API account — set <code className="text-cyan-200/90">GEMINI_API_KEY</code> or{' '}
+          <code className="text-cyan-200/90">XAI_API_KEY</code> in <code className="text-cyan-200/90">backend/.env</code>.
+          When xAI is selected, optional Management API keys can show prepaid balance on the portfolio tile; Gemini has
+          no balance API in this app (check billing in Google AI Studio).
         </p>
         {!cur ? (
           <p className="text-sm text-white">Loading…</p>
@@ -231,12 +233,12 @@ export const Settings: React.FC = () => {
                 {
                   id: 'gemini' as const,
                   label: 'Gemini (default)',
-                  hint: `Free tier · ${cur.gemini_model ?? 'gemini-2.5-flash'}`,
+                  hint: `${cur.gemini_model ?? 'gemini-2.5-flash'} · GEMINI_API_KEY`,
                 },
                 {
                   id: 'xai' as const,
                   label: 'xAI (Grok)',
-                  hint: `Paid · ${cur.xai_model ?? 'grok-3'} · XAI_API_KEY`,
+                  hint: `${cur.xai_model ?? 'grok-3'} · XAI_API_KEY`,
                 },
               ] as const
             ).map((opt) => {

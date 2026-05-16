@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { Activity } from 'lucide-react'
 import { AnalysisDetailBody } from '../components/AnalysisDetailPanel'
-import { apiClient, BotStateInfo, DecisionAnalysis, AnalysesStats } from '../api'
+import { apiClient, AiProvider, BotStateInfo, DecisionAnalysis, AnalysesStats } from '../api'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 export const AIAnalysis: React.FC = () => {
@@ -10,6 +10,7 @@ export const AIAnalysis: React.FC = () => {
   const [analysisStats, setAnalysisStats] = useState<AnalysesStats | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const [tradingMode, setTradingMode] = useState<'paper' | 'live'>('paper')
+  const [activeAiProvider, setActiveAiProvider] = useState<AiProvider>('gemini')
   const tradingModeRef = useRef(tradingMode)
   tradingModeRef.current = tradingMode
 
@@ -44,12 +45,16 @@ export const AIAnalysis: React.FC = () => {
 
   const loadAnalyses = useCallback(async () => {
     try {
-      const [rows, stats] = await Promise.all([
+      const [rows, stats, tuning] = await Promise.all([
         apiClient.getAnalyses(50),
         apiClient.getAnalysesStats(168),
+        apiClient.getTuningState().catch(() => null),
       ])
       setAnalyses(dedupeAnalyses(rows).slice(0, 30))
       setAnalysisStats(stats)
+      if (tuning?.ai_provider === 'xai' || tuning?.ai_provider === 'gemini') {
+        setActiveAiProvider(tuning.ai_provider)
+      }
     } catch {
       /* ignore */
     }
@@ -150,7 +155,11 @@ export const AIAnalysis: React.FC = () => {
               </div>
             ) : (
               analyses.map((a) => (
-                <AnalysisDetailBody key={`${a.market_id}-${a.timestamp}`} a={a} />
+                <AnalysisDetailBody
+                  key={`${a.market_id}-${a.timestamp}`}
+                  a={a}
+                  fallbackProvider={activeAiProvider}
+                />
               ))
             )}
           </div>

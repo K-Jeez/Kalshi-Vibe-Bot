@@ -72,7 +72,7 @@ The **Settings** UI persists **`tuning_state`** per paper/live: **AI provider** 
 | `KALSHI_PRIVATE_KEY_PATH` | `./kalshi_private_key.pem` | RSA PEM (resolved under `backend/`) |
 | `KALSHI_BASE_URL` | `https://api.elections.kalshi.com` | REST base |
 | `DEFAULT_AI_PROVIDER` | `gemini` | Default provider: `gemini` or `xai` (overridable in Settings) |
-| `GEMINI_API_KEY` | _(empty)_ | Required when using Gemini |
+| `GEMINI_API_KEY` | _(empty)_ | Required when using Gemini (Google AI prepaid billing; no balance tile in this app) |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model id |
 | `AI_TEMPERATURE` | `0.1` | Sampling temperature (Gemini and xAI) |
 | `XAI_API_KEY` | _(empty)_ | Required when using xAI |
@@ -213,7 +213,7 @@ UI: http://localhost:3000 — API http://localhost:8000 (`/docs` for OpenAPI).
 | `ModuleNotFoundError` | Activate venv |
 | Empty UI / no analyses | Backend up? Keys? Bot on **Play**? |
 | AI analysis failures | Provider key in `.env` (`GEMINI_API_KEY` or `XAI_API_KEY`); check Settings provider; Gemini: ensure `thinkingBudget` not starving JSON (handled in code) |
-| xAI prepaid warnings | Only when provider is **xAI**; add `XAI_TEAM_ID` + `XAI_MANAGEMENT_API_KEY` or switch to Gemini in Settings |
+| xAI prepaid warnings | Only when provider is **xAI**; add `XAI_TEAM_ID` + `XAI_MANAGEMENT_API_KEY`. **Gemini** has no prepaid-balance API here — monitor billing in [Google AI Studio](https://aistudio.google.com/) |
 | SQLAlchemy / httpx errors on new Python | `pip install -r backend/requirements.txt` |
 | Port 3000 busy | Vite tries 3001, 3002, … |
 | Port 8000 busy | Set `PORT` in `.env` |

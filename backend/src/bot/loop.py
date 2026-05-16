@@ -15,6 +15,7 @@ from src.clients.kalshi_client import (
     open_position_estimated_mark_dollars,
     open_position_mark_dollars,
 )
+from src.analysis_payload import enrich_analysis_ai_provider
 from src.app_state import kalshi_ui_reconcile_lock
 from src.config import (
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
@@ -1912,6 +1913,7 @@ async def scan_and_trade(
             if isinstance(_xa, dict):
                 for _k in ("risk_level", "target_price"):
                     _xa.pop(_k, None)
+            enrich_analysis_ai_provider(decision)
             await broadcast_fn({"type": "analysis", "data": decision})
 
             if executed_trade:
