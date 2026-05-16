@@ -245,7 +245,7 @@ export const AnalysisDetailBody: React.FC<{
           <AnalysisMarketSnapshot a={a} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {analysisProvider ? <AiProviderLogo provider={analysisProvider} className="h-11 w-11" /> : null}
+          {analysisProvider ? <AiProviderLogo provider={analysisProvider} className="h-9 w-9" /> : null}
           <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
             {formatDecisionBadge(badgeDecision)}
           </span>

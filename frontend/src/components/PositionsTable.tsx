@@ -1,6 +1,6 @@
 import React, { Fragment, useCallback, useEffect, useMemo, useReducer, useState } from 'react'
 import type { Position } from '../api'
-import { AiProvider, DecisionAnalysis, apiClient } from '../api'
+import { DecisionAnalysis, apiClient } from '../api'
 import { useDashboardDataCache } from '../context/DashboardDataCache'
 import { TrendingUp, TrendingDown, Loader2, ChevronDown, ChevronUp, Clock, ArrowUpDown } from 'lucide-react'
 import { AnalysisDetailBody, analysisForPositionRow } from './AnalysisDetailPanel'
@@ -159,8 +159,6 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
     setPositionAnalysesByMarketId,
   } = useDashboardDataCache()
   const stopLossAutoSellsEnabled = portfolio?.stop_loss_selling_enabled === true
-  const activeAiProvider: AiProvider =
-    portfolio?.ai_provider === 'xai' || portfolio?.ai_provider === 'gemini' ? portfolio.ai_provider : 'gemini'
   const loading = cachedPositions === null
   const [closing, setClosing] = useState<string | null>(null)
   /** After a failed manual sell, show RETRY instead of SELL until success or row disappears. */
@@ -696,7 +694,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                     <tr className="bg-black/35">
                       <td colSpan={11} className="border-t border-brand-muted/30 px-5 py-4 align-top">
                         {analysis ? (
-                          <AnalysisDetailBody a={analysis} fallbackProvider={activeAiProvider} />
+                          <AnalysisDetailBody a={analysis} />
                         ) : (
                           <p className="text-sm text-white">
                             No saved AI analysis for this ticker in your decision log yet — usually because this leg never went

@@ -105,14 +105,8 @@ export const ClosedPositionsTable: React.FC<ClosedPositionsTableProps> = ({
   expandedDetailKey,
   onToggleDetail,
 }) => {
-  const {
-    closedPositions: cachedClosed,
-    setClosedPositions: setCachedClosed,
-    dashboardRefreshNonce,
-    portfolio,
-  } = useDashboardDataCache()
-  const activeAiProvider =
-    portfolio?.ai_provider === 'xai' || portfolio?.ai_provider === 'gemini' ? portfolio.ai_provider : 'gemini'
+  const { closedPositions: cachedClosed, setClosedPositions: setCachedClosed, dashboardRefreshNonce } =
+    useDashboardDataCache()
   const { data: wsData } = useWebSocket('')
   const [loading, setLoading] = useState(() => cachedClosed === null)
   const [sort, dispatchSort] = useReducer(closedSortReducer, CLOSED_SORT_INITIAL)
@@ -490,7 +484,7 @@ export const ClosedPositionsTable: React.FC<ClosedPositionsTableProps> = ({
                     <tr className="bg-black/35">
                       <td colSpan={10} className="border-t border-brand-muted/30 px-5 py-4 align-top">
                         {analysis ? (
-                          <AnalysisDetailBody a={analysis} fallbackProvider={activeAiProvider} />
+                          <AnalysisDetailBody a={analysis} />
                         ) : (
                           <p className="text-sm text-white">
                             No matching saved decision log for this ticker (older bots logged raw Kalshi ids that did not match

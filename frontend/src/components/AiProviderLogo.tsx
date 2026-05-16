@@ -10,14 +10,25 @@ type Props = {
 }
 
 /** Brand mark for the model that ran an analysis (Gemini or xAI). */
-export const AiProviderLogo: React.FC<Props> = ({ provider, className = 'h-10 w-10' }) => {
-  const isGemini = provider === 'gemini'
+export const AiProviderLogo: React.FC<Props> = ({ provider, className = 'h-9 w-9' }) => {
+  const label = aiProviderDisplayName(provider)
+  const blend = 'mix-blend-screen'
+  if (provider === 'gemini') {
+    return (
+      <img
+        src={geminiLogo}
+        alt=""
+        title={label}
+        className={`shrink-0 object-contain ${blend} ${className}`}
+      />
+    )
+  }
   return (
     <img
-      src={isGemini ? geminiLogo : xaiLogo}
+      src={xaiLogo}
       alt=""
-      title={aiProviderDisplayName(provider)}
-      className={`shrink-0 object-contain ${isGemini ? 'mix-blend-screen' : ''} ${className}`}
+      title={label}
+      className={`shrink-0 object-contain ${blend} ${className}`}
     />
   )
 }

@@ -2,7 +2,6 @@
 
 from typing import Any, Dict
 
-from src.ai_provider import normalize_ai_provider
 from src.config import settings
 
 
@@ -18,17 +17,20 @@ def enrich_analysis_ai_provider(payload: Dict[str, Any]) -> None:
         payload["xai_analysis"] = xa
 
     prov = str(payload.get("ai_provider") or xa.get("provider") or "").lower().strip()
+    model_raw = str(xa.get("model") or "").strip()
+    model = model_raw.lower()
     if prov not in ("gemini", "xai"):
-        model = str(xa.get("model") or "").lower()
         if "gemini" in model:
             prov = "gemini"
         elif "grok" in model:
             prov = "xai"
         else:
-            prov = normalize_ai_provider(settings.default_ai_provider)
+            # Legacy rows (pre-provider field): ``escalated_to_xai`` meant Grok/xAI only.
+            # Do not use ``default_ai_provider`` — that mislabels old trades after Gemini was added.
+            prov = "xai"
 
     xa["provider"] = prov
-    if not str(xa.get("model") or "").strip():
+    if not model_raw:
         xa["model"] = (
             getattr(settings, "gemini_model", "gemini-2.5-flash")
             if prov == "gemini"

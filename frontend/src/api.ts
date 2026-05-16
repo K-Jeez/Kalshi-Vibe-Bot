@@ -241,9 +241,9 @@ export function analysisAiProviderId(
   const model = String(blob?.model ?? '').toLowerCase()
   if (model.includes('gemini')) return 'gemini'
   if (model.includes('grok')) return 'xai'
-  const escalated = Boolean(a.escalated_to_xai || a.escalated_to_ai)
-  if (escalated && fallback) return fallback
-  if (escalated) return 'gemini'
+  // Legacy rows without provider/model: escalated_to_xai meant Grok only (pre-Gemini).
+  if (a.escalated_to_xai || a.escalated_to_ai) return 'xai'
+  if (fallback) return fallback
   return null
 }
 
