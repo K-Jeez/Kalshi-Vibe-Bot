@@ -63,16 +63,30 @@ class TestScanEligibility(unittest.TestCase):
         self.assertFalse(active)
 
     def test_xai_prepaid_below_one_blocks_when_known(self):
-        settings = type("S", (), {})()
+        settings = type("S", (), {"default_ai_provider": "xai"})()
         active, label = compute_order_search_scan_labels(
             "play",
             settings,
             100.0,
             total_portfolio_value_usd=500.0,
             xai_prepaid_balance_usd=0.5,
+            ai_provider="xai",
         )
         self.assertFalse(active)
         self.assertEqual(label, "Insufficient xAI balance")
+
+    def test_xai_prepaid_low_does_not_block_gemini(self):
+        settings = type("S", (), {"default_ai_provider": "gemini"})()
+        active, label = compute_order_search_scan_labels(
+            "play",
+            settings,
+            100.0,
+            total_portfolio_value_usd=500.0,
+            xai_prepaid_balance_usd=0.5,
+            ai_provider="gemini",
+        )
+        self.assertTrue(active)
+        self.assertIn("searching for new positions", label)
 
     def test_xai_prepaid_unknown_does_not_block(self):
         settings = type("S", (), {})()

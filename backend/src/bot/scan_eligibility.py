@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from src.api.common import ensure_bot_state
 from src.app_state import app_state
+from src.ai_provider import normalize_ai_provider
 from src.config import DEFAULT_MAX_OPEN_POSITIONS
 
 # Do not fetch markets or call xAI when uninvested deployable cash is below this (USD).
@@ -26,6 +27,7 @@ def compute_order_search_scan_labels(
     total_portfolio_value_usd: float,
     xai_prepaid_balance_usd: Optional[float] = None,
     open_position_count: int = 0,
+    ai_provider: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Return (active_scanning, concise_ui_label)."""
     st = (bot_state or "stop").strip().lower()
@@ -34,7 +36,10 @@ def compute_order_search_scan_labels(
     if st == "pause":
         return False, "Paused — no new scans"
 
-    if xai_prepaid_balance_usd is not None:
+    prov = normalize_ai_provider(
+        ai_provider if ai_provider is not None else getattr(settings, "default_ai_provider", "gemini")
+    )
+    if prov == "xai" and xai_prepaid_balance_usd is not None:
         try:
             xai_bal = float(xai_prepaid_balance_usd)
         except (TypeError, ValueError):
@@ -79,6 +84,7 @@ def refresh_order_search_scan_ui(
     total_portfolio_value_usd: float,
     xai_prepaid_balance_usd: Optional[float] = None,
     open_position_count: int = 0,
+    ai_provider: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Persist latest scan UX on ``app_state`` for ``GET /portfolio`` and logs."""
     row = ensure_bot_state(db)
@@ -90,6 +96,7 @@ def refresh_order_search_scan_ui(
         total_portfolio_value_usd=total_portfolio_value_usd,
         xai_prepaid_balance_usd=xai_prepaid_balance_usd,
         open_position_count=open_position_count,
+        ai_provider=ai_provider,
     )
     app_state.order_search_active = active
     app_state.order_search_label = label

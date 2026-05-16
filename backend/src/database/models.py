@@ -22,6 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from src.config import (
+    DEFAULT_AI_PROVIDER,
     DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
@@ -217,6 +218,7 @@ class TuningState(Base):
     min_edge_to_buy_pct = Column(Integer, default=DEFAULT_MIN_EDGE_TO_BUY_PCT)
     min_ai_win_prob_buy_side_pct = Column(Integer, default=DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
     max_open_positions = Column(Integer, default=DEFAULT_MAX_OPEN_POSITIONS)
+    ai_provider = Column(String, default=DEFAULT_AI_PROVIDER)  # "gemini" | "xai"
 
     updated_at = Column(DateTime(timezone=True), default=utc_now)
 
@@ -470,6 +472,7 @@ def _run_migrations(engine):
         ("tuning_state", "min_edge_to_buy_pct", f"INTEGER DEFAULT {DEFAULT_MIN_EDGE_TO_BUY_PCT}"),
         ("tuning_state", "min_ai_win_prob_buy_side_pct", f"INTEGER DEFAULT {DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT}"),
         ("tuning_state", "max_open_positions", f"INTEGER DEFAULT {DEFAULT_MAX_OPEN_POSITIONS}"),
+        ("tuning_state", "ai_provider", f"TEXT DEFAULT '{DEFAULT_AI_PROVIDER}'"),
         ("decision_logs", "ai_probability_yes_pct", "INTEGER"),
         ("decision_logs", "market_implied_probability_pct", "INTEGER"),
         ("decision_logs", "kelly_contracts", "INTEGER"),
@@ -510,6 +513,7 @@ def _ensure_tuning_rows_per_mode(db) -> None:
                 getattr(settings, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
             ),
             max_open_positions=int(getattr(settings, "bot_max_open_positions", DEFAULT_MAX_OPEN_POSITIONS)),
+            ai_provider=str(getattr(settings, "default_ai_provider", DEFAULT_AI_PROVIDER)),
         )
         db.add(row)
     db.commit()
@@ -560,6 +564,7 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
                 getattr(settings, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
             ),
             max_open_positions=int(getattr(settings, "bot_max_open_positions", DEFAULT_MAX_OPEN_POSITIONS)),
+            ai_provider=str(getattr(settings, "default_ai_provider", DEFAULT_AI_PROVIDER)),
         )
         db.add(row)
         db.commit()

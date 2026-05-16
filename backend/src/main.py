@@ -19,7 +19,7 @@ from src.api.logs_debug import router as logs_debug_router
 from src.api.markets import router as markets_router
 from src.api.portfolio import router as portfolio_router
 from src.api.trades import router as trades_router
-from src.api.tuning import router as tuning_router
+from src.api.tuning import router as tuning_router, sync_runtime_from_db
 from src.api.websocket_route import router as websocket_router
 from src.app_state import app_state
 from src.bot.loop import run_bot_loop
@@ -48,13 +48,17 @@ async def lifespan(app: FastAPI):
         # Always start stopped after a process restart so live trading cannot resume unattended.
         row.state = "stop"
         _db.commit()
+        sync_runtime_from_db(_db)
     finally:
         _db.close()
 
     app_state.decision_engine = DecisionEngine(
         xai_api_key=settings.xai_api_key,
         xai_model=settings.xai_model,
+        gemini_api_key=settings.gemini_api_key,
+        gemini_model=settings.gemini_model,
         temperature=settings.ai_temperature,
+        ai_provider=settings.default_ai_provider,
     )
 
     app_state.kalshi_client = KalshiClient(
@@ -76,8 +80,10 @@ async def lifespan(app: FastAPI):
 
     if not (getattr(settings, "kalshi_api_key", None) or "").strip():
         logger.warning("KALSHI_API_KEY is empty — Kalshi API calls will fail until set in backend/.env")
-    if not (getattr(settings, "xai_api_key", None) or "").strip():
-        logger.warning("XAI_API_KEY is empty — model escalation will fail until set in backend/.env")
+    if settings.default_ai_provider == "xai" and not (getattr(settings, "xai_api_key", None) or "").strip():
+        logger.warning("XAI_API_KEY is empty — xAI analysis will fail until set in backend/.env")
+    if settings.default_ai_provider == "gemini" and not (getattr(settings, "gemini_api_key", None) or "").strip():
+        logger.warning("GEMINI_API_KEY is empty — Gemini analysis will fail until set in backend/.env")
 
     logger.info(
         "Application ready — mode=%s scan_interval=%ds min_edge=%d%% stop_loss_drawdown=%.0f%%",
@@ -103,9 +109,11 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
     try:
+        from src.clients.gemini_client import aclose_shared_gemini_http
         from src.clients.xai_client import aclose_shared_xai_http
 
         await aclose_shared_xai_http()
+        await aclose_shared_gemini_http()
     except Exception:
         pass
     logger.info("Shutting down.")

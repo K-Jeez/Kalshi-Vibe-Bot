@@ -14,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MIN_EDGE_TO_BUY_PCT = 3
 DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
 DEFAULT_MAX_OPEN_POSITIONS = 30
+DEFAULT_AI_PROVIDER = "gemini"
 
 
 class Settings(BaseSettings):
@@ -34,14 +35,22 @@ class Settings(BaseSettings):
     # Pause between ``GET /markets`` cursor pages (rate-limit cushion). 0 = no pause.
     kalshi_markets_page_delay_sec: float = 0.05
 
+    # ── AI providers ─────────────────────────────────────────────────────────────
+    # Default model for market analysis: ``gemini`` (free tier) or ``xai`` (Grok).
+    default_ai_provider: Literal["gemini", "xai"] = DEFAULT_AI_PROVIDER
+    ai_temperature: float = 0.1
+
     # ── xAI API ─────────────────────────────────────────────────────────────────
     xai_api_key: str = ""
     xai_model: str = "grok-3"
-    ai_temperature: float = 0.1
     # Optional UUID from xAI Console → Team → Settings (enables xAI prepaid tile on ``GET /portfolio``).
     xai_team_id: str = ""
     # Separate from ``XAI_API_KEY``: prepaid balance uses https://management-api.x.ai (see xAI Console → Management Keys).
     xai_management_api_key: str = ""
+
+    # ── Google Gemini API ───────────────────────────────────────────────────────
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
 
     # ── Trading configuration ────────────────────────────────────────────────────
     trading_mode: Literal["paper", "live"] = "paper"
@@ -134,6 +143,8 @@ class Settings(BaseSettings):
         iv = int(self.closed_resolution_refresh_interval_sec)
         self.closed_resolution_refresh_interval_sec = max(0, min(86400, iv))
         self.closed_resolution_refresh_batch = max(1, min(50, int(self.closed_resolution_refresh_batch)))
+        prov = str(self.default_ai_provider or DEFAULT_AI_PROVIDER).strip().lower()
+        self.default_ai_provider = "xai" if prov == "xai" else "gemini"
         return self
 
 

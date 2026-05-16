@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { RotateCcw, RefreshCw, Save } from 'lucide-react'
-import { apiClient, HealthResponse, TuningSnapshot } from '../api'
+import { apiClient, AiProvider, HealthResponse, TuningSnapshot } from '../api'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 export const Settings: React.FC = () => {
@@ -12,6 +12,7 @@ export const Settings: React.FC = () => {
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [resettingConfigDefaults, setResettingConfigDefaults] = useState(false)
   const [toggleSavingStopLoss, setToggleSavingStopLoss] = useState(false)
+  const [savingAiProvider, setSavingAiProvider] = useState(false)
   const [resettingHistory, setResettingHistory] = useState(false)
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [kalshiReconciling, setKalshiReconciling] = useState(false)
@@ -109,6 +110,20 @@ export const Settings: React.FC = () => {
     }
   }
 
+  const persistAiProvider = async (provider: AiProvider) => {
+    if (!cur || cur.ai_provider === provider) return
+    setSavingAiProvider(true)
+    try {
+      const next = await apiClient.setAiProvider(provider)
+      setCur(next)
+    } catch (e) {
+      console.error('AI provider update error:', e)
+      alert('Failed to update AI provider.')
+    } finally {
+      setSavingAiProvider(false)
+    }
+  }
+
   const persistStopLossToggle = async (enabled: boolean) => {
     if (!cur) return
     setToggleSavingStopLoss(true)
@@ -198,6 +213,45 @@ export const Settings: React.FC = () => {
             {kalshiReconciling ? 'Reconciling…' : 'Reconcile now'}
           </button>
         </div>
+      </section>
+
+      <section className="ui-surface-sm p-5 space-y-4">
+        <h2 className="text-base font-semibold text-white">AI market analysis</h2>
+        <p className="text-xs text-white/90 max-w-3xl">
+          Choose which model analyzes incoming markets. Changes apply immediately to the running bot (no restart).
+          Gemini uses Google&apos;s free-tier <code className="text-cyan-200/90">gemini-2.5-flash</code>; xAI uses Grok
+          (paid, requires <code className="text-cyan-200/90">XAI_API_KEY</code>).
+        </p>
+        {!cur ? (
+          <p className="text-sm text-white">Loading…</p>
+        ) : (
+          <div className="flex flex-wrap gap-3">
+            {(
+              [
+                { id: 'gemini' as const, label: 'Gemini (default)', hint: 'Free tier · gemini-2.5-flash' },
+                { id: 'xai' as const, label: 'xAI (Grok)', hint: 'Paid · uses XAI_API_KEY' },
+              ] as const
+            ).map((opt) => {
+              const selected = (cur.ai_provider ?? 'gemini') === opt.id
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  disabled={savingAiProvider}
+                  onClick={() => void persistAiProvider(opt.id)}
+                  className={`text-left px-4 py-3 rounded-lg border transition min-w-[10rem] ${
+                    selected
+                      ? 'bg-sky-600/20 text-sky-100 border-sky-500/45 ring-1 ring-sky-500/30'
+                      : 'bg-primary/40 text-white border-brand-muted/30 hover:border-brand-muted/50'
+                  } ${savingAiProvider ? 'opacity-60' : ''}`}
+                >
+                  <p className="text-sm font-semibold">{opt.label}</p>
+                  <p className="text-[11px] text-white/65 mt-0.5">{opt.hint}</p>
+                </button>
+              )
+            })}
+          </div>
+        )}
       </section>
 
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">

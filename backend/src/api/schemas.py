@@ -13,6 +13,10 @@ class StopLossSellingRequest(BaseModel):
     enabled: bool
 
 
+class AiProviderRequest(BaseModel):
+    provider: str
+
+
 class StrategyKnobsRequest(BaseModel):
     """Minimum edge, stop-loss drawdown fraction, xAI buy-side win-prob floor, and/or max open positions (at least one required)."""
 

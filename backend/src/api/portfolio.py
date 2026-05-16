@@ -689,6 +689,7 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
         total_portfolio_value_usd=float(total_value_out),
         xai_prepaid_balance_usd=xai_prepaid,
         open_position_count=npos,
+        ai_provider=getattr(settings, "default_ai_provider", "gemini"),
     )
 
     payload: Dict[str, Any] = {

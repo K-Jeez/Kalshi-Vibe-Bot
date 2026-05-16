@@ -49,6 +49,14 @@ export function formatDecisionBadge(d: DecisionAnalysis['decision']): string {
   return d
 }
 
+/** Human label for which AI provider performed this analysis (stored in ``xai_analysis.provider``). */
+export function analysisProviderLabel(a: DecisionAnalysis): string {
+  const p = String(a.xai_analysis?.provider || '').toLowerCase()
+  if (p === 'xai') return 'xAI'
+  if (p === 'gemini') return 'Gemini'
+  return 'AI'
+}
+
 /**
  * Upper-right badge: actual outcome (did we trade?), not only xAI's directional signal.
  * When xAI says BUY_YES but execution skips (edge gate, liquidity, etc.), still show SKIP.
@@ -238,8 +246,14 @@ export const AnalysisDetailBody: React.FC<{ a: DecisionAnalysis }> = ({ a }) => 
 
       {a.escalated_to_xai && (
         <div className="mb-2 rounded-lg border border-brand-muted/30 bg-primary/35 p-3 space-y-2">
+          <p className="text-[10px] text-sky-300/90 font-medium">
+            Analyzed by {analysisProviderLabel(a)}
+            {a.xai_analysis?.model ? (
+              <span className="text-white/50 font-normal"> · {a.xai_analysis.model}</span>
+            ) : null}
+          </p>
           <p className="text-[10px] text-white/60 leading-relaxed">
-            <span className="text-white/75 font-semibold">AI P(YES):</span> Grok&apos;s chance this contract{' '}
+            <span className="text-white/75 font-semibold">AI P(YES):</span> Model&apos;s chance this contract{' '}
             <strong className="text-white/90">settles YES</strong> (one YES figure).
             <span className="mx-1.5 text-white/35">·</span>
             <span className="text-white/75 font-semibold">AI P(side):</span> P for the recommended buy side—YES pick ={' '}
@@ -269,7 +283,7 @@ export const AnalysisDetailBody: React.FC<{ a: DecisionAnalysis }> = ({ a }) => 
             <div>
               <p
                 className="text-[10px] uppercase tracking-wide text-white/65"
-                title="Grok’s estimated probability (0–100%) that this contract resolves YES at settlement."
+                title="Model’s estimated probability (0–100%) that this contract resolves YES at settlement."
               >
                 AI P(YES)
               </p>

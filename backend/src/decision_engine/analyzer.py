@@ -1,8 +1,10 @@
-"""xAI decision engine: outcome direction + calibrated P(YES), with server-side edge and Kelly."""
+"""AI decision engine: outcome direction + calibrated P(YES), with server-side edge and Kelly."""
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
+from src.ai_provider import ai_provider_display_name, normalize_ai_provider
+from src.clients.gemini_client import GeminiClient
 from src.clients.kalshi_client import buy_side_liquidity_skip_summary
 from src.clients.xai_client import XAIClient
 from src.decision_engine.strategy_math import (
@@ -89,11 +91,30 @@ def _enrich_strategy_fields(
 
 
 class DecisionEngine:
-    """xAI-powered decision engine with server-side edge and full Kelly sizing."""
+    """Gemini or xAI decision engine with server-side edge and full Kelly sizing."""
 
-    def __init__(self, xai_api_key: str, xai_model: str = "grok-3", temperature: float = 0.1):
+    def __init__(
+        self,
+        *,
+        xai_api_key: str,
+        xai_model: str = "grok-3",
+        gemini_api_key: str,
+        gemini_model: str = "gemini-2.5-flash",
+        temperature: float = 0.1,
+        ai_provider: str = "gemini",
+    ):
         self.xai = XAIClient(api_key=xai_api_key, model=xai_model)
+        self.gemini = GeminiClient(api_key=gemini_api_key, model=gemini_model)
         self.temperature = float(temperature)
+        self.ai_provider = normalize_ai_provider(ai_provider)
+
+    def set_ai_provider(self, provider: str) -> None:
+        self.ai_provider = normalize_ai_provider(provider)
+
+    def _active_client(self) -> Union[XAIClient, GeminiClient]:
+        if self.ai_provider == "xai":
+            return self.xai
+        return self.gemini
 
     async def analyze_market(
         self,
@@ -118,7 +139,8 @@ class DecisionEngine:
             "escalated_to_xai": True,
         }
 
-        xai_result = await self.xai.analyze_market(
+        provider_label = ai_provider_display_name(self.ai_provider)
+        ai_result = await self._active_client().analyze_market(
             market_title=market_title,
             market_description=market_description,
             current_prices=current_prices,
@@ -128,8 +150,8 @@ class DecisionEngine:
             temperature=self.temperature,
         )
 
-        if "error" in xai_result:
-            _logger.warning("xAI error for %s: %s", market_id, xai_result.get("error"))
+        if "error" in ai_result:
+            _logger.warning("%s error for %s: %s", provider_label, market_id, ai_result.get("error"))
             return {
                 **base,
                 "decision": "SKIP",
@@ -142,19 +164,19 @@ class DecisionEngine:
                 "confidence": 0.5,
                 "yes_confidence": int(yes_price * 100),
                 "no_confidence": int(no_price * 100),
-                "reasoning": str(xai_result.get("reasoning", "")),
+                "reasoning": str(ai_result.get("reasoning", "")),
                 "real_time_context": "",
                 "key_factors": [],
                 "evidence": [],
-                "xai_analysis": xai_result,
-                "action_summary": "Skipped — xAI unavailable",
+                "xai_analysis": ai_result,
+                "action_summary": f"Skipped — {provider_label} unavailable",
             }
 
-        direction = str(xai_result.get("direction", "SKIP") or "SKIP").strip().upper()
+        direction = str(ai_result.get("direction", "SKIP") or "SKIP").strip().upper()
         if direction not in ("YES", "NO", "SKIP"):
             direction = "SKIP"
 
-        ai_yes = _parse_ai_yes_pct(xai_result)
+        ai_yes = _parse_ai_yes_pct(ai_result)
         strat = _enrich_strategy_fields(
             direction=direction,
             ai_yes_pct=ai_yes,
@@ -168,7 +190,7 @@ class DecisionEngine:
         elif direction == "NO":
             decision = "BUY_NO"
 
-        reasoning_single = str(xai_result.get("reasoning", ""))
+        reasoning_single = str(ai_result.get("reasoning", ""))
         ai_no = 100 - ai_yes
         side_label = "YES" if direction == "YES" else ("NO" if direction == "NO" else "—")
         ai_side_pct = ai_yes if direction == "YES" else (ai_no if direction == "NO" else 0)
@@ -192,10 +214,10 @@ class DecisionEngine:
             "yes_confidence": ai_yes,
             "no_confidence": ai_no,
             "reasoning": reasoning_single,
-            "real_time_context": str(xai_result.get("real_time_context", "")),
-            "key_factors": xai_result.get("key_factors", []) if isinstance(xai_result.get("key_factors", []), list) else [],
-            "evidence": xai_result.get("evidence", []) if isinstance(xai_result.get("evidence", []), list) else [],
-            "xai_analysis": xai_result,
+            "real_time_context": str(ai_result.get("real_time_context", "")),
+            "key_factors": ai_result.get("key_factors", []) if isinstance(ai_result.get("key_factors", []), list) else [],
+            "evidence": ai_result.get("evidence", []) if isinstance(ai_result.get("evidence", []), list) else [],
+            "xai_analysis": ai_result,
             "action_summary": action_summary,
             "ai_probability_for_side_pct": int(ai_side_pct),
         }
@@ -211,11 +233,12 @@ class DecisionEngine:
         max_spread: float = 0.15,
         deployable_balance: float = 0.0,
     ) -> Dict[str, Any]:
-        """Single xAI call over sibling markets; returns a decision payload for the **chosen** contract only."""
+        """Single AI call over sibling markets; returns a decision payload for the **chosen** contract only."""
         if not legs:
             raise ValueError("legs must be non-empty")
 
-        xai_raw = await self.xai.analyze_event_best_trade(
+        provider_label = ai_provider_display_name(self.ai_provider)
+        xai_raw = await self._active_client().analyze_event_best_trade(
             event_ticker=event_ticker,
             event_title=event_title,
             legs=legs,
@@ -260,7 +283,7 @@ class DecisionEngine:
         }
 
         if "error" in xai_raw:
-            _logger.warning("xAI event batch error for %s: %s", event_ticker, xai_raw.get("error"))
+            _logger.warning("%s event batch error for %s: %s", provider_label, event_ticker, xai_raw.get("error"))
             return {
                 **base,
                 "decision": "SKIP",
@@ -278,7 +301,7 @@ class DecisionEngine:
                 "key_factors": [],
                 "evidence": [],
                 "xai_analysis": xai_analysis,
-                "action_summary": "Skipped — xAI batch unavailable",
+                "action_summary": f"Skipped — {provider_label} batch unavailable",
             }
 
         direction = str(xai_raw.get("direction", "SKIP") or "SKIP").strip().upper()

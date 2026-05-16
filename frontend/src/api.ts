@@ -243,15 +243,19 @@ export interface LogEntry {
   message: string
 }
 
+export type AiProvider = 'gemini' | 'xai'
+
 export interface TuningSnapshot {
   stop_loss_drawdown_pct: number
   min_edge_to_buy_pct: number
   /** When false, the bot never auto-exits for stop-loss drawdown. */
   stop_loss_selling_enabled?: boolean
-  /** Minimum xAI win probability (0–100) on the purchased side; clamped >50% server-side. */
+  /** Minimum AI win probability (0–100) on the purchased side; clamped >50% server-side. */
   min_ai_win_prob_buy_side_pct?: number
-  /** Max open legs before new-entry market scan + xAI pauses. */
+  /** Max open legs before new-entry market scan + AI analysis pauses. */
   max_open_positions?: number
+  /** Active provider for market analysis: Gemini (default) or xAI (Grok). */
+  ai_provider?: AiProvider
   updated_at?: string | null
 }
 
@@ -476,6 +480,11 @@ export const apiClient = {
 
   resetTuningToConfigDefaults: async (): Promise<TuningSnapshot> => {
     const { data } = await client.post('/tuning/reset-to-config-defaults')
+    return data
+  },
+
+  setAiProvider: async (provider: AiProvider): Promise<TuningSnapshot> => {
+    const { data } = await client.post('/tuning/ai-provider', { provider })
     return data
   },
 

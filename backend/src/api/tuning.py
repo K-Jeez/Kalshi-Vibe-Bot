@@ -6,8 +6,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from src.api.broadcast import broadcast_update
-from src.api.schemas import StopLossSellingRequest, StrategyKnobsRequest
+from src.ai_provider import normalize_ai_provider
+from src.api.schemas import AiProviderRequest, StopLossSellingRequest, StrategyKnobsRequest
+from src.app_state import app_state
 from src.config import (
+    DEFAULT_AI_PROVIDER,
     DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
@@ -35,6 +38,13 @@ def _coalesce_int(row, attr: str, default: int) -> int:
     return default if v is None else int(v)
 
 
+def _coalesce_ai_provider(row) -> str:
+    raw = getattr(row, "ai_provider", None)
+    if raw is not None and str(raw).strip():
+        return normalize_ai_provider(raw)
+    return normalize_ai_provider(getattr(app_settings, "default_ai_provider", DEFAULT_AI_PROVIDER))
+
+
 def tuning_state_payload(row) -> dict:
     return {
         "stop_loss_drawdown_pct": round(float(getattr(row, "stop_loss_drawdown_pct", 0.80)), 4),
@@ -44,6 +54,7 @@ def tuning_state_payload(row) -> dict:
             row, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
         ),
         "max_open_positions": _coalesce_int(row, "max_open_positions", DEFAULT_MAX_OPEN_POSITIONS),
+        "ai_provider": _coalesce_ai_provider(row),
         "updated_at": utc_iso_z(row.updated_at),
     }
 
@@ -68,6 +79,11 @@ def _sync_runtime_from_row(row) -> None:
     app_settings.bot_max_open_positions = _coalesce_int(
         row, "max_open_positions", DEFAULT_MAX_OPEN_POSITIONS
     )
+    prov = _coalesce_ai_provider(row)
+    app_settings.default_ai_provider = prov
+    de = app_state.decision_engine
+    if de is not None:
+        de.set_ai_provider(prov)
 
 
 def apply_config_defaults_to_tuning_state(db: Session) -> dict:
@@ -79,6 +95,7 @@ def apply_config_defaults_to_tuning_state(db: Session) -> dict:
     row.stop_loss_selling_enabled = bool(fresh.stop_loss_selling_enabled)
     row.min_ai_win_prob_buy_side_pct = int(fresh.min_ai_win_prob_buy_side_pct)
     row.max_open_positions = int(fresh.bot_max_open_positions)
+    row.ai_provider = normalize_ai_provider(fresh.default_ai_provider)
 
     row.updated_at = utc_now()
     db.add(row)
@@ -109,6 +126,20 @@ async def set_strategy_knobs(req: StrategyKnobsRequest, db: Session = Depends(ge
         row.min_ai_win_prob_buy_side_pct = max(51, min(99, v))
     if req.max_open_positions is not None:
         row.max_open_positions = max(1, min(500, int(req.max_open_positions)))
+    row.updated_at = utc_now()
+    db.add(row)
+    db.commit()
+    _sync_runtime_from_row(row)
+    payload = tuning_state_payload(row)
+    await broadcast_update({"type": "tuning_update", "data": payload})
+    return payload
+
+
+@router.post("/tuning/ai-provider")
+async def set_ai_provider(req: AiProviderRequest, db: Session = Depends(get_db)):
+    """Switch market-analysis provider (Gemini vs xAI); bot uses the new provider immediately."""
+    row = ensure_tuning_state(db)
+    row.ai_provider = normalize_ai_provider(req.provider)
     row.updated_at = utc_now()
     db.add(row)
     db.commit()

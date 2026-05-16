@@ -1023,6 +1023,7 @@ async def scan_and_trade(
             total_portfolio_value_usd=total_portfolio_value,
             xai_prepaid_balance_usd=xai_prepaid,
             open_position_count=num_open,
+            ai_provider=getattr(settings, "default_ai_provider", "gemini"),
         )
         if not active_scan:
             logger.info(
@@ -1220,6 +1221,7 @@ async def scan_and_trade(
                 total_portfolio_value_usd=total_portfolio_value,
                 xai_prepaid_balance_usd=xai_prepaid_now,
                 open_position_count=num_open,
+                ai_provider=getattr(settings, "default_ai_provider", "gemini"),
             )
             if not active_now:
                 logger.info(
