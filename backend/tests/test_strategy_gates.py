@@ -42,6 +42,18 @@ def test_autonomous_passes_sweet_spot():
     assert autonomous_buy_gate_failure(side="YES", ai_yes_pct=68, edge_pct=12, entry_price_dollars=0.48) is None
 
 
+def test_autonomous_passes_high_confidence_favorite():
+    """85% on NO at 73¢ (market favorite) should not be blocked by the global AI cap."""
+    assert (
+        autonomous_buy_gate_failure(side="NO", ai_yes_pct=15, edge_pct=12.0, entry_price_dollars=0.73)
+        is None
+    )
+
+
+def test_autonomous_blocks_extreme_ai_confidence():
+    assert autonomous_buy_gate_failure(side="NO", ai_yes_pct=5, edge_pct=12.0, entry_price_dollars=0.73)
+
+
 def test_kelly_contract_cap_scales_with_bankroll():
     assert kelly_contract_cap_for_bankroll(75, 0.50) == 7
     assert kelly_contract_cap_for_bankroll(1000, 0.50) == 100

@@ -271,7 +271,7 @@ export const Settings: React.FC = () => {
             Position size uses <strong className="text-white">full Kelly</strong> from the active model&apos;s P(YES) and executable
             asks, capped by deployable cash and an automatic <strong className="text-white">5% of deployable cash</strong> maximum premium per entry.
             Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
-            edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">78%</strong>,
+            edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
             no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
             Sports markets use a higher volume floor and +2 edge points automatically. Stop-loss compares{' '}
             <strong className="text-white">open cash basis</strong> to <strong className="text-white">Est. Value</strong> after grace

@@ -9,7 +9,8 @@ from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side
 
 # Upper/lower bounds applied after user min edge / min AI (Settings + .env).
 MAX_EDGE_TO_BUY_PCT = 22
-MAX_AI_WIN_PROB_BUY_SIDE_PCT = 78
+# Favorites (e.g. 85% NO at 73¢) are allowed; extreme tail confidence is still blocked.
+MAX_AI_WIN_PROB_BUY_SIDE_PCT = 90
 MIN_ENTRY_PRICE_CENTS = 26
 # Max premium at risk per entry: full Kelly is capped to this fraction of deployable cash.
 MAX_KELLY_BANKROLL_PCT = 0.05
