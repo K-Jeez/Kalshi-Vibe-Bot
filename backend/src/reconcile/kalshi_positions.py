@@ -305,16 +305,16 @@ def _cursor_upsert(db: Session, trade_mode: str, mid_norm: str, lr: float, lf: f
 
 
 def apply_kalshi_snapshot_to_open_position(pos: Any, snap: KalshiPositionSnapshot) -> bool:
-    """Copy Kalshi portfolio fields onto an open ``Position``. Returns ``True`` if anything changed."""
+    """Sync open-row **quantity** and cumulative **fees** from ``GET /portfolio/positions``.
+
+    Does **not** overwrite ``entry_cost`` / ``entry_price``: Kalshi ``market_exposure`` per contract can
+    disagree with held-side economics (e.g. NO leg shown as ~75¢ YES-complement vs ~26¢ true NO entry),
+    which made invested $ and unrealized P&L flip between dashboard refreshes. Entry basis comes from the
+    opening buy (bot fill or ``refresh_open_live_position_entry_from_kalshi_buy_order``).
+    """
     changed = False
     if int(pos.quantity or 0) != int(snap.qty_whole):
         pos.quantity = int(snap.qty_whole)
-        changed = True
-    if abs(float(pos.entry_cost or 0.0) - float(snap.cost_usd)) > 1e-6:
-        pos.entry_cost = float(snap.cost_usd)
-        changed = True
-    if abs(float(pos.entry_price or 0.0) - float(snap.avg_price)) > 1e-8:
-        pos.entry_price = float(snap.avg_price)
         changed = True
     if abs(float(getattr(pos, "fees_paid", 0) or 0) - float(snap.fees_paid_dollars)) > 1e-6:
         pos.fees_paid = float(snap.fees_paid_dollars)
@@ -863,7 +863,7 @@ async def sync_open_position_qty_cost_from_kalshi(
     *,
     db: Optional[Session] = None,
 ) -> bool:
-    """Overwrite ``pos`` qty / cost / avg / fees from Kalshi (same ticker + side).
+    """Sync ``pos`` quantity and fees from Kalshi (same ticker + side).
 
     When ``db`` is passed and the row is still open with quantity ≥ 1, refines
     ``entry_cost`` / ``entry_price`` from ``GET /portfolio/orders/{{buy}}`` (Kalshi trade-history parity).
