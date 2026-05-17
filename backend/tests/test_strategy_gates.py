@@ -21,8 +21,8 @@ def test_effective_scan_min_volume_sports():
     assert effective_scan_min_volume(1500, "A vs B") >= 2000
 
 
-def test_effective_min_edge_sports_bonus():
-    assert effective_min_edge_for_market(6, "A vs B") == 8
+def test_effective_min_edge_matches_settings():
+    assert effective_min_edge_for_market(6, "A vs B") == 6
     assert effective_min_edge_for_market(6, "Bitcoin") == 6
 
 

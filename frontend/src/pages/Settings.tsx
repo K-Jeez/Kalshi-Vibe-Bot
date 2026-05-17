@@ -273,7 +273,7 @@ export const Settings: React.FC = () => {
             Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
             edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
             no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
-            Sports markets use a higher volume floor and +2 edge points automatically. Stop-loss compares{' '}
+            Sports markets use a higher volume floor at scan time and +5 minutes exit grace. Stop-loss compares{' '}
             <strong className="text-white">open cash basis</strong> to <strong className="text-white">Est. Value</strong> after grace
             (sports get +5 minutes). Contrarian longshots still get a fixed stricter edge and AI floor in code.
           </p>

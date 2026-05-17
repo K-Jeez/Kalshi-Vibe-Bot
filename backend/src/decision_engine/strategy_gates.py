@@ -15,8 +15,7 @@ MIN_ENTRY_PRICE_CENTS = 26
 # Max premium at risk per entry: full Kelly is capped to this fraction of deployable cash.
 MAX_KELLY_BANKROLL_PCT = 0.05
 
-# Sports: stricter scan/buy without extra Settings knobs.
-_SPORTS_MIN_EDGE_BONUS_PCT = 2
+# Sports: stricter scan (volume) and exit grace only — min edge uses your Settings value as-is.
 _SPORTS_MIN_VOLUME_FLOOR = 2000.0
 _SPORTS_EXIT_GRACE_EXTRA_MINUTES = 5.0
 
@@ -50,10 +49,8 @@ def effective_scan_min_volume(base_min_volume: float, title: str, event_ticker: 
 
 
 def effective_min_edge_for_market(min_edge_base: float, title: str, event_ticker: str = "") -> float:
-    base = max(0.0, float(min_edge_base))
-    if is_sports_market_title(title, event_ticker):
-        return base + float(_SPORTS_MIN_EDGE_BONUS_PCT)
-    return base
+    """Return the user-configured min edge (Settings / ``MIN_EDGE_TO_BUY_PCT``); unchanged by market type."""
+    return max(0.0, float(min_edge_base))
 
 
 def exit_grace_minutes_for_market(settings_grace_minutes: float, title: str, event_ticker: str = "") -> float:
