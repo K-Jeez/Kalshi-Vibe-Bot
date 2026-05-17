@@ -222,6 +222,8 @@ Use quotes/book **secondarily**: they inform whether a trade is worthwhile; poor
 
 Do not choose a side mainly because it looks cheap/rich. Never recommend the side you think is less likely to win.
 
+**Calibration:** If you report **ai_probability_yes_pct** above **75** while the executable ask on your buy side is **40–65¢**, lower your probability or **SKIP** unless you have strong, specific evidence—the market is pricing meaningful risk. Treat implied edge above **~20 percentage points** as a warning sign of overconfidence unless you can defend it point-by-point; otherwise **SKIP**.
+
 The server computes edge and full Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks (whole contracts, cash-capped; may use exactly **one** contract when fractional Kelly is below one contract but edge at the ask remains). Keep that field calibrated and honest."""
 
 USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this contract. Recommend **YES** or **NO** only when that matches your genuine outcome view—not because either side looks under/overpriced.
@@ -286,6 +288,8 @@ When **three or more** legs are listed and they are **mutually exclusive** on th
 **Numeric stat thresholds** (e.g. different strikeout **lines** like 5+ vs 7+ Ks) are **not** a single-winner partition: **multiple** YES legs can win together if the stat clears multiple hurdles; different **players** in the same game each have **independent** YES/NO settlements—never force their YES probabilities to sum to ~100% across players.
 
 Use book/quotes/volume secondarily; poor liquidity can justify SKIP. If your pick is a market-priced longshot, justify the wedge concretely or SKIP.
+
+**Edge discipline:** If your implied edge on the buy side would exceed **~20 points**, treat that as a red flag—re-check calibration or **SKIP** unless evidence is overwhelming. Do not chase “great value” on unlikely outcomes.
 
 Rules: best_market_id must be one from the list (if SKIP, use the first). direction applies to that contract only. Honor BOT FILTER ALIGNMENT if present.
 

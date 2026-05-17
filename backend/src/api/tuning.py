@@ -47,7 +47,10 @@ def _coalesce_ai_provider(row) -> str:
 
 def tuning_state_payload(row) -> dict:
     return {
-        "stop_loss_drawdown_pct": round(float(getattr(row, "stop_loss_drawdown_pct", 0.80)), 4),
+        "stop_loss_drawdown_pct": round(
+            float(getattr(row, "stop_loss_drawdown_pct", app_settings.stop_loss_drawdown_pct)),
+            4,
+        ),
         "min_edge_to_buy_pct": _coalesce_int(row, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT),
         "stop_loss_selling_enabled": bool(getattr(row, "stop_loss_selling_enabled", False)),
         "min_ai_win_prob_buy_side_pct": _coalesce_int(
@@ -92,7 +95,7 @@ def apply_config_defaults_to_tuning_state(db: Session) -> dict:
     fresh = Settings()
     row = ensure_tuning_state(db)
 
-    row.stop_loss_drawdown_pct = float(getattr(fresh, "stop_loss_drawdown_pct", 0.80))
+    row.stop_loss_drawdown_pct = float(fresh.stop_loss_drawdown_pct)
     row.min_edge_to_buy_pct = int(fresh.min_edge_to_buy_pct)
     row.stop_loss_selling_enabled = bool(fresh.stop_loss_selling_enabled)
     row.min_ai_win_prob_buy_side_pct = int(fresh.min_ai_win_prob_buy_side_pct)

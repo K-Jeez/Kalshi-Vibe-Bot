@@ -92,7 +92,7 @@ To stop everything, run **`stop.bat`** (or close the windows it opened).
 1. Confirm the header shows **Paper** mode while you learn (use **Live** only when you intend real trades).
 2. Set the bot to **Play** when you want it to scan and trade automatically; **Pause** or **Stop** when you want it idle.
 
-**Live mode:** uses real money — IOC limit **buys** at ask (+ slippage); **exits** use **stop-loss only** after a short grace period: **open cash basis** (Entry column) vs dashboard **Est. Value** × quantity. Strategy defaults come from **`backend/.env`** and **`config.py`**; **Settings** lets you pick **Gemini or xAI**, plus min edge, min AI win %, max open positions, and stop-loss in **`tuning_state`** (applied immediately) — see [README.md](README.md).
+**Live mode:** uses real money — IOC limit **buys** at ask (+ slippage); **exits** use **stop-loss only** after a short grace period: **open cash basis** (Entry column) vs dashboard **Est. Value** × quantity. Strategy defaults come from **`backend/.env`** and **`config.py`** (e.g. min edge **6**, min AI win **62%**, stop-loss **85%** drawdown); **Settings** lets you pick **Gemini or xAI**, plus those four knobs in **`tuning_state`** (applied immediately). Additional caps (max edge, max AI %, Kelly limit, sports rules) are automatic — see [README.md](README.md).
 
 3. **Live only:** if you trade outside the bot or restart after downtime, open **Settings** and use **Reconcile with Kalshi** so open quantities, invested/fees basis, buy-order entry economics, unrealized marks, and closed P&L stay aligned with Kalshi (see README ``POST /portfolio/live/reconcile``). For a CLI-only open-leg refresh, use ``python scripts/refresh_open_live_positions_from_kalshi.py`` from ``backend/``.
 

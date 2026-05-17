@@ -113,7 +113,7 @@ def _tradeable_option_c_contract_close_iso(
     ct_s: str,
     reference_now: datetime,
 ) -> Optional[str]:
-    """Return contractual ``close_time`` ISO when Option C hybrid activates; else ``None``."""
+    """Return contractual ``close_time`` ISO when vetting falls back to contractual close; else ``None``."""
     st = kalshi_status.strip().lower()
     if st not in _TRADEABLE_KALSHI_STATUSES:
         return None

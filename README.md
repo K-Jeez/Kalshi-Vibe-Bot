@@ -39,7 +39,7 @@ Activates the venv, starts backend + frontend, opens the UI. Use `stop.bat` to s
 1. Pull open **binary** markets from Kalshi (contractual `max_close_ts` window), then vet by **time to event end**: **`expected_expiration_time`** when present and still in the future (so sports props are not blocked by a distant contractual `close_time`). If it is missing or already past, the bot uses the soonest future instant among **vetting horizon** (earlier of `expected_expiration_time` and `occurrence_datetime` when present) and contractual **`close_time`**. Rows missing usable timestamps are skipped.
 2. **Local vetting** (`is_tradeable_market` in `backend/src/bot/loop.py`) is pass/fail: volume, status, hardcoded **extreme YES/NO snapshot** skip (YES>90¢ and NO<10¢, or the reverse, on normalized ``yes_price``/``no_price``), spread and depth on at least one leg, the `BOT_MAX_HOURS` horizon rule (see above), and—when `LOCAL_MIN_RESIDUAL_PAYOFF` > 0—at least one leg that is **both** liquid and has gross upside `1 − ask` at or above that floor (same idea as the post–AI buy gate, so skewed books do not spend tokens on analysis that cannot execute).
 3. Passing markets are grouped by Kalshi **`event_ticker`**, then **partitioned** so unrelated props do not share one LLM call (see `backend/src/bot/event_batch_partition.py`): e.g. **line ladders** (same player stem, different numeric thresholds), **outcome codes** (home / away / tie), and **exclusive bins** (same-day high/low temperature brackets like `B88.5` / `T93` under `KXHIGH…` / `KXLOW…`). Each partition becomes **one** batched AI call (Gemini or xAI, per **Settings** / `tuning_state`). **Line-ladder** partitions with more than three locally vetted legs are **shortlisted to the top three** by server-side volume, depth, and spread tightness before the model runs (saves tokens; **``codes:``** and **``exclusive_bins:``** batches are not cut). The model picks a single **best** contract (or SKIP all), and the dashboard logs **only that** market’s analysis row.
-4. The server derives **market-implied probability** from the executable **ask** on the buy side, **edge** (percentage points), and **full Kelly** whole-contract size (rounded down from Kelly stake, then **capped by deployable cash** at the execution premium). If Kelly rounds to **zero** contracts but the Kelly fraction at the ask is still **positive**, the bot buys **one** contract when cash can cover it. After the model returns **BUY_YES** or **BUY_NO**, the bot executes only if **edge** meets the **effective** minimum **and** AI win probability on that purchased side meets the **effective** minimum (defaults **3** edge points and **60%** win on the buy side from `.env` / **`tuning_state`**), with **stricter** edge and AI floors when a **baked-in contrarian buy tier** applies (buy-side implied ≤ 25%, model buy-side minus implied ≥ 15 points, then +5 edge points and +4 win-% points on top of your saved floors). **Scanning** for new ideas is gated by bot mode, deployable cash, and related checks — **not** by edge (edge is enforced at this pre-buy step). **No** edge at the ask, or **cannot** afford one whole contract at the execution price, blocks the buy.
+4. The server derives **market-implied probability** from the executable **ask** on the buy side, **edge** (percentage points), and **full Kelly** whole-contract size (rounded down from Kelly stake, then **capped by deployable cash** and an automatic **5% of deployable cash** maximum per entry). If Kelly rounds to **zero** contracts but the Kelly fraction at the ask is still **positive**, the bot buys **one** contract when cash can cover it. After the model returns **BUY_YES** or **BUY_NO**, the bot executes only if **edge** meets the **effective** minimum **and** AI win probability on that purchased side meets the **effective** minimum (defaults **6** edge points and **62%** win on the buy side from `.env` / **`tuning_state`**), plus **autonomous guardrails** in code (max edge **22** pts, max AI **78%**, min entry **26¢**, calibration block on mid-priced high-confidence picks — see `strategy_gates.py`), with **stricter** edge and AI floors when a **baked-in contrarian buy tier** applies (buy-side implied ≤ 25%, model buy-side minus implied ≥ 15 points, then +5 edge points and +4 win-% points on top of your saved floors). **Sports** markets use a higher scan volume floor and **+2** edge points automatically. **Scanning** for new ideas is gated by bot mode, deployable cash, and related checks — **not** by edge (edge is enforced at this pre-buy step). **No** edge at the ask, or **cannot** afford one whole contract at the execution price, blocks the buy.
 5. **Live** buys use Kalshi **V2** create-order with **IOC** (immediate-or-cancel) **limit** orders sized by contract count: **whole-contract** fills only (partial fills possible when the book is thin; unfilled size is canceled). **Paper** uses simulated fills against the same quotes.
 6. **Open positions** store an optional **`stop_loss_drawdown_pct_at_entry`** audit snapshot. After **`EXIT_GRACE_MINUTES`**, when **stop-loss auto-sell** is enabled (Settings / `STOP_LOSS_SELLING_ENABLED`), the monitor compares **open cash basis** (contract notional at open plus buy-side fees in `fees_paid`) to **display Est. Value** (per contract × quantity — same numbers as the dashboard) using the **current** **`STOP_LOSS_DRAWDOWN_PCT`** / Settings value (not the frozen snapshot). If **(basis − est value) / basis** meets the threshold, the bot issues a **stop-loss** exit (IOC reduce-only sells stepped down the book when bids exist). No automated take-profit or counter-trend exits.
 7. **`REENTRY_COOLDOWN_MINUTES`** can block a new entry on the same ticker after a stop-loss.
@@ -62,7 +62,7 @@ Copy **`backend/.env.template`** → **`backend/.env`**. Settings load from `bac
 
 **Never commit `backend/.env`** — it holds API keys. The template has no secrets.
 
-The **Settings** UI persists **`tuning_state`** per paper/live: **AI provider** (Gemini or xAI), **minimum edge to buy**, **AI buy-side win-prob floor**, **max open positions**, **stop-loss drawdown**, and **stop-loss auto-sell**. Values apply immediately after save. **Restore configuration defaults** reloads strategy fields from your `.env` + `config.py` defaults into SQLite. Stricter **contrarian buy tier** thresholds and **Kelly order sizing** are fixed in code (`strategy_math.py`).
+The **Settings** UI persists **`tuning_state`** per paper/live: **AI provider** (Gemini or xAI), **minimum edge to buy**, **AI buy-side win-prob floor**, **max open positions**, **stop-loss drawdown**, and **stop-loss auto-sell**. Values apply immediately after save. **Restore configuration defaults** reloads strategy fields from your `.env` + `config.py` defaults into SQLite. **Autonomous buy guardrails** (edge/AI caps, min entry, Kelly cap, sports stricter scan, calibration block) live in **`strategy_gates.py`** and are not exposed as extra Settings knobs. Stricter **contrarian buy tier** thresholds and **Kelly order sizing** are fixed in code (`strategy_math.py`).
 
 ### Variables in `.env.template`
 
@@ -81,22 +81,22 @@ The **Settings** UI persists **`tuning_state`** per paper/live: **AI provider** 
 | `XAI_MANAGEMENT_API_KEY` | _(empty)_ | Optional: xAI Management API key |
 | `TRADING_MODE` | `paper` | `paper` or `live` |
 | `PAPER_STARTING_BALANCE` | `1000.0` | Starting paper cash (USD) |
-| `MIN_EDGE_TO_BUY_PCT` | `3` | Min edge (pts) to execute a buy |
-| `MIN_AI_WIN_PROB_BUY_SIDE_PCT` | `60` | Min AI win % on the purchased side (clamped **51–99** in code) |
-| `STOP_LOSS_DRAWDOWN_PCT` | `0.80` | Stop-loss drawdown vs open cash basis |
+| `MIN_EDGE_TO_BUY_PCT` | `6` | Min edge (pts) to execute a buy |
+| `MIN_AI_WIN_PROB_BUY_SIDE_PCT` | `62` | Min AI win % on the purchased side (clamped **51–99** in code) |
+| `STOP_LOSS_DRAWDOWN_PCT` | `0.85` | Stop-loss drawdown vs open cash basis |
 | `STOP_LOSS_SELLING_ENABLED` | `false` | Auto stop-loss exits when `true` |
 | `BOT_MAX_OPEN_POSITIONS` | `30` | Max open positions before scan pauses |
 | `CLOSED_RESOLUTION_REFRESH_INTERVAL_SEC` | `450` | Poll closed rows for official outcome (`0` = off) |
 | `CLOSED_RESOLUTION_REFRESH_BATCH` | `25` | Max closed rows per outcome poll |
 | `EXIT_GRACE_MINUTES` | `10` | Minutes after entry before stop-loss applies |
 | `BOT_SCAN_INTERVAL` | `10` | Seconds between full scans |
-| `BOT_MIN_VOLUME` | `1000.0` | Min 24h volume (contracts) |
+| `BOT_MIN_VOLUME` | `1500.0` | Min 24h volume (contracts); sports use a higher floor in code |
 | `BOT_MAX_HOURS` | `6` | Buy vetting window (hours to event end) |
 | `BOT_MARKETS_FETCH_MAX_CLOSE_HOURS` | `720` | Kalshi list fetch horizon (contractual close) |
 | `BOT_MAX_SPREAD` | `0.15` | Max spread on purchased leg (decimal $) |
 | `BOT_MIN_TOP_SIZE` | `1.0` | Min top-of-book ask size (contracts) |
 | `REENTRY_COOLDOWN_MINUTES` | `120` | Cooldown after stop-loss on same ticker (`0` = off) |
-| `LOCAL_MIN_RESIDUAL_PAYOFF` | `0.10` | Min gross upside `1 − ask` on buy leg (`0` = off) |
+| `LOCAL_MIN_RESIDUAL_PAYOFF` | `0.12` | Min gross upside `1 − ask` on buy leg (`0` = off) |
 | `PORT` | `8000` | API port |
 | `HOST` | `0.0.0.0` | Bind address (`127.0.0.1` for local-only) |
 | `ENABLE_DEBUG_RAW_KALSHI` | `false` | Enables `GET /debug/raw` when `true` |
@@ -116,6 +116,8 @@ These are set in `config.py` or client code. You can still add them to `.env` ma
 | `KALSHI_MARKETS_PAGE_DELAY_SEC` | `0.05` | `config.py` |
 | `CORS_ORIGINS` | localhost:3000 | `config.py` (comma-separated) |
 | `DATABASE_URL` | `backend/trading_bot.db` | `config.py` |
+| Autonomous buy caps | edge ≤ **22** pts, AI ≤ **78%**, entry ≥ **26¢**, Kelly ≤ **5%** of deployable cash | `strategy_gates.py` |
+| Sports scan/buy | min volume **2000**, **+2** edge pts, **+5** min exit grace | `strategy_gates.py` |
 | xAI HTTP retries / timeouts | `3` / `55s` / `150s` batch | `xai_client.py` |
 | Gemini HTTP retries / timeouts | `3` / `55s` / `150s` batch; `thinkingBudget: 0` | `gemini_client.py` |
 
@@ -125,7 +127,7 @@ These are set in `config.py` or client code. You can still add them to `.env` ma
 
 - **Dashboard:** portfolio tiles; open / closed tables; paper/live toggle (confirm for live).
 - **AI Analysis:** decision, confidence, YES/NO context, reasoning; action taken (executed vs skipped).
-- **Settings:** **AI provider** (Gemini / xAI), minimum edge to buy, stop-loss drawdown (as a **percentage** in the UI, stored as a fraction — **open cash basis** vs **Est. Value**), stop-loss auto-sell master switch, **Restore configuration defaults** (reloads strategy fields from `.env` into SQLite), **Reconcile with Kalshi** (live repair — see scripts below).
+- **Settings:** **AI provider** (Gemini / xAI), minimum edge to buy, min AI win % on buy side, max open positions, stop-loss drawdown (as a **percentage** in the UI, stored as a fraction — **open cash basis** vs **Est. Value**), stop-loss auto-sell master switch, **Restore configuration defaults** (reloads strategy fields from `.env` into SQLite). Built-in guardrails (edge/AI caps, Kelly cap, sports rules) are summarized on the page and enforced in code.
 
 ---
 
@@ -178,6 +180,8 @@ pytest backend\tests -q
 | `python scripts/refresh_open_live_positions_from_kalshi.py` | Resync open live rows |
 | `python scripts/backfill_open_position_bid_marks.py` | Recompute bid marks for open live rows |
 | `python scripts/refinalize_live_closed_pnl.py` | Recompute closed live P&amp;L |
+| `python scripts/analyze_closed_performance.py` | Closed-trade P&amp;L / gate study (read-only DB) |
+| `python scripts/simulate_filters.py` | Simulate production gates on closed live rows |
 
 ---
 
@@ -236,6 +240,7 @@ UI: http://localhost:3000 — API http://localhost:8000 (`/docs` for OpenAPI).
 | `src/bot/scan_eligibility.py` | When market scan + AI analysis runs (balance / xAI prepaid / deployable gates) |
 | `src/decision_engine/analyzer.py` | Gemini or xAI routing + strategy payload |
 | `src/decision_engine/strategy_math.py` | Edge, full Kelly order sizing (cash-capped; single-contract fallback) |
+| `src/decision_engine/strategy_gates.py` | Autonomous buy guardrails (caps, sports, calibration block) |
 | `src/clients/` | Kalshi, Gemini (`gemini_client.py`), xAI (`xai_client.py`), shared JSON parse (`ai_json_parse.py`) |
 | `src/database/models.py` | ORM + migrations |
 | `src/api/tuning.py` | Tuning REST + WebSocket **`tuning_update`** payloads |

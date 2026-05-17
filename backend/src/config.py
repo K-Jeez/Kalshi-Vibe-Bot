@@ -10,9 +10,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Single source for tuning fallbacks (SQLite NULL / missing ORM attr); keep in sync with ``Settings`` defaults below.
-DEFAULT_MIN_EDGE_TO_BUY_PCT = 3
-DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
+# Single source for tuning fallbacks (SQLite NULL / missing ORM attr); keep in sync with ``Settings`` field defaults below.
+DEFAULT_MIN_EDGE_TO_BUY_PCT = 6
+DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 62
+DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.85
 DEFAULT_MAX_OPEN_POSITIONS = 30
 DEFAULT_AI_PROVIDER = "gemini"
 
@@ -57,7 +58,7 @@ class Settings(BaseSettings):
     paper_starting_balance: float = 1000.0  # starting cash for paper mode (USD)
     # Minimum edge (percentage points: AI prob for buy side minus market-implied ask %) to execute a buy.
     min_edge_to_buy_pct: int = DEFAULT_MIN_EDGE_TO_BUY_PCT
-    # Minimum AI win probability (0–100) on the **purchased** side before a buy (clamped 51–99; default 60).
+    # Minimum AI win probability (0–100) on the **purchased** side before a buy (clamped 51–99).
     min_ai_win_prob_buy_side_pct: int = DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
 
     # ── Bot scan configuration ───────────────────────────────────────────────────
@@ -67,7 +68,7 @@ class Settings(BaseSettings):
     # Max AI scan units (batch or single) per play sweep; 0 = no cap. When set, units are ordered by
     # highest 24h volume among member markets so liquid lines are analyzed first; remaining units wait for later sweeps.
     bot_max_scan_queue_units_per_sweep: int = 0
-    bot_min_volume: float = 1000.0           # minimum 24h contract volume (tradeability scan)
+    bot_min_volume: float = 1500.0           # minimum 24h contract volume (tradeability scan; sports uses higher floor in code)
     # Vetting: BUY window prefers ``expected_expiration_time`` (event end); if missing or past, falls back to
     # the soonest future instant among ``vetting_horizon_time`` and contractual ``close_time`` (``BOT_MAX_HOURS``).
     bot_max_hours: int = 6
@@ -79,15 +80,15 @@ class Settings(BaseSettings):
     reentry_cooldown_minutes: int = 120
     # Min gross upside (1 − native ask) on the purchased leg: scan filter + pre-buy gate (0 disables gate).
     # When > 0, scan requires at least one leg to be liquid and meet this floor (avoids LLM calls on skewed books).
-    local_min_residual_payoff: float = 0.10
+    local_min_residual_payoff: float = 0.12
 
     # ── Exit hygiene ──────────────────────────────────────────────────────────────
     # No stop-loss or counter-trend exits until the position is this old (minutes).
     # Reduces churn from spread / micro noise right after IOC fills.
     exit_grace_minutes: float = 10.0
     # Stop-loss: exit when display **Est. Value** (per contract × qty) has dropped this fraction vs **open cash basis**
-    # (contract notional at open + buy-side fees in ``fees_paid`` — same basis as dashboard Entry / P&amp;L). 0.80 = 80% drawdown.
-    stop_loss_drawdown_pct: float = 0.80
+    # (contract notional at open + buy-side fees in ``fees_paid`` — same basis as dashboard Entry / P&amp;L). 0.85 = 85% drawdown.
+    stop_loss_drawdown_pct: float = DEFAULT_STOP_LOSS_DRAWDOWN_PCT
     # When False, the bot never auto-exits for stop-loss (manual sells still allowed). Default off until enabled in Settings.
     stop_loss_selling_enabled: bool = False
     # Max simultaneous open positions (per trade mode); at or over this, market scan + AI analysis for new entries pauses.

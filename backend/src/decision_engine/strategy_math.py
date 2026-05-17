@@ -124,6 +124,7 @@ def kelly_contracts_for_order(
     no_mid: float,
     *,
     per_contract_premium: float,
+    max_kelly_contracts: Optional[int] = None,
 ) -> Tuple[int, str]:
     """Whole-contract size for a buy: full Kelly (floored), capped by cash at ``per_contract_premium``.
 
@@ -137,15 +138,29 @@ def kelly_contracts_for_order(
     cap = max_whole_contracts_for_cash(bankroll, per_contract_premium)
     if cap < 1:
         return 0, "none"
+    mk: Optional[int]
+    if max_kelly_contracts is not None:
+        mk = max(0, int(max_kelly_contracts))
+    else:
+        mk = None
+
+    def _cap(qty: int) -> int:
+        if mk is None:
+            return int(qty)
+        return min(int(qty), mk)
+
     if k >= 1:
-        q = min(int(k), cap)
+        q = _cap(min(int(k), cap))
         if q < 1:
             return 0, "none"
         return q, "cash_capped" if q < int(k) else "full_kelly"
 
     f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
     if f > 1e-12:
-        return 1, "single_contract_retry"
+        q = _cap(1)
+        if q < 1:
+            return 0, "none"
+        return q, "single_contract_retry"
     return 0, "none"
 
 

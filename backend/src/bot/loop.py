@@ -37,6 +37,13 @@ from src.reconcile.open_positions import (
     resolution_intrinsic_mark_dollars,
     stop_loss_triggered_from_position,
 )
+from src.decision_engine.strategy_gates import (
+    autonomous_buy_gate_failure,
+    effective_min_edge_for_market,
+    effective_scan_min_volume,
+    exit_grace_minutes_for_market,
+    kelly_contract_cap_for_bankroll,
+)
 from src.decision_engine.strategy_math import (
     ai_win_prob_pct_on_buy_side,
     edge_pct_for_side,
@@ -671,7 +678,11 @@ async def monitor_positions(
                     )
 
             exit_reason: Optional[str] = None
-            grace_min = float(getattr(settings, "exit_grace_minutes", 10.0))
+            grace_min = exit_grace_minutes_for_market(
+                float(getattr(settings, "exit_grace_minutes", 10.0)),
+                str(getattr(pos, "market_title", "") or ""),
+                str(getattr(pos, "event_ticker", "") or ""),
+            )
             past_grace = _position_age_minutes_utc(pos.opened_at) >= grace_min
 
             # Stop-loss: open **cash basis** vs display **Est. Value** (``display_estimated_price_optional``),
@@ -1047,10 +1058,15 @@ async def scan_and_trade(
         tradeable: List[dict] = []
         fail_counts: Dict[str, int] = {}
         for m in markets:
+            scan_min_vol = effective_scan_min_volume(
+                float(settings.bot_min_volume),
+                str(m.get("title") or m.get("market_title") or ""),
+                str(m.get("event_ticker") or ""),
+            )
             ok, reason = is_tradeable_market(
                 m,
                 settings.bot_max_hours,
-                settings.bot_min_volume,
+                scan_min_vol,
                 settings.bot_max_spread,
                 settings.bot_min_top_size,
                 settings.local_min_residual_payoff,
@@ -1565,7 +1581,13 @@ async def scan_and_trade(
                         edge_now = edge_pct_for_side(
                             trade_side, ai_yes, y_ask_f, n_ask_f, float(yes_price), float(no_price)
                         )
-                        min_edge_base = float(getattr(settings, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT))
+                        m_title = str(market.get("title") or decision.get("market_title") or "")
+                        m_event = str(market.get("event_ticker") or "")
+                        min_edge_base = effective_min_edge_for_market(
+                            float(getattr(settings, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT)),
+                            m_title,
+                            m_event,
+                        )
                         min_ai_base = int(
                             getattr(
                                 settings,
@@ -1585,7 +1607,19 @@ async def scan_and_trade(
                         )
                         ai_buy = ai_win_prob_pct_on_buy_side(trade_side, ai_yes)
                         risk_note = " (contrarian tier)" if risk_tier else ""
-                        if ai_buy < eff_min_ai:
+                        gate_fail = autonomous_buy_gate_failure(
+                            side=trade_side,
+                            ai_yes_pct=ai_yes,
+                            edge_pct=edge_now,
+                            entry_price_dollars=float(trade_price),
+                        )
+                        if gate_fail:
+                            action_taken = {
+                                "status": "no_trade",
+                                "summary": gate_fail,
+                                "signal": signal,
+                            }
+                        elif ai_buy < eff_min_ai:
                             action_taken = {
                                 "status": "no_trade",
                                 "summary": (
@@ -1604,6 +1638,9 @@ async def scan_and_trade(
                                 "signal": signal,
                             }
                         else:
+                            kelly_cap = kelly_contract_cap_for_bankroll(
+                                float(balance), float(trade_price)
+                            )
                             quantity, kelly_sizing_tag = kelly_contracts_for_order(
                                 float(balance),
                                 trade_side,
@@ -1613,6 +1650,7 @@ async def scan_and_trade(
                                 float(yes_price),
                                 float(no_price),
                                 per_contract_premium=float(trade_price),
+                                max_kelly_contracts=kelly_cap,
                             )
                             if quantity < 1:
                                 action_taken = {

@@ -26,6 +26,7 @@ from src.config import (
     DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
+    DEFAULT_STOP_LOSS_DRAWDOWN_PCT,
     settings,
 )
 from src.logger import logger as app_logger
@@ -213,7 +214,7 @@ class TuningState(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     trade_mode = Column(String, nullable=False, default="paper")  # "paper" | "live"
 
-    stop_loss_drawdown_pct = Column(Float, default=0.80)
+    stop_loss_drawdown_pct = Column(Float, default=DEFAULT_STOP_LOSS_DRAWDOWN_PCT)
     stop_loss_selling_enabled = Column(Boolean, default=False)
     min_edge_to_buy_pct = Column(Integer, default=DEFAULT_MIN_EDGE_TO_BUY_PCT)
     min_ai_win_prob_buy_side_pct = Column(Integer, default=DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
@@ -436,7 +437,7 @@ def _run_migrations(engine):
     """Add new columns to existing tables idempotently (SQLite ALTER TABLE)."""
     migrations = [
         # table, column, sql_type_default
-        ("tuning_state", "stop_loss_drawdown_pct",  "FLOAT DEFAULT 0.80"),
+        ("tuning_state", "stop_loss_drawdown_pct",  f"FLOAT DEFAULT {DEFAULT_STOP_LOSS_DRAWDOWN_PCT}"),
         ("tuning_state", "stop_loss_selling_enabled", "BOOLEAN DEFAULT 0"),
         ("tuning_state", "updated_at",               "DATETIME"),
         ("trades",        "action",            "TEXT DEFAULT 'buy'"),
@@ -506,14 +507,12 @@ def _ensure_tuning_rows_per_mode(db) -> None:
             continue
         row = TuningState(
             trade_mode=mode,
-            stop_loss_drawdown_pct=float(getattr(settings, "stop_loss_drawdown_pct", 0.80)),
-            stop_loss_selling_enabled=bool(getattr(settings, "stop_loss_selling_enabled", False)),
-            min_edge_to_buy_pct=int(getattr(settings, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT)),
-            min_ai_win_prob_buy_side_pct=int(
-                getattr(settings, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
-            ),
-            max_open_positions=int(getattr(settings, "bot_max_open_positions", DEFAULT_MAX_OPEN_POSITIONS)),
-            ai_provider=str(getattr(settings, "default_ai_provider", DEFAULT_AI_PROVIDER)),
+            stop_loss_drawdown_pct=float(settings.stop_loss_drawdown_pct),
+            stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
+            min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
+            min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
+            max_open_positions=int(settings.bot_max_open_positions),
+            ai_provider=str(settings.default_ai_provider),
         )
         db.add(row)
     db.commit()
@@ -557,14 +556,12 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
     if not row:
         row = TuningState(
             trade_mode=mode,
-            stop_loss_drawdown_pct=float(getattr(settings, "stop_loss_drawdown_pct", 0.80)),
-            stop_loss_selling_enabled=bool(getattr(settings, "stop_loss_selling_enabled", False)),
-            min_edge_to_buy_pct=int(getattr(settings, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT)),
-            min_ai_win_prob_buy_side_pct=int(
-                getattr(settings, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
-            ),
-            max_open_positions=int(getattr(settings, "bot_max_open_positions", DEFAULT_MAX_OPEN_POSITIONS)),
-            ai_provider=str(getattr(settings, "default_ai_provider", DEFAULT_AI_PROVIDER)),
+            stop_loss_drawdown_pct=float(settings.stop_loss_drawdown_pct),
+            stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
+            min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
+            min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
+            max_open_positions=int(settings.bot_max_open_positions),
+            ai_provider=str(settings.default_ai_provider),
         )
         db.add(row)
         db.commit()

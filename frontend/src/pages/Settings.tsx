@@ -36,9 +36,9 @@ export const Settings: React.FC = () => {
 
   useEffect(() => {
     if (!cur) return
-    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 3))))
-    setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
-    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 51))))
+    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 6))))
+    setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.85) * 100)))
+    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 62))))
     setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 30))))
   }, [cur])
 
@@ -269,20 +269,20 @@ export const Settings: React.FC = () => {
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
             Position size uses <strong className="text-white">full Kelly</strong> from the active model&apos;s P(YES) and executable
-            asks (whole contracts, capped by deployable cash at execution; if Kelly rounds to zero but edge at the ask
-            remains, the bot buys <strong className="text-white">one</strong> contract when cash allows). Buys run only when edge (percentage points) is at least your minimum, AI win probability on the
-            purchased side meets your floor (default 51% = strictly above 50%), open legs are below your max open
-            positions cap (then Kalshi fetch + AI analysis for new entries pauses), and stop-loss compares{' '}
-            <strong className="text-white">open cash basis</strong> to dashboard{' '}
-            <strong className="text-white">Est. Value</strong> (after grace) when auto sells are enabled. When the book is very skeptical of the buy side but the model is much more
-            bullish, the bot applies a fixed stricter edge and AI floor (not configurable here).
+            asks, capped by deployable cash and an automatic <strong className="text-white">5% of deployable cash</strong> maximum premium per entry.
+            Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
+            edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">78%</strong>,
+            no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
+            Sports markets use a higher volume floor and +2 edge points automatically. Stop-loss compares{' '}
+            <strong className="text-white">open cash basis</strong> to <strong className="text-white">Est. Value</strong> after grace
+            (sports get +5 minutes). Contrarian longshots still get a fixed stricter edge and AI floor in code.
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
             Numbers here are stored in the <strong className="text-white">database</strong> (per paper/live), not read
             live from <code className="text-cyan-200/90">backend/.env</code>. After editing <code className="text-cyan-200/90">.env</code>, use{' '}
             <strong className="text-white">Restore configuration defaults</strong> below so SQLite matches your file (e.g.{' '}
-            <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT=0.80</code> → <strong className="text-white">80</strong> in this field), or type{' '}
-            <strong className="text-white">80</strong> and <strong className="text-white">Save strategy settings</strong>.
+            <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT=0.85</code> → <strong className="text-white">85</strong> in this field), or type{' '}
+            <strong className="text-white">85</strong> and <strong className="text-white">Save strategy settings</strong>.
           </p>
 
           {!cur ? (

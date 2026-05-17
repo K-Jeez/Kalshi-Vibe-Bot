@@ -58,6 +58,36 @@ class TestStrategyMath(unittest.TestCase):
         self.assertEqual(qty, 0)
         self.assertEqual(tag, "none")
 
+    def test_kelly_capped_by_max_contracts(self):
+        qty, tag = kelly_contracts_for_order(
+            500.0,
+            "YES",
+            90,
+            0.40,
+            0.50,
+            0.40,
+            0.50,
+            per_contract_premium=0.40,
+            max_kelly_contracts=8,
+        )
+        self.assertLessEqual(qty, 8)
+        self.assertGreater(qty, 0)
+
+    def test_single_contract_retry_respects_zero_cap(self):
+        qty, tag = kelly_contracts_for_order(
+            5.0,
+            "YES",
+            58,
+            0.56,
+            0.45,
+            0.56,
+            0.44,
+            per_contract_premium=0.56,
+            max_kelly_contracts=0,
+        )
+        self.assertEqual(qty, 0)
+        self.assertEqual(tag, "none")
+
     def test_kelly_capped_when_premium_exceeds_ask_used_for_kelly(self):
         """Cap when Kelly uses a lower ask than the premium used for cash (e.g. IOC / slippage buffer)."""
         qty, tag = kelly_contracts_for_order(

@@ -69,7 +69,7 @@ from src.reconcile.open_positions import (
 
 router = APIRouter(tags=["portfolio"])
 
-# Dashboard UX: align with hybrid polling + WS refresh (see ``dashboard_refresh`` broadcasts).
+# Dashboard UX: align with bundle polling + WS refresh (see ``dashboard_refresh`` broadcasts).
 _UI_KALSHI_RECONCILE_MIN_INTERVAL_SEC = 6.0
 _MARK_REFRESH_PARALLELISM = 8
 _PORTFOLIO_TIMESERIES_SNAPSHOT_MIN_SEC = 12.0
