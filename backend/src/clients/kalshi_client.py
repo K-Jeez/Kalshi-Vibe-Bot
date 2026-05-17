@@ -239,6 +239,61 @@ def kalshi_order_avg_contract_price_and_cost(
     return (fb, fb * fd if fd > 0 else 0.0)
 
 
+def _held_side_price_from_order_leg(
+    per_contract: float,
+    *,
+    order: Dict[str, Any],
+    held_side: str,
+) -> float:
+    """Map fill $/contract on the order's ``side`` leg to the position's held leg (YES/NO complement)."""
+    o_side = (_kalshi_order_side(order) or "YES").upper()
+    h_side = (held_side or "YES").upper()
+    px = max(0.0, min(1.0, float(per_contract or 0.0)))
+    if o_side == h_side:
+        return px
+    return max(0.0, min(1.0, 1.0 - px))
+
+
+def kalshi_order_avg_contract_price_and_proceeds_for_held_side(
+    order: Dict[str, Any],
+    *,
+    held_side: str,
+    filled: float,
+    fallback_per_contract_dollars: float,
+) -> Tuple[float, float]:
+    """Sell/exit proceeds in **held-side** $/contract (handles Kalshi opposite-leg fills, e.g. buy YES to close NO)."""
+    eff, _net = kalshi_order_avg_contract_price_and_proceeds(
+        order,
+        filled=filled,
+        fallback_per_contract_dollars=fallback_per_contract_dollars,
+    )
+    eff = _held_side_price_from_order_leg(eff, order=order, held_side=held_side)
+    fd = max(0.0, float(filled))
+    fees = kalshi_order_fees_dollars(order)
+    net = max(0.0, eff * fd - fees) if fd > 1e-12 else 0.0
+    return eff, net
+
+
+def kalshi_order_avg_contract_price_and_cost_for_held_side(
+    order: Dict[str, Any],
+    *,
+    held_side: str,
+    filled: float,
+    fallback_per_contract_dollars: float,
+) -> Tuple[float, float]:
+    """Buy/entry cost in **held-side** $/contract (handles complementary Kalshi order legs)."""
+    eff, total = kalshi_order_avg_contract_price_and_cost(
+        order,
+        filled=filled,
+        fallback_per_contract_dollars=fallback_per_contract_dollars,
+    )
+    eff = _held_side_price_from_order_leg(eff, order=order, held_side=held_side)
+    fd = max(0.0, float(filled))
+    fees = kalshi_order_fees_dollars(order)
+    total = max(0.0, eff * fd + fees) if fd > 1e-12 else 0.0
+    return eff, total
+
+
 def kalshi_order_avg_contract_price_and_proceeds(
     order: Dict[str, Any],
     *,

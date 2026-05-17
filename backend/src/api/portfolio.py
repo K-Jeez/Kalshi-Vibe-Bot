@@ -1149,8 +1149,11 @@ async def close_position_manual(position_id: str, db: Session = Depends(get_db))
                 )
             sell_result = await kc.refresh_order_fill_snapshot(sell_result)
             filled_fp = max(0.0, float(kalshi_order_filled_contracts(sell_result)))
-            avg_exit_px, _proceeds = kalshi_order_avg_contract_price_and_proceeds(
+            from src.clients.kalshi_client import kalshi_order_avg_contract_price_and_proceeds_for_held_side
+
+            avg_exit_px, _proceeds = kalshi_order_avg_contract_price_and_proceeds_for_held_side(
                 sell_result,
+                held_side=str(pos.side or "YES"),
                 filled=filled_fp,
                 fallback_per_contract_dollars=float(floor_d),
             )

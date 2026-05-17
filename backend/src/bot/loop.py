@@ -723,7 +723,7 @@ async def monitor_positions(
             if settings.trading_mode == "live":
                 from src.clients.kalshi_client import (
                     is_order_error_market_unavailable,
-                    kalshi_order_avg_contract_price_and_proceeds,
+                    kalshi_order_avg_contract_price_and_proceeds_for_held_side,
                     kalshi_order_fees_dollars,
                     kalshi_order_filled_contracts,
                 )
@@ -803,8 +803,9 @@ async def monitor_positions(
                         pos.market_id,
                     )
                     continue
-                avg_exit_px, proceeds = kalshi_order_avg_contract_price_and_proceeds(
+                avg_exit_px, proceeds = kalshi_order_avg_contract_price_and_proceeds_for_held_side(
                     sell_result,
+                    held_side=str(pos.side or "YES"),
                     filled=filled_fp,
                     fallback_per_contract_dollars=float(floor_d),
                 )
@@ -1702,7 +1703,7 @@ async def scan_and_trade(
                                     traded_at = datetime.now(timezone.utc)
                                     if settings.trading_mode == "live":
                                         from src.clients.kalshi_client import (
-                                            kalshi_order_avg_contract_price_and_cost,
+                                            kalshi_order_avg_contract_price_and_cost_for_held_side,
                                             kalshi_order_fees_dollars,
                                             kalshi_order_fill_cost_dollars,
                                             kalshi_order_filled_contracts,
@@ -1767,8 +1768,9 @@ async def scan_and_trade(
                                                             qty_int,
                                                             quantity,
                                                         )
-                                                    avg_px, full_cost = kalshi_order_avg_contract_price_and_cost(
+                                                    avg_px, full_cost = kalshi_order_avg_contract_price_and_cost_for_held_side(
                                                         result,
+                                                        held_side=trade_side,
                                                         filled=filled,
                                                         fallback_per_contract_dollars=float(ioc_limit_dollars),
                                                     )

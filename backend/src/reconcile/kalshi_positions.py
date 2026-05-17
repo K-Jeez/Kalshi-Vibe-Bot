@@ -22,7 +22,7 @@ from src.clients.kalshi_client import (
     open_position_estimated_mark_dollars,
     _fp_count,
     _fp_dollars,
-    kalshi_order_avg_contract_price_and_cost,
+    kalshi_order_avg_contract_price_and_cost_for_held_side,
     kalshi_order_filled_contracts,
     open_position_mark_dollars,
 )
@@ -379,8 +379,9 @@ async def refresh_open_live_position_entry_from_kalshi_buy_order(
     if q < 1:
         return False
     fb_px = max(1e-6, float(pos.entry_price or 0.01))
-    eff_b, tot_b = kalshi_order_avg_contract_price_and_cost(
+    eff_b, tot_b = kalshi_order_avg_contract_price_and_cost_for_held_side(
         bo,
+        held_side=str(pos.side or "YES"),
         filled=f_b,
         fallback_per_contract_dollars=fb_px,
     )

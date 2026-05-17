@@ -3,7 +3,9 @@
 from src.clients.kalshi_client import (
     kalshi_order_average_fill_price_dollars,
     kalshi_order_avg_contract_price_and_cost,
+    kalshi_order_avg_contract_price_and_cost_for_held_side,
     kalshi_order_avg_contract_price_and_proceeds,
+    kalshi_order_avg_contract_price_and_proceeds_for_held_side,
 )
 
 
@@ -181,6 +183,26 @@ def test_buy_no_production_fill_cost_below_contract_avg_plus_fee():
     eff, total = kalshi_order_avg_contract_price_and_cost(order, filled=1.0, fallback_per_contract_dollars=0.44)
     assert abs(eff - 0.44) < 1e-9, eff
     assert abs(total - 0.44) < 1e-9, total
+
+
+def test_exit_no_reported_as_buy_yes_maps_to_no_held_side_price():
+    """Kalshi activity: buy YES @ ~91¢ to close a NO leg → held-side exit ~9¢, not 91¢."""
+    order = {
+        "side": "yes",
+        "action": "buy",
+        "fill_count_fp": "3.00",
+        "taker_fill_cost_dollars": "2.720000",
+        "maker_fill_cost_dollars": "0",
+        "taker_fees_dollars": "0.020000",
+        "maker_fees_dollars": "0",
+        "average_fill_price": "90.67",
+    }
+    eff, net = kalshi_order_avg_contract_price_and_proceeds_for_held_side(
+        order, held_side="NO", filled=3.0, fallback_per_contract_dollars=0.60
+    )
+    assert eff < 0.15, eff
+    assert eff > 0.05, eff
+    assert net < 0.35, net
 
 
 def test_sell_no_ioc_positive_fill_is_opposite_leg_not_raw_per_contract():

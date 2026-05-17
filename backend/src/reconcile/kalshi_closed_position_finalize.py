@@ -21,8 +21,8 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from src.clients.kalshi_client import (
-    kalshi_order_avg_contract_price_and_cost,
-    kalshi_order_avg_contract_price_and_proceeds,
+    kalshi_order_avg_contract_price_and_cost_for_held_side,
+    kalshi_order_avg_contract_price_and_proceeds_for_held_side,
     kalshi_order_fees_dollars,
     kalshi_order_filled_contracts,
 )
@@ -129,13 +129,16 @@ async def refresh_closed_live_position_economics_from_kalshi_orders(
     if f_b < 1e-12 or f_s < 1e-12:
         return False
     fb_px = max(1e-6, float(pos.entry_price or 0.01))
-    eff_b, tot_b = kalshi_order_avg_contract_price_and_cost(
+    held = str(pos.side or "YES")
+    eff_b, tot_b = kalshi_order_avg_contract_price_and_cost_for_held_side(
         bo,
+        held_side=held,
         filled=f_b,
         fallback_per_contract_dollars=fb_px,
     )
-    eff_s, _net_s = kalshi_order_avg_contract_price_and_proceeds(
+    eff_s, _net_s = kalshi_order_avg_contract_price_and_proceeds_for_held_side(
         so,
+        held_side=held,
         filled=f_s,
         fallback_per_contract_dollars=max(1e-6, float(eff_b)),
     )
@@ -301,8 +304,9 @@ async def finalize_live_closed_positions_from_kalshi(
         sold_whole = max(0, int(math.floor(float(filled_fp) + 1e-9)))
         if sold_whole < 1:
             continue
-        avg_exit_px, _proceeds = kalshi_order_avg_contract_price_and_proceeds(
+        avg_exit_px, _proceeds = kalshi_order_avg_contract_price_and_proceeds_for_held_side(
             order,
+            held_side=str(pos.side or "YES"),
             filled=filled_fp,
             # Never use ``pos.current_price`` here — it is often the last **mark** (ask) on an open
             # row; Kalshi GET order can omit fill costs briefly and the fallback would print ~63¢
