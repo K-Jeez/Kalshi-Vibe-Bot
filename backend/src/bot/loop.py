@@ -49,6 +49,7 @@ from src.decision_engine.strategy_math import (
     edge_pct_for_side,
     effective_buy_gate_thresholds,
     kelly_contracts_for_order,
+    kelly_order_skip_summary,
 )
 from src.bot.event_batch_partition import (
     LINE_LADDER_MAX_LEGS_FOR_XAI,
@@ -1653,11 +1654,23 @@ async def scan_and_trade(
                                 max_kelly_contracts=kelly_cap,
                             )
                             if quantity < 1:
+                                kelly_skip = kelly_order_skip_summary(
+                                    float(balance),
+                                    trade_side,
+                                    ai_yes,
+                                    y_ask_f,
+                                    n_ask_f,
+                                    float(yes_price),
+                                    float(no_price),
+                                    per_contract_premium=float(trade_price),
+                                    max_kelly_contracts=kelly_cap,
+                                )
                                 action_taken = {
                                     "status": "no_trade",
-                                    "summary": (
+                                    "summary": kelly_skip
+                                    or (
                                         "Skipped — Kelly size is zero and available cash cannot buy "
-                                        "a whole contract at current prices (or no edge at ask)"
+                                        "a whole contract at current prices"
                                     ),
                                     "signal": signal,
                                 }

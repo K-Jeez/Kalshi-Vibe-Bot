@@ -7,6 +7,7 @@ from src.decision_engine.strategy_math import (
     full_kelly_fraction_for_side,
     kelly_contracts_for_side,
     kelly_contracts_for_order,
+    kelly_order_skip_summary,
     max_whole_contracts_for_cash,
 )
 
@@ -72,6 +73,38 @@ class TestStrategyMath(unittest.TestCase):
         )
         self.assertLessEqual(qty, 8)
         self.assertGreater(qty, 0)
+
+    def test_kelly_skip_summary_no_edge_at_ask(self):
+        msg = kelly_order_skip_summary(
+            100.0,
+            "YES",
+            70,
+            0.70,
+            0.30,
+            0.70,
+            0.30,
+            per_contract_premium=0.70,
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("no edge at ask", msg)
+        self.assertIn("70%", msg)
+        self.assertIn("70¢", msg)
+        self.assertIn("+0.0", msg)
+
+    def test_kelly_skip_summary_insufficient_cash(self):
+        msg = kelly_order_skip_summary(
+            0.30,
+            "YES",
+            80,
+            0.50,
+            0.50,
+            0.50,
+            0.50,
+            per_contract_premium=0.50,
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("Kelly size is zero", msg)
+        self.assertNotIn("no edge at ask", msg)
 
     def test_single_contract_retry_respects_zero_cap(self):
         qty, tag = kelly_contracts_for_order(

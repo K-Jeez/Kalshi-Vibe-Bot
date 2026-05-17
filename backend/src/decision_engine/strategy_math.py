@@ -164,6 +164,50 @@ def kelly_contracts_for_order(
     return 0, "none"
 
 
+def kelly_order_skip_summary(
+    bankroll: float,
+    side: str,
+    ai_yes_pct: int,
+    yes_ask: Optional[float],
+    no_ask: Optional[float],
+    yes_mid: float,
+    no_mid: float,
+    *,
+    per_contract_premium: float,
+    max_kelly_contracts: Optional[int] = None,
+) -> Optional[str]:
+    """Human-readable skip reason when :func:`kelly_contracts_for_order` returns quantity 0; else ``None``."""
+    qty, _tag = kelly_contracts_for_order(
+        bankroll,
+        side,
+        ai_yes_pct,
+        yes_ask,
+        no_ask,
+        yes_mid,
+        no_mid,
+        per_contract_premium=per_contract_premium,
+        max_kelly_contracts=max_kelly_contracts,
+    )
+    if qty >= 1:
+        return None
+
+    f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    if f <= 1e-12:
+        ai_buy = int(ai_win_prob_pct_on_buy_side(side, ai_yes_pct))
+        ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
+        edge_at_ask = float(ai_buy) - float(ask_c)
+        su = str(side or "").upper()
+        return (
+            f"Skipped — no edge at ask: AI {ai_buy}% on {su} vs ask {ask_c}¢ "
+            f"(edge {edge_at_ask:+.1f} pts at executable price)"
+        )
+
+    return (
+        "Skipped — Kelly size is zero and available cash cannot buy "
+        "a whole contract at current prices"
+    )
+
+
 def ai_win_prob_pct_on_buy_side(side: str, ai_yes_pct: int) -> int:
     """AI P(win) for the purchased contract side (YES leg or NO leg), 0–100 integer."""
     y = int(max(0, min(100, int(ai_yes_pct))))
