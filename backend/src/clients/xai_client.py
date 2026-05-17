@@ -218,6 +218,8 @@ Each contract is still a **binary** YES/NO ticket, but some events list **severa
 
 Goal: estimate **P(YES)** — the probability **this** contract settles YES — using **real-time, horizon-matched** facts and the contract's resolution logic. If unclear or the book/liquidity is poor, output direction SKIP.
 
+**Threshold vs exact-hit:** Many Kalshi markets (crypto 15m, index levels, weather highs) use a numeric **threshold**: YES if the settlement index is **above** (or below) a stated level at expiration; NO otherwise. Labels like **"Target Price: $X"** are the comparison level — **not** a requirement that the index land exactly on $X. Never assign near-zero P(YES) on a standard above-threshold leg solely because exact equality is unlikely. Follow the **RESOLUTION** block in the user prompt when present.
+
 Use quotes/book **secondarily**: they inform whether a trade is worthwhile; poor liquidity can justify SKIP. Treat market-implied odds as informed sentiment; if your view diverges sharply from the market, explain the wedge in **reasoning** or choose **SKIP**.
 
 Do not choose a side mainly because it looks cheap/rich. Never recommend the side you think is less likely to win.

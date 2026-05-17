@@ -37,6 +37,7 @@ from src.reconcile.open_positions import (
     resolution_intrinsic_mark_dollars,
     stop_loss_triggered_from_position,
 )
+from src.decision_engine.market_resolution_context import enrich_ai_market_description
 from src.decision_engine.strategy_gates import (
     autonomous_buy_gate_failure,
     effective_min_edge_for_market,
@@ -1347,7 +1348,9 @@ async def scan_and_trade(
                         {
                             "market_id": tid,
                             "market_title": m_title,
-                            "market_description": (sub or ctit).strip(),
+                            "market_description": enrich_ai_market_description(
+                                (sub or ctit).strip(), m
+                            ),
                             "event_ticker": (m.get("event_ticker") or "").strip(),
                             "current_prices": {
                                 "yes": ypx,
@@ -1443,7 +1446,9 @@ async def scan_and_trade(
                                 title = f"{ev_title} — {tail}" if tail else ev_title
                     except Exception:
                         pass
-                    description = (subtitle or contract_title).strip()
+                    description = enrich_ai_market_description(
+                        (subtitle or contract_title).strip(), market
+                    )
                     ai_close_hint = market.get("vetting_horizon_time") or market.get("close_time")
 
                     yes_bid = market.get("yes_bid")

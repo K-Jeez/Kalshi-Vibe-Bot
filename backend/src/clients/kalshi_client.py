@@ -17,6 +17,16 @@ from src.reconcile.open_positions import normalize_market_id
 logger = setup_logging("kalshi_client")
 
 
+def _optional_float(v: object) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        f = float(v)  # type: ignore[arg-type]
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _markets_list_resume_bucket_key(filters: Optional[Dict[str, Any]]) -> Optional[str]:
     """Key for rotating market-list pagination: same bucket keeps a saved API ``cursor`` across scans.
 
@@ -1049,6 +1059,11 @@ class KalshiClient:
             # Raw Kalshi lifecycle / resolution (not folded into ``status`` tradeable flag).
             "kalshi_api_status": api_status_l,
             "resolution_result": resolution_result,
+            "strike_type": str(raw.get("strike_type") or "").strip(),
+            "floor_strike": _optional_float(raw.get("floor_strike")),
+            "cap_strike": _optional_float(raw.get("cap_strike")),
+            "rules_primary": str(raw.get("rules_primary") or "").strip(),
+            "rules_secondary": str(raw.get("rules_secondary") or "").strip(),
         }
 
     # ── Markets ───────────────────────────────────────────────────────────────
