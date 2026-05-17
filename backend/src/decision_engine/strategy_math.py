@@ -202,9 +202,11 @@ def kelly_order_skip_summary(
             f"(edge {edge_at_ask:+.1f} pts at executable price)"
         )
 
+    ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
+    deploy = float(bankroll)
     return (
         "Skipped — Kelly size is zero and available cash cannot buy "
-        "a whole contract at current prices"
+        f"a whole contract at current prices (deployable ${deploy:.2f}, ask {ask_c}¢)"
     )
 
 

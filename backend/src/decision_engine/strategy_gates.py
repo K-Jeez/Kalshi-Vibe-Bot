@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side
+from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side, max_whole_contracts_for_cash
 
 # Upper/lower bounds applied after user min edge / min AI (Settings + .env).
 MAX_EDGE_TO_BUY_PCT = 22
@@ -61,13 +61,23 @@ def exit_grace_minutes_for_market(settings_grace_minutes: float, title: str, eve
 
 
 def kelly_contract_cap_for_bankroll(bankroll: float, per_contract_premium: float) -> int:
-    """Whole-contract cap from ``MAX_KELLY_BANKROLL_PCT`` of deployable cash at execution premium."""
+    """Whole-contract cap: ``MAX_KELLY_BANKROLL_PCT`` of deployable cash, never above cash affordance.
+
+    When 5% of bankroll cannot buy a whole contract (small accounts), fall back to cash-limited
+    sizing only so Kelly + affordability still work; the 5% rule applies once stake can fund ≥1 contract.
+    """
     br = float(bankroll)
     px = float(per_contract_premium)
     if not math.isfinite(br) or not math.isfinite(px) or br <= 0 or px <= 1e-12:
         return 0
+    cash_cap = max_whole_contracts_for_cash(br, px)
+    if cash_cap < 1:
+        return 0
     stake_cap = br * float(MAX_KELLY_BANKROLL_PCT)
-    return int(math.floor(stake_cap / px + 1e-12))
+    pct_cap = int(math.floor(stake_cap / px + 1e-12))
+    if pct_cap < 1:
+        return cash_cap
+    return min(pct_cap, cash_cap)
 
 
 def autonomous_buy_gate_failure(

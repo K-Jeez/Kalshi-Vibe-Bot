@@ -10,9 +10,10 @@ from src.clients.xai_client import XAIClient
 from src.decision_engine.strategy_math import (
     edge_pct_for_side,
     full_kelly_fraction_for_side,
-    kelly_contracts_for_side,
+    kelly_contracts_for_order,
     market_implied_pct_for_side,
 )
+from src.decision_engine.strategy_gates import kelly_contract_cap_for_bankroll
 from src.reconcile.open_positions import normalize_market_id
 from src.logger import setup_logging
 from src.util.datetimes import utc_iso_z, utc_now
@@ -80,7 +81,24 @@ def _enrich_strategy_fields(
     edge = edge_pct_for_side(direction, ai_yes_pct, yes_ask_f, no_ask_f, yes_mid, no_mid)
     mkt = market_implied_pct_for_side(direction, yes_ask_f, no_ask_f, yes_mid, no_mid)
     kf = full_kelly_fraction_for_side(direction, ai_yes_pct, yes_ask_f, no_ask_f, yes_mid, no_mid)
-    kc = kelly_contracts_for_side(float(bankroll), direction, ai_yes_pct, yes_ask_f, no_ask_f, yes_mid, no_mid)
+    if str(direction).upper() == "YES":
+        premium = float(yes_ask_f) if yes_ask_f is not None else yes_mid
+    else:
+        premium = float(no_ask_f) if no_ask_f is not None else no_mid
+    premium = max(1e-12, min(1.0, float(premium)))
+    br = float(bankroll)
+    kcap = kelly_contract_cap_for_bankroll(br, premium)
+    kc, _ = kelly_contracts_for_order(
+        br,
+        direction,
+        ai_yes_pct,
+        yes_ask_f,
+        no_ask_f,
+        yes_mid,
+        no_mid,
+        per_contract_premium=premium,
+        max_kelly_contracts=kcap,
+    )
     return {
         "ai_probability_yes_pct": ai_yes_pct,
         "market_implied_probability_pct": mkt,

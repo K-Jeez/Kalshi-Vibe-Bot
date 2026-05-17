@@ -59,6 +59,11 @@ def test_kelly_contract_cap_scales_with_bankroll():
     assert kelly_contract_cap_for_bankroll(1000, 0.50) == 100
 
 
+def test_kelly_contract_cap_small_bankroll_uses_cash_when_pct_below_one_contract():
+    # 5% of $10.46 < one contract at 67¢; cap falls back to cash affordance (15).
+    assert kelly_contract_cap_for_bankroll(10.46, 0.67) == 15
+
+
 def test_constants_sane():
     assert MAX_EDGE_TO_BUY_PCT == 22
     assert MAX_KELLY_BANKROLL_PCT == 0.05
