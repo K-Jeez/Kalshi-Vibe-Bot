@@ -34,7 +34,7 @@ async def reconcile_live_positions_from_kalshi(
 ) -> Tuple[int, int, int, int, int, int, int, int, int]:
     """Fetch Kalshi portfolio positions once and sync local ``Position`` rows.
 
-    1. **Existing** open rows: quantity and ``fees_paid`` from API (entry basis is not overwritten here).
+    1. **Existing** open rows: quantity, ``entry_cost`` / ``entry_price`` (``market_exposure``), ``fees_paid`` from API.
     2. **Missing** open rows: insert ``Position`` rows for Kalshi-only holdings (same key dedupe via
        :func:`src.reconcile.open_positions.get_open_position`).
     3. **Open live refinement** — ``GET /portfolio/orders/{buy}`` entry basis + mark/unrealized P&L.

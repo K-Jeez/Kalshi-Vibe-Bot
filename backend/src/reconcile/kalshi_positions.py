@@ -305,16 +305,22 @@ def _cursor_upsert(db: Session, trade_mode: str, mid_norm: str, lr: float, lf: f
 
 
 def apply_kalshi_snapshot_to_open_position(pos: Any, snap: KalshiPositionSnapshot) -> bool:
-    """Sync open-row **quantity** and cumulative **fees** from ``GET /portfolio/positions``.
+    """Sync open-row fields from ``GET /portfolio/positions`` (Kalshi UI / P&L parity).
 
-    Does **not** overwrite ``entry_cost`` / ``entry_price``: Kalshi ``market_exposure`` per contract can
-    disagree with held-side economics (e.g. NO leg shown as ~75¢ YES-complement vs ~26¢ true NO entry),
-    which made invested $ and unrealized P&L flip between dashboard refreshes. Entry basis comes from the
-    opening buy (bot fill or ``refresh_open_live_position_entry_from_kalshi_buy_order``).
+    Uses ``market_exposure_dollars`` for ``entry_cost`` / ``entry_price`` — Kalshi's official cost basis
+    (for NO legs this is complement-style exposure, e.g. ~76¢ and $5.35, not per-contract NO cash ~26¢).
+    Do **not** overwrite entry from ``GET /orders/{buy}`` held-side parsing; that disagrees with Kalshi
+    portfolio marks and made invested $ / unrealized P&L diverge from the Kalshi app.
     """
     changed = False
     if int(pos.quantity or 0) != int(snap.qty_whole):
         pos.quantity = int(snap.qty_whole)
+        changed = True
+    if abs(float(pos.entry_cost or 0.0) - float(snap.cost_usd)) > 1e-6:
+        pos.entry_cost = float(snap.cost_usd)
+        changed = True
+    if abs(float(pos.entry_price or 0.0) - float(snap.avg_price)) > 1e-8:
+        pos.entry_price = float(snap.avg_price)
         changed = True
     if abs(float(getattr(pos, "fees_paid", 0) or 0) - float(snap.fees_paid_dollars)) > 1e-6:
         pos.fees_paid = float(snap.fees_paid_dollars)
@@ -353,9 +359,11 @@ async def refresh_open_live_position_entry_from_kalshi_buy_order(
     *,
     kalshi_client: Any,
 ) -> bool:
-    """Overwrite ``entry_cost`` / ``entry_price`` (and buy ``Trade`` row) from ``GET /orders/{{buy}}``.
+    """Refresh the linked buy ``Trade`` row from ``GET /orders/{{buy}}`` (ledger only).
 
-    Keeps ``fees_paid`` from portfolio sync when already set (Kalshi cumulative leg fees).
+    Open ``Position.entry_*`` stays on Kalshi ``market_exposure`` from portfolio sync so dashboard
+    invested $ and unrealized P&L match the Kalshi app. Order-level held-side fill parsing can disagree
+    (e.g. buy-YES-notional for a NO leg → ~26¢ vs portfolio ~76¢).
     """
     if (pos.trade_mode or "") != "live" or (pos.status or "") != "open":
         return False
@@ -375,9 +383,6 @@ async def refresh_open_live_position_entry_from_kalshi_buy_order(
     f_b = max(0.0, float(kalshi_order_filled_contracts(bo)))
     if f_b < 1e-12:
         return False
-    q = max(0, int(pos.quantity or 0))
-    if q < 1:
-        return False
     fb_px = max(1e-6, float(pos.entry_price or 0.01))
     eff_b, tot_b = kalshi_order_avg_contract_price_and_cost_for_held_side(
         bo,
@@ -385,29 +390,21 @@ async def refresh_open_live_position_entry_from_kalshi_buy_order(
         filled=f_b,
         fallback_per_contract_dollars=fb_px,
     )
-    ratio = float(q) / float(f_b)
-    entry_cost_new = float(tot_b) * ratio
-    entry_price_new = entry_cost_new / float(q) if q > 0 else float(eff_b)
-
     changed = False
-    if abs(float(pos.entry_cost or 0.0) - entry_cost_new) > 1e-6:
-        pos.entry_cost = entry_cost_new
+    if abs(float(buy_t.price or 0.0) - float(eff_b)) > 1e-10:
+        buy_t.price = float(eff_b)
         changed = True
-    if abs(float(pos.entry_price or 0.0) - entry_price_new) > 1e-10:
-        pos.entry_price = entry_price_new
+    if abs(float(buy_t.total_cost or 0.0) - float(tot_b)) > 1e-6:
+        buy_t.total_cost = float(tot_b)
         changed = True
-    buy_t.price = float(eff_b)
-    buy_t.total_cost = float(tot_b)
-    db.add(buy_t)
-    db.add(pos)
     if changed:
-        _logger.info(
-            "Open position entry refreshed from Kalshi GET buy %s %s qty=%d eff=%.6f cost=%.4f",
+        db.add(buy_t)
+        _logger.debug(
+            "Open buy trade refreshed from Kalshi GET order %s %s eff=%.6f cost=%.4f (position entry unchanged)",
             pos.market_id,
             pos.side,
-            q,
-            entry_price_new,
-            entry_cost_new,
+            eff_b,
+            tot_b,
         )
     return changed
 
@@ -863,10 +860,9 @@ async def sync_open_position_qty_cost_from_kalshi(
     *,
     db: Optional[Session] = None,
 ) -> bool:
-    """Sync ``pos`` quantity and fees from Kalshi (same ticker + side).
+    """Sync ``pos`` quantity, entry basis, and fees from Kalshi (same ticker + side).
 
-    When ``db`` is passed and the row is still open with quantity ≥ 1, refines
-    ``entry_cost`` / ``entry_price`` from ``GET /portfolio/orders/{{buy}}`` (Kalshi trade-history parity).
+    Entry uses portfolio ``market_exposure`` (Kalshi UI parity), not ``GET /orders/{{buy}}``.
 
     Returns ``True`` when a matching portfolio row was applied (including flat).
     """
@@ -889,7 +885,5 @@ async def sync_open_position_qty_cost_from_kalshi(
             pos.fees_paid = float(snap.fees_paid_dollars)
             return True
         apply_kalshi_snapshot_to_open_position(pos, snap)
-        if db is not None and int(pos.quantity or 0) >= 1 and (pos.status or "") == "open":
-            await refresh_open_live_position_entry_from_kalshi_buy_order(db, pos, kalshi_client=kalshi_client)
         return True
     return False
