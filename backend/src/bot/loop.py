@@ -1367,7 +1367,9 @@ async def scan_and_trade(
                             "no_spread": m.get("no_spread"),
                             "volume": float(m.get("volume") or 0.0),
                             "expires_in_days": m.get("expires_in_days") or 1,
-                            "close_time": m.get("vetting_horizon_time") or m.get("close_time"),
+                            "close_time": m.get("close_time"),
+                            "expected_expiration_time": m.get("expected_expiration_time"),
+                            "vetting_horizon_time": m.get("vetting_horizon_time"),
                         }
                     )
                 try:
@@ -1449,8 +1451,6 @@ async def scan_and_trade(
                     description = enrich_ai_market_description(
                         (subtitle or contract_title).strip(), market
                     )
-                    ai_close_hint = market.get("vetting_horizon_time") or market.get("close_time")
-
                     yes_bid = market.get("yes_bid")
                     yes_ask = market.get("yes_ask")
                     no_bid = market.get("no_bid")
@@ -1474,8 +1474,11 @@ async def scan_and_trade(
                             "local_vetting_notes": f"Passed local vetting (liq/spread/volume/time).",
                         },
                         volume=volume,
-                        expires_in_days=expires_days,
-                        close_time=ai_close_hint,
+                        expires_in_days=float(expires_days or 1.0),
+                        close_time=market.get("close_time"),
+                        expected_expiration_time=market.get("expected_expiration_time"),
+                        vetting_horizon_time=market.get("vetting_horizon_time"),
+                        market_timing=market,
                         deployable_balance=float(balance),
                     )
                 except Exception as e:

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from src.bot.event_batch_partition import legs_are_all_line_ladder_partition
+from src.decision_engine.ai_prompt_timing import build_ai_timing_for_prompt, build_ai_timing_for_prompt_from_market
 from src.clients.xai_client import (
     EVENT_BATCH_SYSTEM_PROMPT,
     EVENT_BATCH_USER_TEMPLATE,
@@ -233,12 +234,14 @@ class GeminiClient:
         market_description: str,
         current_prices: dict,
         volume: float,
-        expires_in_days: int,
+        expires_in_days: float = 1.0,
         close_time: Optional[str] = None,
+        expected_expiration_time: Optional[str] = None,
+        vetting_horizon_time: Optional[str] = None,
+        market_timing: Optional[Dict[str, Any]] = None,
         temperature: float = 0.1,
     ) -> dict:
         """Analyze a prediction market using Gemini."""
-        now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         yes_price = current_prices.get("yes", 0.5)
         no_price = current_prices.get("no", 0.5)
 
@@ -262,24 +265,29 @@ class GeminiClient:
             except Exception:
                 return "N/A"
 
-        if expires_in_days >= 1:
-            time_desc = f"{expires_in_days} day(s)"
+        if market_timing:
+            timing = build_ai_timing_for_prompt_from_market(market_timing)
         else:
-            hours = int(expires_in_days * 24)
-            time_desc = f"~{hours} hour(s)"
-        if close_time:
-            time_desc += f" (closes {close_time[:10]})"
+            timing = build_ai_timing_for_prompt(
+                expected_expiration_time=expected_expiration_time,
+                vetting_horizon_time=vetting_horizon_time,
+                close_time=close_time,
+                expires_in_days_fallback=float(expires_in_days),
+            )
 
         user_prompt = USER_PROMPT_TEMPLATE.format(
             market_title=market_title,
             market_description=market_description,
-            now_utc=now_utc,
+            now_utc=timing["now_utc"],
+            resolution_at_utc=timing["resolution_at_utc"],
+            resolution_at_et=timing["resolution_at_et"],
+            time_until_resolution=timing["time_until_resolution"],
             yes_price=yes_price,
             no_price=no_price,
             yes_pct=yes_price * 100,
             no_pct=no_price * 100,
             volume=volume,
-            time_desc=time_desc,
+            time_desc=timing["time_desc"],
             yes_bid_str=_px_str(yes_bid),
             yes_ask_str=_px_str(yes_ask),
             no_bid_str=_px_str(no_bid),

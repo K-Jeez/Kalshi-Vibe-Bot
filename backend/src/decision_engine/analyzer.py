@@ -141,9 +141,12 @@ class DecisionEngine:
         market_description: str,
         current_prices: dict,
         volume: float,
-        expires_in_days: int,
+        expires_in_days: float = 1.0,
         *,
         close_time: Optional[str] = None,
+        expected_expiration_time: Optional[str] = None,
+        vetting_horizon_time: Optional[str] = None,
+        market_timing: Optional[Dict[str, Any]] = None,
         deployable_balance: float = 0.0,
     ) -> Dict[str, Any]:
         yes_price = float(current_prices.get("yes", 0.5) or 0.5)
@@ -165,6 +168,9 @@ class DecisionEngine:
             volume=volume,
             expires_in_days=expires_in_days,
             close_time=close_time,
+            expected_expiration_time=expected_expiration_time,
+            vetting_horizon_time=vetting_horizon_time,
+            market_timing=market_timing,
             temperature=self.temperature,
         )
 

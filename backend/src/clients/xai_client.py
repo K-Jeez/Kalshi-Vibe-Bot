@@ -21,6 +21,7 @@ import httpx
 
 from src.bot.event_batch_partition import legs_are_all_line_ladder_partition
 from src.clients.ai_json_parse import loads_json_object
+from src.decision_engine.ai_prompt_timing import build_ai_timing_for_prompt, build_ai_timing_for_prompt_from_market
 from src.logger import setup_logging
 from src.reconcile.open_positions import normalize_market_id
 
@@ -220,6 +221,8 @@ Goal: estimate **P(YES)** — the probability **this** contract settles YES — 
 
 **Threshold vs exact-hit:** Many Kalshi markets (crypto 15m, index levels, weather highs) use a numeric **threshold**: YES if the settlement index is **above** (or below) a stated level at expiration; NO otherwise. Labels like **"Target Price: $X"** are the comparison level — **not** a requirement that the index land exactly on $X. Never assign near-zero P(YES) on a standard above-threshold leg solely because exact equality is unlikely. Follow the **RESOLUTION** block in the user prompt when present.
 
+**Time / clock:** Use the server **CLOCK** block (UTC now, resolution anchor UTC + US/Eastern, **time until resolution**). Trust it over calendar-date guesses. Example: 10:00 PM EDT on May 17 equals 02:00 UTC on May 18 — at 01:44 UTC May 18 there are **16 minutes left**; do **not** treat the event as past just because the UTC date is May 18. While **time until resolution** shows positive minutes, do not claim the contract already expired.
+
 Use quotes/book **secondarily**: they inform whether a trade is worthwhile; poor liquidity can justify SKIP. Treat market-implied odds as informed sentiment; if your view diverges sharply from the market, explain the wedge in **reasoning** or choose **SKIP**.
 
 Do not choose a side mainly because it looks cheap/rich. Never recommend the side you think is less likely to win.
@@ -233,7 +236,11 @@ USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this co
 ═══════════════════════════════════════════════════════
 MARKET: {market_title}
 DESCRIPTION: {market_description}
-NOW (UTC): {now_utc}
+CLOCK (server-authoritative — use for before/after resolution; do not infer from title timezone alone):
+  NOW (UTC): {now_utc}
+  Resolution anchor (UTC): {resolution_at_utc}
+  Resolution anchor (US/Eastern): {resolution_at_et}
+  Time until resolution: {time_until_resolution}
 ═══════════════════════════════════════════════════════
 MARKET QUOTES — **sentiment baseline** (use with fundamentals; do not flip sides on price alone):
   YES: ${yes_price:.3f}  →  ~{yes_pct:.1f}% market-implied for YES
@@ -347,12 +354,14 @@ class XAIClient:
         market_description: str,
         current_prices: dict,
         volume: float,
-        expires_in_days: int,
+        expires_in_days: float = 1.0,
         close_time: Optional[str] = None,
+        expected_expiration_time: Optional[str] = None,
+        vetting_horizon_time: Optional[str] = None,
+        market_timing: Optional[Dict[str, Any]] = None,
         temperature: float = 0.1,
     ) -> dict:
         """Analyze a prediction market using Grok with real-time context."""
-        now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         yes_price = current_prices.get("yes", 0.5)
         no_price = current_prices.get("no", 0.5)
 
@@ -376,24 +385,29 @@ class XAIClient:
             except Exception:
                 return "N/A"
 
-        if expires_in_days >= 1:
-            time_desc = f"{expires_in_days} day(s)"
+        if market_timing:
+            timing = build_ai_timing_for_prompt_from_market(market_timing)
         else:
-            hours = int(expires_in_days * 24)
-            time_desc = f"~{hours} hour(s)"
-        if close_time:
-            time_desc += f" (closes {close_time[:10]})"
+            timing = build_ai_timing_for_prompt(
+                expected_expiration_time=expected_expiration_time,
+                vetting_horizon_time=vetting_horizon_time,
+                close_time=close_time,
+                expires_in_days_fallback=float(expires_in_days),
+            )
 
         user_prompt = USER_PROMPT_TEMPLATE.format(
             market_title=market_title,
             market_description=market_description,
-            now_utc=now_utc,
+            now_utc=timing["now_utc"],
+            resolution_at_utc=timing["resolution_at_utc"],
+            resolution_at_et=timing["resolution_at_et"],
+            time_until_resolution=timing["time_until_resolution"],
             yes_price=yes_price,
             no_price=no_price,
             yes_pct=yes_price * 100,
             no_pct=no_price * 100,
             volume=volume,
-            time_desc=time_desc,
+            time_desc=timing["time_desc"],
             yes_bid_str=_px_str(yes_bid),
             yes_ask_str=_px_str(yes_ask),
             no_bid_str=_px_str(no_bid),
@@ -591,8 +605,7 @@ def _format_event_batch_legs(legs: List[Dict[str, Any]]) -> str:
         desc = str(leg.get("market_description") or "").strip()
         cp = leg.get("current_prices") or {}
         vol = float(leg.get("volume") or 0.0)
-        expd = leg.get("expires_in_days")
-        ct = str(leg.get("close_time") or "").strip()
+        leg_timing = build_ai_timing_for_prompt_from_market(leg)
 
         def _px(v: Any) -> str:
             try:
@@ -619,7 +632,9 @@ def _format_event_batch_legs(legs: List[Dict[str, Any]]) -> str:
             f"YES mid/executable: {_px(cp.get('yes'))} | NO: {_px(cp.get('no'))}\n"
             f"BOOK: YES bid/ask {_px(yes_bid)}/{_px(yes_ask)} (ask size {_sz(yas)}) | "
             f"NO bid/ask {_px(no_bid)}/{_px(no_ask)} (ask size {_sz(nas)})\n"
-            f"24h volume: {vol:.0f} contracts | expires_in_days: {expd} | close_time: {ct or 'N/A'}\n"
+            f"24h volume: {vol:.0f} contracts\n"
+            f"CLOCK: now_utc={leg_timing['now_utc']} | resolution_utc={leg_timing['resolution_at_utc']} | "
+            f"resolution_et={leg_timing['resolution_at_et']} | {leg_timing['time_until_resolution']}\n"
         )
     return "\n".join(lines)
 
