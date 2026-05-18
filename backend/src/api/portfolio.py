@@ -114,7 +114,7 @@ def _serialize_open_positions(positions: List[Position]) -> List[Dict[str, Any]]
             "resolution_kalshi_payout_complete": resolution_kalshi_payout_complete_display(p),
             "kalshi_market_status": getattr(p, "kalshi_market_status", None),
             "kalshi_market_result": getattr(p, "kalshi_market_result", None),
-            # Stop-loss preview (dashboard): same ``(basis − est×qty)/basis`` rule as ``stop_loss_triggered_from_position``.
+            # Stop-loss preview (dashboard): same ``(entry − est)/entry`` rule as ``stop_loss_triggered_from_position``.
             "stop_loss_drawdown_pct_at_entry": getattr(p, "stop_loss_drawdown_pct_at_entry", None),
             "stop_loss_drawdown_effective": float(getattr(settings, "stop_loss_drawdown_pct", 0.0)),
             "exit_grace_minutes": float(getattr(settings, "exit_grace_minutes", 10.0)),

@@ -72,29 +72,24 @@ function SortHeader({
 
 export type StopLossDrawdownUi = { pct: number; level: 'warning' | 'trigger'; thresholdPct: number }
 
-function openCashBasisForStopPreview(pos: Position): number | null {
-  const fromApi = pos.cash_basis
-  if (fromApi != null && Number.isFinite(Number(fromApi)) && Number(fromApi) > 1e-9) {
-    return Number(fromApi)
+function entryPricePerContractForStop(pos: Position): number | null {
+  let entryPx = Number(pos.entry_price)
+  if (!Number.isFinite(entryPx) || entryPx <= 1e-12) {
+    const q = Math.max(0, Math.round(Number(pos.quantity) || 0))
+    const ec = Number(pos.entry_cost)
+    if (q <= 0 || !Number.isFinite(ec) || ec <= 1e-12) return null
+    entryPx = ec / q
   }
-  const q = Math.max(0, Math.round(Number(pos.quantity) || 0))
-  if (q <= 0) return null
-  const basis = positionCashInvestedUsd({
-    entry_cost: pos.entry_cost,
-    entry_price: pos.entry_price,
-    quantity: q,
-    fees_paid: pos.fees_paid,
-  })
-  return Number.isFinite(basis) && basis > 1e-9 ? basis : null
+  if (!Number.isFinite(entryPx) || entryPx <= 1e-12) return null
+  return Math.max(0, Math.min(1, entryPx))
 }
 
 /**
- * Value drawdown: ``(open cash basis − Est. Value×qty) / basis`` — same rule as the bot
- * (``stop_loss_triggered_from_position``) vs the **current** ``stop_loss_drawdown_effective`` / Settings.
- * Close column still shows ``Stop Loss: {pct}%`` (drawdown only).
+ * Mark drawdown: ``(entry − Est. Value) / entry`` per contract — same rule as the bot
+ * (``stop_loss_triggered_from_position``), fees excluded. Close column shows this % vs Settings threshold.
  * - ``trigger``: at or past stop threshold (red).
  * - ``warning``: within 5 percentage points of threshold but not yet there (yellow).
- * Null when still in grace, Est. Value unknown, unusable basis/qty, or drawdown is below the warning band.
+ * Null when still in grace, Est. Value unknown, unusable entry, or drawdown is below the warning band.
  */
 export function stopLossDrawdownDisplay(pos: Position, nowMs: number): StopLossDrawdownUi | null {
   const graceMin = Number(pos.exit_grace_minutes ?? 10)
@@ -110,20 +105,16 @@ export function stopLossDrawdownDisplay(pos: Position, nowMs: number): StopLossD
   if (!Number.isFinite(sl) || sl <= 0) return null
   const thresholdPct = Math.round(sl * 100)
 
-  const basis = openCashBasisForStopPreview(pos)
-  if (basis === null) return null
-
-  const q = Math.max(0, Math.round(Number(pos.quantity) || 0))
-  if (q <= 0) return null
+  const entryPx = entryPricePerContractForStop(pos)
+  if (entryPx === null) return null
 
   const estRaw = pos.estimated_price
   if (estRaw == null || !Number.isFinite(Number(estRaw))) return null
-  let ep = Number(estRaw)
-  if (!Number.isFinite(ep)) return null
-  ep = Math.max(0, Math.min(1, ep))
-  const estTotal = ep * q
+  let estPx = Number(estRaw)
+  if (!Number.isFinite(estPx)) return null
+  estPx = Math.max(0, Math.min(1, estPx))
 
-  const dd = (basis - estTotal) / basis
+  const dd = (entryPx - estPx) / entryPx
   if (!Number.isFinite(dd)) return null
 
   const pct = Math.round(dd * 100)

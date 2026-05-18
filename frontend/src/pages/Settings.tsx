@@ -274,7 +274,7 @@ export const Settings: React.FC = () => {
             edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
             no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
             Sports markets use a higher volume floor at scan time and +5 minutes exit grace. Stop-loss compares{' '}
-            <strong className="text-white">open cash basis</strong> to <strong className="text-white">Est. Value</strong> after grace
+            <strong className="text-white">entry price</strong> to <strong className="text-white">Est. Value</strong> per contract after grace
             (sports get +5 minutes). Contrarian longshots still get a fixed stricter edge and AI floor in code.
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
@@ -316,7 +316,7 @@ export const Settings: React.FC = () => {
                 </label>
                 <label className="flex min-h-0 flex-col gap-1">
                   <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Stop-loss drawdown (% of basis vs Est. Value)
+                    Stop-loss drawdown (% below entry vs Est. Value)
                   </span>
                   <input
                     type="text"
@@ -359,7 +359,7 @@ export const Settings: React.FC = () => {
                 <div>
                   <p className="text-sm font-medium text-white">Stop-loss auto sells</p>
                   <p className="text-xs text-white/80 mt-0.5">
-                    When enabled, the bot can exit when Est. Value is far enough below your open cash basis (manual sells always work).
+                    When enabled, the bot can exit when Est. Value has fallen far enough below your entry price (manual sells always work).
                   </p>
                 </div>
                 <button

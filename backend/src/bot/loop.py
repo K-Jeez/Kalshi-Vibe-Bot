@@ -687,8 +687,8 @@ async def monitor_positions(
             )
             past_grace = _position_age_minutes_utc(pos.opened_at) >= grace_min
 
-            # Stop-loss: open **cash basis** vs display **Est. Value** (``display_estimated_price_optional``),
-            # same totals the dashboard uses. Uses **current** ``STOP_LOSS_DRAWDOWN_PCT`` from Settings / tuning.
+            # Stop-loss: **entry price** vs display **Est. Value** per contract (fees excluded).
+            # Uses **current** ``STOP_LOSS_DRAWDOWN_PCT`` from Settings / tuning.
             sl_pct = float(getattr(settings, "stop_loss_drawdown_pct", 0.0))
             stop_sales_on = bool(getattr(settings, "stop_loss_selling_enabled", False))
             if stop_sales_on and not exit_reason and past_grace:
