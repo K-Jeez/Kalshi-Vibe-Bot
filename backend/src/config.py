@@ -11,9 +11,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Single source for tuning fallbacks (SQLite NULL / missing ORM attr); keep in sync with ``Settings`` field defaults below.
-DEFAULT_MIN_EDGE_TO_BUY_PCT = 6
-DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 62
-DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.85
+DEFAULT_MIN_EDGE_TO_BUY_PCT = 5
+DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
+DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.80
 DEFAULT_MAX_OPEN_POSITIONS = 30
 DEFAULT_AI_PROVIDER = "gemini"
 
@@ -86,8 +86,7 @@ class Settings(BaseSettings):
     # No stop-loss or counter-trend exits until the position is this old (minutes).
     # Reduces churn from spread / micro noise right after IOC fills.
     exit_grace_minutes: float = 10.0
-    # Stop-loss: exit when display **Est. Value** (per contract × qty) has dropped this fraction vs **open cash basis**
-    # (contract notional at open + buy-side fees in ``fees_paid`` — same basis as dashboard Entry / P&amp;L). 0.85 = 85% drawdown.
+    # Stop-loss: exit when Est. Value has fallen this fraction vs **entry price** per contract (fees excluded). 0.80 = 80% drawdown.
     stop_loss_drawdown_pct: float = DEFAULT_STOP_LOSS_DRAWDOWN_PCT
     # When False, the bot never auto-exits for stop-loss (manual sells still allowed). Default off until enabled in Settings.
     stop_loss_selling_enabled: bool = False

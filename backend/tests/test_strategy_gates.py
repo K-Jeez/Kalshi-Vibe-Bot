@@ -22,8 +22,8 @@ def test_effective_scan_min_volume_sports():
 
 
 def test_effective_min_edge_matches_settings():
-    assert effective_min_edge_for_market(6, "A vs B") == 6
-    assert effective_min_edge_for_market(6, "Bitcoin") == 6
+    assert effective_min_edge_for_market(5, "A vs B") == 5
+    assert effective_min_edge_for_market(5, "Bitcoin") == 5
 
 
 def test_exit_grace_sports_extra():

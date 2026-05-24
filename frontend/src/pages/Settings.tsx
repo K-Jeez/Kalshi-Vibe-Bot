@@ -36,9 +36,9 @@ export const Settings: React.FC = () => {
 
   useEffect(() => {
     if (!cur) return
-    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 6))))
-    setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.85) * 100)))
-    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 62))))
+    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 5))))
+    setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
+    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 60))))
     setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 30))))
   }, [cur])
 
@@ -281,7 +281,7 @@ export const Settings: React.FC = () => {
             Numbers here are stored in the <strong className="text-white">database</strong> (per paper/live), not read
             live from <code className="text-cyan-200/90">backend/.env</code>. After editing <code className="text-cyan-200/90">.env</code>, use{' '}
             <strong className="text-white">Restore configuration defaults</strong> below so SQLite matches your file (e.g.{' '}
-            <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT=0.85</code> → <strong className="text-white">85</strong> in this field), or type{' '}
+            <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT=0.80</code> → <strong className="text-white">80</strong> in this field), or type{' '}
             <strong className="text-white">85</strong> and <strong className="text-white">Save strategy settings</strong>.
           </p>
 
