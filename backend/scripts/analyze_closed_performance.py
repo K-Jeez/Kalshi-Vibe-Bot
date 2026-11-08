@@ -95,7 +95,7 @@ def load_rows(conn: sqlite3.Connection) -> List[ClosedRow]:
                 realized_pnl=float(r[7] or 0),
                 fees_paid=float(r[8] or 0),
                 exit_reason=r[9],
-                trade_mode=r[10] or "paper",
+                trade_mode=r[10] or "live",
                 opened_at=r[11],
                 closed_at=r[12],
                 kalshi_market_result=r[13],
@@ -143,7 +143,7 @@ def _load_rows_fixed(conn: sqlite3.Connection) -> List[ClosedRow]:
                 realized_pnl=float(r[7] or 0),
                 fees_paid=float(r[8] or 0),
                 exit_reason=r[9],
-                trade_mode=r[10] or "paper",
+                trade_mode=r[10] or "live",
                 opened_at=r[11],
                 closed_at=r[12],
                 kalshi_market_result=r[13],
@@ -256,12 +256,10 @@ def main() -> None:
     print(f"closed_positions={len(rows)} settled_with_outcome={len(settled)}")
     print(f"decision_logs={dl_total} executed_actions={dl_exec}")
 
-    for mode in ("paper", "live"):
-        sub = [r for r in rows if r.trade_mode == mode]
-        if not sub:
-            continue
-        print(f"\n=== MODE: {mode} ===")
-        print(json.dumps(summarize_group(mode, sub), indent=2))
+    sub = [r for r in rows if r.trade_mode == "live"]
+    if sub:
+        print("\n=== MODE: live ===")
+        print(json.dumps(summarize_group("live", sub), indent=2))
 
     print("\n=== EXIT REASON ===")
     by_exit: Dict[str, List[ClosedRow]] = defaultdict(list)

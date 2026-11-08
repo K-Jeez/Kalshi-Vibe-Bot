@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { RotateCcw, RefreshCw, Save } from 'lucide-react'
-import { apiClient, AiProvider, HealthResponse, TuningSnapshot } from '../api'
+import { apiClient, HealthResponse, TuningSnapshot } from '../api'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 export const Settings: React.FC = () => {
@@ -12,7 +12,6 @@ export const Settings: React.FC = () => {
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [resettingConfigDefaults, setResettingConfigDefaults] = useState(false)
   const [toggleSavingStopLoss, setToggleSavingStopLoss] = useState(false)
-  const [savingAiProvider, setSavingAiProvider] = useState(false)
   const [resettingHistory, setResettingHistory] = useState(false)
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [kalshiReconciling, setKalshiReconciling] = useState(false)
@@ -90,7 +89,6 @@ export const Settings: React.FC = () => {
   }
 
   const runKalshiReconcile = async () => {
-    if ((health?.mode ?? '').toLowerCase() !== 'live') return
     setKalshiReconciling(true)
     setKalshiReconcileMsg(null)
     try {
@@ -107,20 +105,6 @@ export const Settings: React.FC = () => {
       setKalshiReconcileMsg(typeof msg === 'string' ? msg : 'Reconcile failed (check backend logs).')
     } finally {
       setKalshiReconciling(false)
-    }
-  }
-
-  const persistAiProvider = async (provider: AiProvider) => {
-    if (!cur || cur.ai_provider === provider) return
-    setSavingAiProvider(true)
-    try {
-      const next = await apiClient.setAiProvider(provider)
-      setCur(next)
-    } catch (e) {
-      console.error('AI provider update error:', e)
-      alert('Failed to update AI provider.')
-    } finally {
-      setSavingAiProvider(false)
     }
   }
 
@@ -179,7 +163,9 @@ export const Settings: React.FC = () => {
     <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold text-white tracking-tight">Settings</h1>
-        <p className="text-white mt-1 text-sm">Strategy knobs, Kalshi reconcile, and history tools</p>
+        <p className="text-white mt-1 text-sm">
+          Live Kalshi trading · strategy knobs · reconcile · history
+        </p>
       </div>
 
       <section className="ui-surface-sm p-5">
@@ -187,12 +173,12 @@ export const Settings: React.FC = () => {
           <div className="min-w-0">
             <h2 className="text-base font-semibold text-white">Reconcile with Kalshi</h2>
             <p className="text-xs text-white mt-2 max-w-2xl">
-              Runs the same one-shot sync as the bot and positions API: portfolio positions, settlement reconciliation,
-              and flat-row alignment for closed rows.
+              Syncs this live account with Kalshi (same one-shot path as the bot and positions API): portfolio
+              positions, settlement reconciliation, and flat-row alignment for closed rows. API host is{' '}
+              <code className="text-cyan-200/90">KALSHI_BASE_URL</code> in{' '}
+              <code className="text-cyan-200/90">backend/.env</code> (default{' '}
+              <code className="text-cyan-200/90">https://external-api.kalshi.com</code>).
             </p>
-            {(health?.mode ?? '').toLowerCase() !== 'live' && (
-              <p className="text-xs text-amber-400/90 mt-2">Switch to live trading mode to use this action.</p>
-            )}
             {kalshiReconcileMsg && (
               <p className={`text-xs mt-2 ${kalshiReconcileMsg.includes('failed') ? 'text-red-400' : 'text-white'}`}>
                 {kalshiReconcileMsg}
@@ -202,9 +188,9 @@ export const Settings: React.FC = () => {
           <button
             type="button"
             onClick={() => void runKalshiReconcile()}
-            disabled={(health?.mode ?? '').toLowerCase() !== 'live' || kalshiReconciling}
+            disabled={kalshiReconciling || health?.status !== 'healthy'}
             className={`shrink-0 inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold border transition ${
-              (health?.mode ?? '').toLowerCase() === 'live' && !kalshiReconciling
+              !kalshiReconciling && health?.status === 'healthy'
                 ? 'bg-cyan-600/20 text-cyan-200 border-cyan-500/40 hover:bg-cyan-600/30'
                 : 'bg-brand-muted/12 text-white border-brand-muted/30 cursor-not-allowed'
             }`}
@@ -215,60 +201,34 @@ export const Settings: React.FC = () => {
         </div>
       </section>
 
-      <section className="ui-surface-sm p-5 space-y-4">
+      <section className="ui-surface-sm p-5 space-y-2">
         <h2 className="text-base font-semibold text-white">AI market analysis</h2>
         <p className="text-xs text-white/90 max-w-3xl">
-          Choose which model analyzes incoming markets. Changes apply immediately to the running bot (no restart).
-          Both providers bill your API account — set <code className="text-cyan-200/90">GEMINI_API_KEY</code> or{' '}
-          <code className="text-cyan-200/90">XAI_API_KEY</code> in <code className="text-cyan-200/90">backend/.env</code>.
-          When xAI is selected, optional Management API keys can show prepaid balance on the portfolio tile; Gemini has
-          no balance API in this app (check billing in Google AI Studio).
+          Market analysis uses <strong className="text-white">xAI Grok</strong>. Set{' '}
+          <code className="text-cyan-200/90">XAI_API_KEY</code> and optional{' '}
+          <code className="text-cyan-200/90">XAI_MODEL</code> in{' '}
+          <code className="text-cyan-200/90">backend/.env</code>
+          {cur?.xai_model ? (
+            <>
+              {' '}
+              (running model: <code className="text-cyan-200/90">{cur.xai_model}</code>).
+            </>
+          ) : (
+            <> (default <code className="text-cyan-200/90">grok-4.3</code>).</>
+          )}{' '}
+          Default <code className="text-cyan-200/90">grok-4.3</code> is the cost-efficient scan model; use{' '}
+          <code className="text-cyan-200/90">grok-4.7</code> for flagship quality. Restart the backend after
+          changing model or keys. Optional <code className="text-cyan-200/90">XAI_TEAM_ID</code> and{' '}
+          <code className="text-cyan-200/90">XAI_MANAGEMENT_API_KEY</code> enable the prepaid balance tile on the
+          dashboard.
         </p>
-        {!cur ? (
-          <p className="text-sm text-white">Loading…</p>
-        ) : (
-          <div className="flex flex-wrap gap-3">
-            {(
-              [
-                {
-                  id: 'gemini' as const,
-                  label: 'Gemini (default)',
-                  hint: `${cur.gemini_model ?? 'gemini-2.5-flash'} · GEMINI_API_KEY`,
-                },
-                {
-                  id: 'xai' as const,
-                  label: 'xAI (Grok)',
-                  hint: `${cur.xai_model ?? 'grok-3'} · XAI_API_KEY`,
-                },
-              ] as const
-            ).map((opt) => {
-              const selected = (cur.ai_provider ?? 'gemini') === opt.id
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  disabled={savingAiProvider}
-                  onClick={() => void persistAiProvider(opt.id)}
-                  className={`text-left px-4 py-3 rounded-lg border transition min-w-[10rem] ${
-                    selected
-                      ? 'bg-sky-600/20 text-sky-100 border-sky-500/45 ring-1 ring-sky-500/30'
-                      : 'bg-primary/40 text-white border-brand-muted/30 hover:border-brand-muted/50'
-                  } ${savingAiProvider ? 'opacity-60' : ''}`}
-                >
-                  <p className="text-sm font-semibold">{opt.label}</p>
-                  <p className="text-[11px] text-white/65 mt-0.5">{opt.hint}</p>
-                </button>
-              )
-            })}
-          </div>
-        )}
       </section>
 
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Position size uses <strong className="text-white">full Kelly</strong> from the active model&apos;s P(YES) and executable
+            Position size uses <strong className="text-white">full Kelly</strong> from Grok&apos;s P(YES) and executable
             asks, capped by deployable cash and an automatic <strong className="text-white">5% of deployable cash</strong> maximum premium per entry.
             Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
             edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
@@ -278,7 +238,7 @@ export const Settings: React.FC = () => {
             (sports get +5 minutes). Contrarian longshots still get a fixed stricter edge and AI floor in code.
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
-            Numbers here are stored in the <strong className="text-white">database</strong> (per paper/live), not read
+            Numbers here are stored in the <strong className="text-white">database</strong>, not read
             live from <code className="text-cyan-200/90">backend/.env</code>. After editing <code className="text-cyan-200/90">.env</code>, use{' '}
             <strong className="text-white">Restore configuration defaults</strong> below so SQLite matches your file (e.g.{' '}
             <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT=0.80</code> → <strong className="text-white">80</strong> in this field), or type{' '}
@@ -392,7 +352,7 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">History</h2>
           <p className="text-xs text-white/90">
-            Deletes all closed positions for this mode. Open legs are untouched. Strategy settings reset to config
+            Deletes all closed live positions. Open legs are untouched. Strategy settings reset to config
             defaults.
           </p>
           <button

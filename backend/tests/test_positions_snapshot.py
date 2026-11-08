@@ -37,13 +37,13 @@ class TestPositionsSnapshot(unittest.TestCase):
                     current_price=0.35,
                     unrealized_pnl=0.12,
                     status="open",
-                    trade_mode="paper",
+                    trade_mode="live",
                     opened_at=utc_now(),
                 )
             )
             db.commit()
 
-            out = load_open_positions_snapshot_payload(db, "paper")
+            out = load_open_positions_snapshot_payload(db, "live")
             self.assertEqual(len(out), 1)
             self.assertEqual(out[0]["id"], oid)
             self.assertEqual(out[0]["market_id"], "KXTEST-1")
@@ -84,7 +84,7 @@ class TestPositionsSnapshot(unittest.TestCase):
                         decision="BUY_NO",
                         confidence=0.72,
                         ai_probability_yes_pct=20,
-                        trade_mode="paper",
+                        trade_mode="live",
                         timestamp=t0 - timedelta(hours=1),
                     ),
                     DecisionLog(
@@ -94,7 +94,7 @@ class TestPositionsSnapshot(unittest.TestCase):
                         decision="SKIP",
                         confidence=0.1,
                         ai_probability_yes_pct=88,
-                        trade_mode="paper",
+                        trade_mode="live",
                         timestamp=t0,
                     ),
                     Position(
@@ -109,7 +109,7 @@ class TestPositionsSnapshot(unittest.TestCase):
                         current_price=0.42,
                         unrealized_pnl=0.01,
                         status="open",
-                        trade_mode="paper",
+                        trade_mode="live",
                         opened_at=t0 - timedelta(minutes=30),
                         entry_decision_log_id=log_entry,
                     ),
@@ -117,7 +117,7 @@ class TestPositionsSnapshot(unittest.TestCase):
             )
             db.commit()
 
-            out = load_open_positions_snapshot_payload(db, "paper")
+            out = load_open_positions_snapshot_payload(db, "live")
             self.assertEqual(len(out), 1)
             self.assertEqual(out[0]["entry_decision_log_id"], log_entry)
             self.assertIn("entry_analysis", out[0])
@@ -131,7 +131,7 @@ class TestPositionsSnapshot(unittest.TestCase):
         db = self.Session()
         try:
             pid_live = str(uuid.uuid4())
-            pid_paper = str(uuid.uuid4())
+            pid_orphan = str(uuid.uuid4())
             now = utc_now()
             db.add_all(
                 [
@@ -150,9 +150,9 @@ class TestPositionsSnapshot(unittest.TestCase):
                         opened_at=now,
                     ),
                     Position(
-                        id=pid_paper,
+                        id=pid_orphan,
                         market_id="KXB",
-                        market_title="Paper leg",
+                        market_title="Orphan non-live leg",
                         side="YES",
                         quantity=2,
                         entry_price=0.5,
@@ -166,8 +166,8 @@ class TestPositionsSnapshot(unittest.TestCase):
                 ]
             )
             db.commit()
-            paper_only = load_open_positions_snapshot_payload(db, "paper")
-            self.assertEqual(len(paper_only), 1)
-            self.assertEqual(paper_only[0]["id"], pid_paper)
+            live_only = load_open_positions_snapshot_payload(db, "live")
+            self.assertEqual(len(live_only), 1)
+            self.assertEqual(live_only[0]["id"], pid_live)
         finally:
             db.close()

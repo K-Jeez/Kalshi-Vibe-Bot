@@ -344,7 +344,7 @@ Include **outcome_probability_pct_by_market_id** when the legs are **mutually ex
 class XAIClient:
     """xAI Grok client: outcome-first P(YES); microstructure informs SKIP."""
 
-    def __init__(self, api_key: str, model: str = "grok-3"):
+    def __init__(self, api_key: str, model: str = "grok-4.3"):
         self.api_key = api_key
         self.model = model
 

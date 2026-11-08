@@ -16,17 +16,18 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
-    func,
     text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from src.config import (
+    AI_PROVIDER,
     DEFAULT_AI_PROVIDER,
     DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
     DEFAULT_STOP_LOSS_DRAWDOWN_PCT,
+    TRADE_MODE,
     settings,
 )
 from src.logger import logger as app_logger
@@ -48,7 +49,7 @@ class Trade(Base):
     total_cost   = Column(Float, nullable=False)
     realized_pnl = Column(Float, default=0.0)
     timestamp    = Column(DateTime(timezone=True), default=utc_now)
-    trade_mode   = Column(String, default="paper")   # "paper" | "live"
+    trade_mode   = Column(String, default="live")  # historical column; app is live-only
 
 
 class Position(Base):
@@ -79,7 +80,7 @@ class Position(Base):
     expected_expiration_time = Column(String, nullable=True)  # Kalshi event/market expected end — UI "Ends"
     kalshi_market_status = Column(String, nullable=True)  # Kalshi GET /markets ``status``: active, closed, determined, finalized, …
     kalshi_market_result = Column(String, nullable=True)  # ``yes`` / ``no`` when outcome is known for the contract
-    trade_mode      = Column(String, default="paper")  # "paper" | "live"
+    trade_mode      = Column(String, default="live")  # historical column; app is live-only
     last_recheck_at = Column(DateTime(timezone=True), nullable=True)
     awaiting_settlement = Column(Boolean, default=False)  # live: dead book — defer IOC exits until Kalshi settles
     dead_market = Column(Boolean, default=False)  # live: native bid ladder empty — UI "Dead Market"; cleared when bids return
@@ -136,7 +137,7 @@ class DecisionLog(Base):
     snapshot_volume     = Column(Float, nullable=True)
     snapshot_expires_days = Column(Float, nullable=True)
     timestamp           = Column(DateTime(timezone=True), default=utc_now)
-    trade_mode          = Column(String, default="paper")  # "paper" | "live"
+    trade_mode          = Column(String, default="live")  # historical column; app is live-only
 
 
 class EventSeriesLock(Base):
@@ -146,7 +147,7 @@ class EventSeriesLock(Base):
     __table_args__ = (UniqueConstraint("trade_mode", "event_ticker", name="uq_event_series_lock_mode_event"),)
 
     id = Column(String, primary_key=True)
-    trade_mode = Column(String, nullable=False, default="paper")  # "paper" | "live"
+    trade_mode = Column(String, nullable=False, default="live")  # historical column; app is live-only
     event_ticker = Column(String, nullable=False)  # normalized upper
     chosen_market_id = Column(String, nullable=False)  # normalized market id upper
     chosen_side = Column(String, nullable=True)  # "YES" | "NO"
@@ -190,7 +191,7 @@ class BotState(Base):
 
 
 class VaultState(Base):
-    """Per-mode (paper/live) reserve that is *locked away* from new entries.
+    """Live-only reserve that is *locked away* from new entries (single row keyed by ``trade_mode``).
 
     This does not affect the broker/Kalshi cash balance; it is an internal budgeting guard
     so the bot and UI size buys using (uninvested_cash - vault_balance).
@@ -200,26 +201,26 @@ class VaultState(Base):
     __table_args__ = (UniqueConstraint("trade_mode", name="uq_vault_state_trade_mode"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    trade_mode = Column(String, nullable=False, default="paper")  # "paper" | "live"
+    trade_mode = Column(String, nullable=False, default="live")  # historical column; app is live-only
     vault_balance = Column(Float, default=0.0)
     updated_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class TuningState(Base):
-    """Per-mode (paper/live): stop-loss, minimum edge to buy, master stop-loss switch."""
+    """Live-only strategy knobs (single row keyed by ``trade_mode``)."""
 
     __tablename__ = "tuning_state"
     __table_args__ = (UniqueConstraint("trade_mode", name="uq_tuning_state_trade_mode"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    trade_mode = Column(String, nullable=False, default="paper")  # "paper" | "live"
+    trade_mode = Column(String, nullable=False, default="live")  # historical column; app is live-only
 
     stop_loss_drawdown_pct = Column(Float, default=DEFAULT_STOP_LOSS_DRAWDOWN_PCT)
     stop_loss_selling_enabled = Column(Boolean, default=False)
     min_edge_to_buy_pct = Column(Integer, default=DEFAULT_MIN_EDGE_TO_BUY_PCT)
     min_ai_win_prob_buy_side_pct = Column(Integer, default=DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
     max_open_positions = Column(Integer, default=DEFAULT_MAX_OPEN_POSITIONS)
-    ai_provider = Column(String, default=DEFAULT_AI_PROVIDER)  # "gemini" | "xai"
+    ai_provider = Column(String, default=DEFAULT_AI_PROVIDER)  # always xai (Grok)
 
     updated_at = Column(DateTime(timezone=True), default=utc_now)
 
@@ -326,11 +327,12 @@ def init_db():
     try:
         from src.reconcile.open_positions import dedupe_open_positions, ensure_open_position_unique_index
 
-        for mode in ("paper", "live"):
-            dedupe_open_positions(db, mode)
+        dedupe_open_positions(db, TRADE_MODE)
         ensure_open_position_unique_index(engine)
-        _ensure_tuning_rows_per_mode(db)
-        _ensure_vault_rows_per_mode(db)
+        _ensure_tuning_row(db)
+        _ensure_vault_row(db)
+        _purge_paper_trade_mode_rows(engine)
+        _force_tuning_ai_provider_xai(engine)
         app_logger.info("Database initialized: %s", settings.database_url)
     finally:
         db.close()
@@ -453,7 +455,7 @@ def _run_migrations(engine):
         ("decision_logs", "snapshot_no_price",    "FLOAT"),
         ("decision_logs", "snapshot_volume",      "FLOAT"),
         ("decision_logs", "snapshot_expires_days", "FLOAT"),
-        ("decision_logs", "trade_mode", "TEXT DEFAULT 'paper'"),
+        ("decision_logs", "trade_mode", "TEXT DEFAULT 'live'"),
         ("positions",     "last_recheck_at",   "DATETIME"),
         ("positions",     "ask_price",         "FLOAT"),
         ("positions", "awaiting_settlement", "BOOLEAN DEFAULT 0"),
@@ -499,59 +501,135 @@ def get_db():
         db.close()
 
 
-def _ensure_tuning_rows_per_mode(db) -> None:
-    """Ensure paper and live tuning rows exist (idempotent). Used after migrations."""
-    for mode in ("paper", "live"):
-        existing = db.query(TuningState).filter(TuningState.trade_mode == mode).first()
-        if existing:
-            continue
-        row = TuningState(
-            trade_mode=mode,
-            stop_loss_drawdown_pct=float(settings.stop_loss_drawdown_pct),
-            stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
-            min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
-            min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
-            max_open_positions=int(settings.bot_max_open_positions),
-            ai_provider=str(settings.default_ai_provider),
-        )
-        db.add(row)
+def _ensure_tuning_row(db) -> None:
+    """Ensure the live tuning row exists (idempotent). Used after migrations."""
+    mode = TRADE_MODE
+    existing = db.query(TuningState).filter(TuningState.trade_mode == mode).first()
+    if existing:
+        return
+    row = TuningState(
+        trade_mode=mode,
+        stop_loss_drawdown_pct=float(settings.stop_loss_drawdown_pct),
+        stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
+        min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
+        min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
+        max_open_positions=int(settings.bot_max_open_positions),
+        ai_provider=AI_PROVIDER,
+    )
+    db.add(row)
     db.commit()
 
 
-def _ensure_vault_rows_per_mode(db) -> None:
-    """Ensure paper and live vault rows exist (idempotent). Used after migrations."""
-    for mode in ("paper", "live"):
-        existing = db.query(VaultState).filter(VaultState.trade_mode == mode).first()
-        if existing:
-            continue
-        db.add(VaultState(trade_mode=mode, vault_balance=0.0))
+def _ensure_vault_row(db) -> None:
+    """Ensure the live vault row exists (idempotent). Used after migrations."""
+    mode = TRADE_MODE
+    existing = db.query(VaultState).filter(VaultState.trade_mode == mode).first()
+    if existing:
+        return
+    db.add(VaultState(trade_mode=mode, vault_balance=0.0))
     db.commit()
 
 
-def get_paper_cash_balance(db, starting_balance: float) -> float:
-    """Compute paper cash from trade history.
+def _purge_paper_trade_mode_rows(engine: Engine) -> None:
+    """One-shot removal of legacy paper-mode rows (idempotent via ``_bot_patches``)."""
+    patch_id = "purge_paper_trade_mode_v1"
 
-    We treat Trade.total_cost as:
-    - buy: cash outflow
-    - sell: cash inflow (proceeds)
-    """
-    buy_outflow = (
-        db.query(func.coalesce(func.sum(Trade.total_cost), 0.0))
-        .filter(Trade.trade_mode == "paper", Trade.action == "buy")
-        .scalar()
-    )
-    sell_inflow = (
-        db.query(func.coalesce(func.sum(Trade.total_cost), 0.0))
-        .filter(Trade.trade_mode == "paper", Trade.action == "sell")
-        .scalar()
-    )
-    return float(starting_balance + float(sell_inflow or 0.0) - float(buy_outflow or 0.0))
+    def _try(conn, sql: str) -> None:
+        try:
+            conn.execute(text(sql))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
+    with engine.connect() as conn:
+        try:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS _bot_patches (
+                        id TEXT PRIMARY KEY
+                    )
+                    """
+                )
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            return
+
+        try:
+            if conn.execute(
+                text("SELECT 1 FROM _bot_patches WHERE id = :id"),
+                {"id": patch_id},
+            ).fetchone():
+                return
+        except Exception:
+            conn.rollback()
+            return
+
+        for table in (
+            "positions",
+            "trades",
+            "decision_logs",
+            "event_series_locks",
+            "kalshi_reconcile_cursor",
+            "vault_state",
+            "tuning_state",
+        ):
+            _try(conn, f"DELETE FROM {table} WHERE trade_mode = 'paper'")
+
+        try:
+            conn.execute(text("INSERT INTO _bot_patches (id) VALUES (:id)"), {"id": patch_id})
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
+
+def _force_tuning_ai_provider_xai(engine: Engine) -> None:
+    """One-shot: force persisted ``tuning_state.ai_provider`` to xai."""
+    patch_id = "force_tuning_ai_provider_xai_v1"
+
+    with engine.connect() as conn:
+        try:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS _bot_patches (
+                        id TEXT PRIMARY KEY
+                    )
+                    """
+                )
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            return
+
+        try:
+            if conn.execute(
+                text("SELECT 1 FROM _bot_patches WHERE id = :id"),
+                {"id": patch_id},
+            ).fetchone():
+                return
+        except Exception:
+            conn.rollback()
+            return
+
+        try:
+            conn.execute(
+                text("UPDATE tuning_state SET ai_provider = :prov WHERE ai_provider IS NULL OR ai_provider != :prov"),
+                {"prov": AI_PROVIDER},
+            )
+            conn.execute(text("INSERT INTO _bot_patches (id) VALUES (:id)"), {"id": patch_id})
+            conn.commit()
+        except Exception:
+            conn.rollback()
 
 
 def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
-    mode = trade_mode or settings.trading_mode
-    if mode not in ("paper", "live"):
-        mode = "paper"
+    mode = (trade_mode or TRADE_MODE).strip().lower()
+    if mode != TRADE_MODE:
+        mode = TRADE_MODE
     row = db.query(TuningState).filter(TuningState.trade_mode == mode).first()
     if not row:
         row = TuningState(
@@ -561,8 +639,13 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
             min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
             min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
             max_open_positions=int(settings.bot_max_open_positions),
-            ai_provider=str(settings.default_ai_provider),
+            ai_provider=AI_PROVIDER,
         )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    elif str(row.ai_provider or "").strip().lower() != AI_PROVIDER:
+        row.ai_provider = AI_PROVIDER
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -570,9 +653,9 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
 
 
 def ensure_vault_state(db, trade_mode: Optional[str] = None) -> VaultState:
-    mode = trade_mode or settings.trading_mode
-    if mode not in ("paper", "live"):
-        mode = "paper"
+    mode = (trade_mode or TRADE_MODE).strip().lower()
+    if mode != TRADE_MODE:
+        mode = TRADE_MODE
     row = db.query(VaultState).filter(VaultState.trade_mode == mode).first()
     if not row:
         row = VaultState(trade_mode=mode, vault_balance=0.0)

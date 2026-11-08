@@ -53,7 +53,7 @@ def test_shared_parser_handles_xai_style_wrappers():
 
 async def _xai_live_suite():
     """Run all live xAI calls in one event loop (shared httpx client)."""
-    client = XAIClient(api_key=_XAI_KEY, model=os.getenv("XAI_MODEL", "grok-3"))
+    client = XAIClient(api_key=_XAI_KEY, model=os.getenv("XAI_MODEL", "grok-4.3"))
     single = await client.analyze_market(
         market_title="Will Team A win the match?",
         market_description="Resolves YES if Team A wins at full time.",
@@ -123,13 +123,9 @@ async def _xai_live_suite():
         event_title="Soccer match",
         legs=legs,
     )
-    gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip() or "unused"
     engine = DecisionEngine(
         xai_api_key=_XAI_KEY,
-        xai_model=os.getenv("XAI_MODEL", "grok-3"),
-        gemini_api_key=gemini_key,
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        ai_provider="xai",
+        xai_model=os.getenv("XAI_MODEL", "grok-4.3"),
     )
     engine_row = await engine.analyze_market(
         market_id="XAI-ENGINE-1",

@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from src.api.broadcast import broadcast_update
 from src.app_state import app_state
 from src.clients.kalshi_client import buy_side_liquidity_skip_summary
-from src.config import settings
-from src.database.models import Position, Trade, get_db, get_paper_cash_balance
+from src.config import TRADE_MODE, settings
+from src.database.models import Position, Trade, get_db
 from src.logger import logger
 from src.reconcile.open_positions import get_open_position, normalize_market_id
 
@@ -63,95 +63,76 @@ async def place_trade(
             detail = liq.replace("Skipped — ", "", 1).strip()
             raise HTTPException(status_code=400, detail=f"Untradeable book: {detail}")
 
-        buy_fees = 0.0
-        if settings.trading_mode == "live":
-            from src.clients.kalshi_client import (
-                executable_buy_best_ask_dollars,
-                kalshi_order_avg_contract_price_and_cost,
-                kalshi_order_fees_dollars,
-                kalshi_order_filled_contracts,
-                live_ioc_buy_cap_dollars,
-            )
+        from src.clients.kalshi_client import (
+            executable_buy_best_ask_dollars,
+            kalshi_order_avg_contract_price_and_cost,
+            kalshi_order_fees_dollars,
+            kalshi_order_filled_contracts,
+            live_ioc_buy_cap_dollars,
+        )
 
-            ask_px = executable_buy_best_ask_dollars(m, side_up)
-            book_cap = live_ioc_buy_cap_dollars(m, side_up)
-            cap = float(limit_price)
-            if ask_px is None or book_cap is None:
-                raise HTTPException(status_code=400, detail="No usable ask for IOC buy")
-            gross = 1.0 - float(ask_px)
-            if gross <= 1e-9:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Buy ask at or above $1 (no gross upside)",
-                )
-            min_res = float(getattr(settings, "local_min_residual_payoff", 0.0))
-            if min_res > 1e-12 and gross + 1e-12 < min_res:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Gross upside ${gross:.2f}/contract below floor ({min_res:.2f})",
-                )
-            if cap + 1e-9 < ask_px:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"limit_price ({cap:.4f}) is below ask ({ask_px:.4f}); IOC cannot fill without resting",
-                )
-            ioc_limit = min(cap, book_cap)
-            if ioc_limit + 1e-9 < ask_px:
-                raise HTTPException(status_code=400, detail="Effective IOC limit below ask")
+        ask_px = executable_buy_best_ask_dollars(m, side_up)
+        book_cap = live_ioc_buy_cap_dollars(m, side_up)
+        cap = float(limit_price)
+        if ask_px is None or book_cap is None:
+            raise HTTPException(status_code=400, detail="No usable ask for IOC buy")
+        gross = 1.0 - float(ask_px)
+        if gross <= 1e-9:
+            raise HTTPException(
+                status_code=400,
+                detail="Buy ask at or above $1 (no gross upside)",
+            )
+        min_res = float(getattr(settings, "local_min_residual_payoff", 0.0))
+        if min_res > 1e-12 and gross + 1e-12 < min_res:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Gross upside ${gross:.2f}/contract below floor ({min_res:.2f})",
+            )
+        if cap + 1e-9 < ask_px:
+            raise HTTPException(
+                status_code=400,
+                detail=f"limit_price ({cap:.4f}) is below ask ({ask_px:.4f}); IOC cannot fill without resting",
+            )
+        ioc_limit = min(cap, book_cap)
+        if ioc_limit + 1e-9 < ask_px:
+            raise HTTPException(status_code=400, detail="Effective IOC limit below ask")
 
-            # Place the order using the raw market ticker when possible (some valid tickers can be mis-normalized).
-            result = await kc.place_buy_ioc_limit(raw_mid or mid, side_up, quantity, ioc_limit)
-            if result.get("error"):
-                raise HTTPException(status_code=502, detail=result["error"])
-            filled = kalshi_order_filled_contracts(result)
-            qty_int = max(0, int(math.floor(float(filled) + 1e-9)))
-            if qty_int < 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail="IOC buy did not fill any whole contracts",
-                )
-            avg_px, fill_cost = kalshi_order_avg_contract_price_and_cost(
-                result,
-                filled=filled,
-                fallback_per_contract_dollars=float(ioc_limit),
+        # Place the order using the raw market ticker when possible (some valid tickers can be mis-normalized).
+        result = await kc.place_buy_ioc_limit(raw_mid or mid, side_up, quantity, ioc_limit)
+        if result.get("error"):
+            raise HTTPException(status_code=502, detail=result["error"])
+        filled = kalshi_order_filled_contracts(result)
+        qty_int = max(0, int(math.floor(float(filled) + 1e-9)))
+        if qty_int < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="IOC buy did not fill any whole contracts",
             )
-            scale = float(qty_int) / float(filled) if filled > 1e-9 else 1.0
-            buy_fees = float(kalshi_order_fees_dollars(result)) * scale
-            order_id = result.get("order_id") or result.get("client_order_id") or str(uuid.uuid4())
-            trade = Trade(
-                id=order_id,
-                market_id=mid,
-                market_title=title,
-                action="buy",
-                side=side_up,
-                quantity=qty_int,
-                price=avg_px,
-                total_cost=fill_cost,
-                trade_mode=settings.trading_mode,
-            )
-        else:
-            cash = get_paper_cash_balance(db, settings.paper_starting_balance)
-            if (quantity * limit_price) > cash:
-                raise HTTPException(status_code=400, detail="Insufficient paper cash for trade")
-            order_id = str(uuid.uuid4())
-            logger.info("Paper trade: %s %s x%d @ %.3f", side, mid, quantity, limit_price)
-            trade = Trade(
-                id=order_id,
-                market_id=mid,
-                market_title=title,
-                action="buy",
-                side=side_up,
-                quantity=quantity,
-                price=limit_price,
-                total_cost=quantity * limit_price,
-                trade_mode=settings.trading_mode,
-            )
+        avg_px, fill_cost = kalshi_order_avg_contract_price_and_cost(
+            result,
+            filled=filled,
+            fallback_per_contract_dollars=float(ioc_limit),
+        )
+        scale = float(qty_int) / float(filled) if filled > 1e-9 else 1.0
+        buy_fees = float(kalshi_order_fees_dollars(result)) * scale
+        order_id = result.get("order_id") or result.get("client_order_id") or str(uuid.uuid4())
+        trade = Trade(
+            id=order_id,
+            market_id=mid,
+            market_title=title,
+            action="buy",
+            side=side_up,
+            quantity=qty_int,
+            price=avg_px,
+            total_cost=fill_cost,
+            trade_mode=TRADE_MODE,
+        )
 
         db.add(trade)
 
         existing = get_open_position(
             db,
-            trade_mode=settings.trading_mode,
+            trade_mode=TRADE_MODE,
             market_id=mid,
             side=side_up,
         )
@@ -169,13 +150,12 @@ async def place_trade(
                 current_price=trade.price,
                 fees_paid=float(buy_fees),
                 status="open",
-                trade_mode=settings.trading_mode,
+                trade_mode=TRADE_MODE,
             ))
         else:
             existing.quantity += trade.quantity
             existing.entry_cost += trade.total_cost
-            if settings.trading_mode == "live":
-                existing.fees_paid = float(getattr(existing, "fees_paid", 0) or 0) + buy_fees
+            existing.fees_paid = float(getattr(existing, "fees_paid", 0) or 0) + buy_fees
             if existing.quantity > 0:
                 existing.entry_price = existing.entry_cost / existing.quantity
 
@@ -197,7 +177,7 @@ async def get_performance_stats(db: Session = Depends(get_db)):
     try:
         trades = (
             db.query(Trade)
-            .filter(Trade.trade_mode == settings.trading_mode)
+            .filter(Trade.trade_mode == TRADE_MODE)
             .order_by(Trade.timestamp)
             .all()
         )
@@ -212,7 +192,7 @@ async def get_performance_stats(db: Session = Depends(get_db)):
             db.query(Position)
             .filter(
                 Position.status == "closed",
-                Position.trade_mode == settings.trading_mode,
+                Position.trade_mode == TRADE_MODE,
             )
             .all()
         )

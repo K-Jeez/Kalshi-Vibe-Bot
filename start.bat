@@ -5,7 +5,7 @@ title Kalshi Vibe Bot
 
 echo.
 echo  ============================================================
-echo    Kalshi Vibe Bot  ^|  xAI-powered prediction trading 
+echo    Kalshi Vibe Bot  ^|  Live Kalshi trading + xAI Grok
 echo  ============================================================
 echo.
 

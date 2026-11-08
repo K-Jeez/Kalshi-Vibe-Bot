@@ -742,7 +742,7 @@ class KalshiClient:
         self,
         api_key: str,
         private_key_path: str,
-        base_url: str = "https://api.elections.kalshi.com",
+        base_url: str = "https://external-api.kalshi.com",
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")

@@ -1,5 +1,3 @@
-from typing import Literal
-
 from pydantic import BaseModel, model_validator
 
 
@@ -7,16 +5,8 @@ class BotStateRequest(BaseModel):
     state: str
 
 
-class TradingModeRequest(BaseModel):
-    mode: str
-
-
 class StopLossSellingRequest(BaseModel):
     enabled: bool
-
-
-class AiProviderRequest(BaseModel):
-    provider: Literal["gemini", "xai"]
 
 
 class StrategyKnobsRequest(BaseModel):

@@ -1,4 +1,4 @@
-"""Extract and parse JSON from LLM chat responses (Gemini, xAI, etc.)."""
+"""Extract and parse JSON from LLM chat responses (xAI, etc.)."""
 
 from __future__ import annotations
 

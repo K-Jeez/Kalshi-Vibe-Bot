@@ -1,4 +1,4 @@
-"""Backfill ``bid_price``, ``current_price``, and ``unrealized_pnl`` for open live positions.
+"""Backfill ``bid_price``, ``current_price``, and ``unrealized_pnl`` for open positions.
 
 Uses strict observable bids (REST ``yes_bid``/``no_bid`` + optional ``GET …/orderbook`` when the
 snapshot shows no bid). Fixes stale rows that still show ~1¢ from older parity/composite logic.
@@ -6,7 +6,6 @@ snapshot shows no bid). Fixes stale rows that still show ~1¢ from older parity/
 Usage from ``backend/``::
 
     python scripts/backfill_open_position_bid_marks.py
-    python scripts/backfill_open_position_bid_marks.py --force-live
 
 Requires ``KALSHI_*`` credentials in ``.env`` and network access.
 """
@@ -25,20 +24,12 @@ if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
 from src.clients.kalshi_client import KalshiClient
-from src.config import settings
+from src.config import TRADE_MODE, settings
 from src.database.models import Position, get_session_local
 from src.reconcile.kalshi_positions import recompute_open_live_position_unrealized_pnl
 
 
-async def _run(*, force_live: bool) -> None:
-    mode_env = (settings.trading_mode or "").strip().lower()
-    if mode_env != "live" and not force_live:
-        print(
-            "TRADING_MODE is not live — refusing Kalshi calls "
-            "(pass --force-live to backfill trade_mode=live rows anyway).",
-        )
-        return
-
+async def _run() -> None:
     client = KalshiClient(
         settings.kalshi_api_key,
         settings.kalshi_private_key_path,
@@ -53,7 +44,7 @@ async def _run(*, force_live: bool) -> None:
     try:
         rows = (
             db.query(Position)
-            .filter(Position.status == "open", Position.trade_mode == "live")
+            .filter(Position.status == "open", Position.trade_mode == TRADE_MODE)
             .order_by(Position.opened_at.asc())
             .all()
         )
@@ -69,14 +60,8 @@ async def _run(*, force_live: bool) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Backfill bid marks for open live positions from Kalshi.")
-    ap.add_argument(
-        "--force-live",
-        action="store_true",
-        help="Run even when TRADING_MODE is not live (still updates trade_mode=live rows only).",
-    )
-    args = ap.parse_args()
-    asyncio.run(_run(force_live=bool(args.force_live)))
+    argparse.ArgumentParser(description="Backfill bid marks for open live positions from Kalshi.").parse_args()
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

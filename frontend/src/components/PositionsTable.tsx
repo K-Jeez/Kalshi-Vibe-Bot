@@ -129,14 +129,12 @@ export function stopLossDrawdownDisplay(pos: Position, nowMs: number): StopLossD
 }
 
 export interface PositionsTableProps {
-  tradingMode?: 'paper' | 'live'
   analyses: DecisionAnalysis[]
   expandedDetailKey: string | null
   onToggleDetail: (key: string) => void
 }
 
 export const PositionsTable: React.FC<PositionsTableProps> = ({
-  tradingMode = 'paper',
   analyses,
   expandedDetailKey,
   onToggleDetail,
@@ -416,7 +414,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
           </thead>
           <tbody className="divide-y divide-black/20">
             {sortedPositions.map((pos) => {
-              const ui = presentOpenPositionRow(pos, tradingMode, nowMs)
+              const ui = presentOpenPositionRow(pos, nowMs)
               const pnlNum =
                 pos.unrealized_pnl === null || pos.unrealized_pnl === undefined
                   ? null
@@ -601,7 +599,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                       className="px-2 py-3 text-center align-top w-[8.75rem] min-w-[8.75rem]"
                       title={
                         ui.showSellButton
-                          ? 'Sell at best bid via IOC (live) or mark (paper).'
+                          ? 'Sell at best bid via IOC on Kalshi.'
                           : ui.closeHint || 'Exit not offered for this row.'
                       }
                       aria-label={ui.showSellButton ? 'Close position' : `Close unavailable: ${ui.closeHint ?? 'ended or illiquid'}`}

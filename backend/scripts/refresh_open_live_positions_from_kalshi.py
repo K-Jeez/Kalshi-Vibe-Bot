@@ -1,8 +1,8 @@
-"""Refresh **open** live positions from Kalshi: portfolio snapshot + buy-order entry + unrealized P&L.
+"""Refresh open positions from Kalshi: portfolio snapshot + buy-order entry + unrealized P&L.
 
 1. ``GET /portfolio/positions`` → existing open rows (qty, cost, avg, fees).
 2. Import Kalshi-only open legs missing locally.
-3. For each open live row: ``GET /portfolio/orders/{{buy}}`` entry refinement + bid-based mark/unrealized P&L (strict observable bids + orderbook when snapshot bid is 0).
+3. For each open row: ``GET /portfolio/orders/{{buy}}`` entry refinement + bid-based mark/unrealized P&L (strict observable bids + orderbook when snapshot bid is 0).
 
 Does **not** run settlement closes, flat-row closed deltas, or closure finalization (use the full
 UI reconcile or ``refinalize_live_closed_pnl.py`` for closed legs).
@@ -10,10 +10,6 @@ UI reconcile or ``refinalize_live_closed_pnl.py`` for closed legs).
 Usage (from ``backend/``)::
 
     python scripts/refresh_open_live_positions_from_kalshi.py
-    python scripts/refresh_open_live_positions_from_kalshi.py --force-live
-
-``--force-live`` allows calling Kalshi when ``TRADING_MODE`` is not ``live`` (still updates
-``trade_mode=live`` rows only).
 
 Requires valid ``KALSHI_*`` credentials in ``.env`` and network access.
 """
@@ -34,7 +30,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 from sqlalchemy import func
 
 from src.clients.kalshi_client import KalshiClient
-from src.config import settings
+from src.config import TRADE_MODE, settings
 from src.database.models import Position, get_session_local
 from src.reconcile.kalshi_positions import (
     import_missing_open_positions_from_kalshi,
@@ -52,15 +48,7 @@ def _sum_open_unrealized(db, trade_mode: str) -> float:
     return float(v or 0.0)
 
 
-async def _run(*, force_live: bool) -> None:
-    mode_env = (settings.trading_mode or "").strip().lower()
-    if mode_env != "live" and not force_live:
-        print(
-            "TRADING_MODE is not live — refusing to call Kalshi for open-position refresh "
-            "(pass --force-live to refresh trade_mode=live rows anyway).",
-        )
-        return
-
+async def _run() -> None:
     client = KalshiClient(
         settings.kalshi_api_key,
         settings.kalshi_private_key_path,
@@ -68,23 +56,23 @@ async def _run(*, force_live: bool) -> None:
     )
     db = get_session_local()()
     try:
-        before = _sum_open_unrealized(db, "live")
+        before = _sum_open_unrealized(db, TRADE_MODE)
         api_rows = list(await client.get_positions() or [])
         n_open = sync_open_positions_from_kalshi_portfolio_rows(
-            db, trade_mode="live", api_rows=api_rows
+            db, trade_mode=TRADE_MODE, api_rows=api_rows
         )
         db.commit()
         n_imp = await import_missing_open_positions_from_kalshi(
             db,
-            trade_mode="live",
+            trade_mode=TRADE_MODE,
             api_rows=api_rows,
             kalshi_client=client,
         )
         n_ent, n_un = await refresh_open_live_positions_from_kalshi_orders(
-            db, trade_mode="live", kalshi_client=client
+            db, trade_mode=TRADE_MODE, kalshi_client=client
         )
         db.commit()
-        after = _sum_open_unrealized(db, "live")
+        after = _sum_open_unrealized(db, TRADE_MODE)
         print(
             f"Open refresh: portfolio_field_updates={n_open} imported={n_imp} "
             f"entry_order_refreshes={n_ent} unrealized_refreshes={n_un}",
@@ -95,14 +83,8 @@ async def _run(*, force_live: bool) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Refresh open live positions from Kalshi API.")
-    ap.add_argument(
-        "--force-live",
-        action="store_true",
-        help="Run even when TRADING_MODE is not live (still updates trade_mode=live rows only).",
-    )
-    args = ap.parse_args()
-    asyncio.run(_run(force_live=args.force_live))
+    argparse.ArgumentParser(description="Refresh open live positions from Kalshi API.").parse_args()
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

@@ -37,8 +37,8 @@ export interface Portfolio {
   kalshi_resting_order_count?: number
   resting_buy_collateral_estimate_usd?: number
   kalshi_resting_orders_preview?: KalshiRestingOrderPreview[]
-  /** Active AI provider for market analysis (``gemini`` | ``xai``). */
-  ai_provider?: AiProvider
+  /** Legacy API field; analyzer is always xAI Grok. */
+  ai_provider?: string
   /** True when the bot would fetch markets and run AI analysis this tick (Play + gates in scan_eligibility). */
   order_search_active?: boolean
   /** Short status for the dashboard scan indicator. */
@@ -60,7 +60,7 @@ export interface Position {
   side: string
   quantity: number
   entry_price: number
-  /** Total cost basis in dollars (Kalshi source-of-truth in live mode). */
+  /** Total cost basis in dollars (Kalshi source of truth). */
   entry_cost?: number
   /** Best bid on held side — liquidation mark (matches ``current_price`` when refreshed). */
   bid_price?: number | null
@@ -166,8 +166,8 @@ export type AnalysisActionTaken =
 
 export interface DecisionAnalysis {
   decision_id: string
-  /** Present when logged after this feature; matches paper/live trading mode. */
-  trade_mode?: 'paper' | 'live'
+  /** Present on newer rows; always ``live``. */
+  trade_mode?: 'live'
   decision: 'BUY_YES' | 'BUY_NO' | 'SKIP'
   confidence: number
   /** AI subjective P(YES) at settlement, 0–100. */
@@ -187,13 +187,13 @@ export interface DecisionAnalysis {
   market_title: string
   timestamp: string
   escalated_to_xai: boolean
-  /** Same as ``escalated_to_xai`` (provider-neutral name). */
+  /** Alias of ``escalated_to_xai``. */
   escalated_to_ai?: boolean
-  /** Model provider for this row (``gemini`` | ``xai``); set by API when blob omits it. */
-  ai_provider?: AiProvider
+  /** Always ``xai`` for new analyses. */
+  ai_provider?: string
   /** Legacy field: same as ``edge_pct`` when present. */
   edge: number
-  /** LLM response blob (legacy key name; used for Gemini and xAI). */
+  /** Grok analysis blob. */
   xai_analysis?: XAIAnalysis
   /** Alias of ``xai_analysis``. */
   ai_analysis?: XAIAnalysis
@@ -214,36 +214,27 @@ export interface ClosedPositionsResponse {
 export interface AnalysesStats {
   since_hours: number
   total_analyses: number
-  /** LLM-escalated analyses (legacy API key; same count as ``escalated_to_ai``). */
+  /** Analyses that ran through the LLM (same count as ``escalated_to_ai``). */
   escalated_to_xai: number
-  /** LLM-escalated analyses (Gemini or xAI). */
+  /** Alias of ``escalated_to_xai``. */
   escalated_to_ai?: number
 }
 
-/** Human label for an analysis provider id (``xai_analysis.provider`` or settings). */
-export function aiProviderDisplayName(provider?: string | null): string {
-  const p = String(provider || '').toLowerCase()
-  if (p === 'xai') return 'xAI'
-  if (p === 'gemini') return 'Gemini'
-  return 'AI'
+export type AiProvider = 'xai'
+
+/** Human label for the analysis model (xAI Grok). */
+export function aiProviderDisplayName(_provider?: string | null): string {
+  return 'xAI'
 }
 
-/** Provider that produced a saved analysis row (top-level field, blob, or optional fallback). */
+/** Show the xAI logo when a row has LLM analysis metadata. */
 export function analysisAiProviderId(
   a: Pick<DecisionAnalysis, 'xai_analysis' | 'ai_analysis' | 'ai_provider' | 'escalated_to_xai' | 'escalated_to_ai'>,
-  fallback?: AiProvider | null,
+  _fallback?: AiProvider | null,
 ): AiProvider | null {
-  const top = String(a.ai_provider ?? '').toLowerCase()
-  if (top === 'xai' || top === 'gemini') return top
-  const blob = a.xai_analysis ?? a.ai_analysis
-  const p = String(blob?.provider ?? '').toLowerCase()
-  if (p === 'xai' || p === 'gemini') return p
-  const model = String(blob?.model ?? '').toLowerCase()
-  if (model.includes('gemini')) return 'gemini'
-  if (model.includes('grok')) return 'xai'
-  // Legacy rows without provider/model: escalated_to_xai meant Grok only (pre-Gemini).
   if (a.escalated_to_xai || a.escalated_to_ai) return 'xai'
-  if (fallback) return fallback
+  const blob = a.xai_analysis ?? a.ai_analysis
+  if (a.ai_provider || blob?.provider || blob?.model) return 'xai'
   return null
 }
 
@@ -282,8 +273,6 @@ export interface LogEntry {
   message: string
 }
 
-export type AiProvider = 'gemini' | 'xai'
-
 export interface TuningSnapshot {
   stop_loss_drawdown_pct: number
   min_edge_to_buy_pct: number
@@ -293,10 +282,9 @@ export interface TuningSnapshot {
   min_ai_win_prob_buy_side_pct?: number
   /** Max open legs before new-entry market scan + AI analysis pauses. */
   max_open_positions?: number
-  /** Active provider for market analysis: Gemini (default) or xAI (Grok). */
-  ai_provider?: AiProvider
-  /** Model ids from server config (for Settings hints). */
-  gemini_model?: string
+  /** Legacy field from API; analyzer is always xAI. */
+  ai_provider?: string
+  /** Model id from server config (``XAI_MODEL``; default ``grok-4.3``). */
   xai_model?: string
   updated_at?: string | null
 }
@@ -320,7 +308,6 @@ const client = axios.create({
 
 export interface HealthResponse {
   status: string
-  mode: string
   version?: string
   timestamp?: string
 }
@@ -398,7 +385,6 @@ export const apiClient = {
   /** Kalshi GET /markets for recent closed rows — fills ``kalshi_market_result`` when determined. */
   refreshClosedPositionsResolution: async (
     limit = 50,
-    tradeMode?: 'paper' | 'live',
     onlyMissingResult?: boolean,
   ): Promise<{
     examined: number
@@ -409,7 +395,7 @@ export const apiClient = {
     const { data } = await client.post('/positions/closed/refresh-resolution', null, {
       params: {
         limit,
-        ...(tradeMode ? { trade_mode: tradeMode } : {}),
+        trade_mode: 'live',
         ...(onlyMissingResult ? { only_missing_result: true } : {}),
       },
     })
@@ -476,12 +462,6 @@ export const apiClient = {
     return data
   },
 
-  // Trading mode
-  setTradingMode: async (mode: 'paper' | 'live'): Promise<{ mode: string; bot_state?: string }> => {
-    const { data } = await client.post('/settings/mode', { mode })
-    return data
-  },
-
   // Bot state
   getBotState: async (): Promise<BotStateInfo> => {
     const { data } = await client.get('/bot/state')
@@ -522,11 +502,6 @@ export const apiClient = {
 
   resetTuningToConfigDefaults: async (): Promise<TuningSnapshot> => {
     const { data } = await client.post('/tuning/reset-to-config-defaults')
-    return data
-  },
-
-  setAiProvider: async (provider: AiProvider): Promise<TuningSnapshot> => {
-    const { data } = await client.post('/tuning/ai-provider', { provider })
     return data
   },
 

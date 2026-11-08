@@ -1,10 +1,9 @@
 """AI decision engine: outcome direction + calibrated P(YES), with server-side edge and Kelly."""
 
 import uuid
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
-from src.ai_provider import ai_provider_display_name, normalize_ai_provider
-from src.clients.gemini_client import GeminiClient
+from src.ai_provider import ai_provider_display_name
 from src.clients.kalshi_client import buy_side_liquidity_skip_summary
 from src.clients.xai_client import XAIClient
 from src.decision_engine.strategy_math import (
@@ -109,30 +108,17 @@ def _enrich_strategy_fields(
 
 
 class DecisionEngine:
-    """Gemini or xAI decision engine with server-side edge and full Kelly sizing."""
+    """xAI (Grok) decision engine with server-side edge and full Kelly sizing."""
 
     def __init__(
         self,
         *,
         xai_api_key: str,
-        xai_model: str = "grok-3",
-        gemini_api_key: str,
-        gemini_model: str = "gemini-2.5-flash",
+        xai_model: str = "grok-4.3",
         temperature: float = 0.1,
-        ai_provider: str = "gemini",
     ):
         self.xai = XAIClient(api_key=xai_api_key, model=xai_model)
-        self.gemini = GeminiClient(api_key=gemini_api_key, model=gemini_model)
         self.temperature = float(temperature)
-        self.ai_provider = normalize_ai_provider(ai_provider)
-
-    def set_ai_provider(self, provider: str) -> None:
-        self.ai_provider = normalize_ai_provider(provider)
-
-    def _active_client(self) -> Union[XAIClient, GeminiClient]:
-        if self.ai_provider == "xai":
-            return self.xai
-        return self.gemini
 
     async def analyze_market(
         self,
@@ -160,8 +146,8 @@ class DecisionEngine:
             "escalated_to_xai": True,
         }
 
-        provider_label = ai_provider_display_name(self.ai_provider)
-        ai_result = await self._active_client().analyze_market(
+        provider_label = ai_provider_display_name()
+        ai_result = await self.xai.analyze_market(
             market_title=market_title,
             market_description=market_description,
             current_prices=current_prices,
@@ -261,8 +247,8 @@ class DecisionEngine:
         if not legs:
             raise ValueError("legs must be non-empty")
 
-        provider_label = ai_provider_display_name(self.ai_provider)
-        xai_raw = await self._active_client().analyze_event_best_trade(
+        provider_label = ai_provider_display_name()
+        xai_raw = await self.xai.analyze_event_best_trade(
             event_ticker=event_ticker,
             event_title=event_title,
             legs=legs,
@@ -296,8 +282,8 @@ class DecisionEngine:
 
         xai_analysis = {
             **{k: v for k, v in xai_raw.items() if k not in ("provider", "model")},
-            "provider": str(xai_raw.get("provider") or self.ai_provider),
-            "model": str(xai_raw.get("model") or getattr(self._active_client(), "model", "")),
+            "provider": str(xai_raw.get("provider") or "xai"),
+            "model": str(xai_raw.get("model") or self.xai.model),
             "event_batch": True,
             "event_ticker": event_ticker,
             "event_leg_count": len(legs),

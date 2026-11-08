@@ -51,7 +51,7 @@ export interface PositionRowPresentation {
   deadWhileOpen: boolean
   versusResult: 'won' | 'lost' | null
   showSellButton: boolean
-  /** Short label when Close shows no button (paper + live). */
+  /** Short label when Close shows no button. */
   closeHint?: string
   /** Primary line for Ends column (countdown or status word). */
   endsPrimary: string
@@ -63,11 +63,7 @@ export interface PositionRowPresentation {
   pnlIsRealizable: boolean
 }
 
-export function presentOpenPositionRow(
-  pos: Position,
-  tradingMode: 'paper' | 'live',
-  nowMs: number,
-): PositionRowPresentation {
+export function presentOpenPositionRow(pos: Position, nowMs: number): PositionRowPresentation {
   const endsAtIso = positionEndsAtIso(pos, nowMs)
   const eventClockEnded = isCloseTimePassed(endsAtIso, nowMs)
   const delayedSchedule = tradeableExpectedExpirationPassed(pos, nowMs)
@@ -78,7 +74,7 @@ export function presentOpenPositionRow(
 
   const bidUsd = Number(pos.bid_price ?? pos.current_price)
   const bidLooksEmpty = !Number.isFinite(bidUsd) || bidUsd <= 0
-  const flaggedDead = tradingMode === 'live' && !!pos.dead_market
+  const flaggedDead = !!pos.dead_market
 
   const deadWhileOpen =
     !eventClockEnded &&

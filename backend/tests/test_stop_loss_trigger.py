@@ -90,7 +90,7 @@ class TestStopLossValueDrawdown(unittest.TestCase):
             current_price=0.5,
             unrealized_pnl=0.0,
             status="open",
-            trade_mode="paper",
+            trade_mode="live",
             opened_at=utc_now(),
             fees_paid=0.5,
             estimated_price=0.70,

@@ -1,4 +1,4 @@
-"""Recalculate closed **live** positions from Kalshi (settlements + GET /orders) and persist to SQLite.
+"""Recalculate closed positions from Kalshi (settlements + GET /orders) and persist to SQLite.
 
 Uses the updated IOC / NO-sell fill parsing so ``Position.realized_pnl``, exit marks, and linked
 ``Trade`` rows align with Kalshi. Portfolio totals on ``GET /portfolio`` sum ``Position.realized_pnl``
@@ -7,11 +7,9 @@ for closed rows — no separate aggregate table needs patching.
 Usage (from ``backend/``)::
 
     python scripts/refinalize_live_closed_pnl.py
-    python scripts/refinalize_live_closed_pnl.py --force-live   # when .env has TRADING_MODE=paper
 
 Options::
 
-    --force-live     Repair ``trade_mode=live`` rows using Kalshi keys even if TRADING_MODE is paper
     --max-pages N    Settlement pagination depth (default 40 × 250 rows)
 
 Requires valid ``KALSHI_*`` credentials and network access.
@@ -34,7 +32,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 from sqlalchemy import func
 
 from src.clients.kalshi_client import KalshiClient
-from src.config import settings
+from src.config import TRADE_MODE, settings
 from src.database.models import Position, get_session_local
 from src.reconcile.kalshi_closed_position_finalize import (
     finalize_live_closed_positions_from_kalshi,
@@ -51,15 +49,7 @@ def _sum_closed_realized(db, trade_mode: str) -> float:
     return float(v or 0.0)
 
 
-async def _run(*, force_live: bool, settlement_max_pages: int) -> None:
-    mode_env = (settings.trading_mode or "").strip().lower()
-    if mode_env != "live" and not force_live:
-        print(
-            "TRADING_MODE is not live — refusing to call Kalshi for DB repair "
-            "(pass --force-live to refresh trade_mode=live rows anyway).",
-        )
-        return
-
+async def _run(*, settlement_max_pages: int) -> None:
     client = KalshiClient(
         settings.kalshi_api_key,
         settings.kalshi_private_key_path,
@@ -74,10 +64,10 @@ async def _run(*, force_live: bool, settlement_max_pages: int) -> None:
 
     db = get_session_local()()
     try:
-        before = _sum_closed_realized(db, "live")
+        before = _sum_closed_realized(db, TRADE_MODE)
         closed_live = (
             db.query(Position)
-            .filter(Position.trade_mode == "live", Position.status == "closed")
+            .filter(Position.trade_mode == TRADE_MODE, Position.status == "closed")
             .all()
         )
         for pos in closed_live:
@@ -90,7 +80,7 @@ async def _run(*, force_live: bool, settlement_max_pages: int) -> None:
         while True:
             n = await finalize_live_closed_positions_from_kalshi(
                 db,
-                trade_mode="live",
+                trade_mode=TRADE_MODE,
                 kalshi_client=client,
                 settlement_rows=settlement_rows,
             )
@@ -106,7 +96,7 @@ async def _run(*, force_live: bool, settlement_max_pages: int) -> None:
         basis_updates = 0
         for pos in (
             db.query(Position)
-            .filter(Position.trade_mode == "live", Position.status == "closed")
+            .filter(Position.trade_mode == TRADE_MODE, Position.status == "closed")
             .order_by(Position.closed_at.asc())
             .all()
         ):
@@ -117,11 +107,11 @@ async def _run(*, force_live: bool, settlement_max_pages: int) -> None:
         db.commit()
         print(f"Refreshed entry/exit/fees/P&L from paired buy+sell GET orders: {basis_updates} row(s).")
 
-        after = _sum_closed_realized(db, "live")
+        after = _sum_closed_realized(db, TRADE_MODE)
         unfinalized = (
             db.query(func.count(Position.id))
             .filter(
-                Position.trade_mode == "live",
+                Position.trade_mode == TRADE_MODE,
                 Position.status == "closed",
                 Position.kalshi_closure_finalized.is_(False),
             )
@@ -143,18 +133,13 @@ async def _run(*, force_live: bool, settlement_max_pages: int) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Recalculate closed live P&L from Kalshi.")
     ap.add_argument(
-        "--force-live",
-        action="store_true",
-        help="Run even when TRADING_MODE is not live (still updates trade_mode=live positions only).",
-    )
-    ap.add_argument(
         "--max-pages",
         type=int,
         default=40,
         help="Max settlement API pages (250 rows each). Default 40.",
     )
     args = ap.parse_args()
-    asyncio.run(_run(force_live=args.force_live, settlement_max_pages=args.max_pages))
+    asyncio.run(_run(settlement_max_pages=args.max_pages))
 
 
 if __name__ == "__main__":

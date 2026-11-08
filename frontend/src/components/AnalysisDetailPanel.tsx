@@ -7,7 +7,6 @@ import {
   AiProvider,
   DecisionAnalysis,
   AnalysisActionTaken,
-  aiProviderDisplayName,
   analysisAiProviderId,
 } from '../api'
 import { AiProviderLogo } from './AiProviderLogo'
@@ -205,9 +204,9 @@ export const AnalysisMarketSnapshot: React.FC<{ a: DecisionAnalysis }> = ({ a })
 /** Same AI analysis block as the Dashboard feed card (without outer list chrome). */
 export const AnalysisDetailBody: React.FC<{
   a: DecisionAnalysis
-  /** When the saved blob lacks provider (legacy rows), use active Settings provider. */
+  /** Unused; analyzer is always xAI Grok. */
   fallbackProvider?: AiProvider | null
-}> = ({ a, fallbackProvider }) => {
+}> = ({ a, fallbackProvider: _fallbackProvider }) => {
   const [ctxOpen, setCtxOpen] = React.useState(false)
   const badgeDecision = effectiveAnalysisBadgeDecision(a)
   const badgeYes = badgeDecision === 'BUY_YES'
@@ -228,7 +227,7 @@ export const AnalysisDetailBody: React.FC<{
       ? 'bg-red-500/20 text-red-400 border-red-500/30'
       : 'bg-brand-muted/15 text-white border-brand-muted/30'
 
-  const analysisProvider = analysisAiProviderId(a, fallbackProvider)
+  const analysisProvider = analysisAiProviderId(a)
 
   const time = formatUtcIsoLocal(a.timestamp, '—', {
     month: 'numeric',
@@ -245,7 +244,7 @@ export const AnalysisDetailBody: React.FC<{
           <AnalysisMarketSnapshot a={a} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {analysisProvider ? <AiProviderLogo provider={analysisProvider} className="h-9 w-9" /> : null}
+          {analysisProvider ? <AiProviderLogo className="h-9 w-9" /> : null}
           <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
             {formatDecisionBadge(badgeDecision)}
           </span>
@@ -255,7 +254,7 @@ export const AnalysisDetailBody: React.FC<{
       {a.escalated_to_xai && (
         <div className="mb-2 rounded-lg border border-brand-muted/30 bg-primary/35 p-3 space-y-2">
           <p className="text-[10px] text-sky-300/90 font-medium">
-            Analyzed by {aiProviderDisplayName(analysisProvider ?? a.xai_analysis?.provider ?? a.ai_analysis?.provider)}
+            Grok analysis
             {a.xai_analysis?.model ? (
               <span className="text-white/50 font-normal"> · {a.xai_analysis.model}</span>
             ) : null}

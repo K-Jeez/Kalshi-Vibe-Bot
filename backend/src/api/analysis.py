@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from src.api.broadcast import broadcast_update
 from src.app_state import app_state
-from src.config import settings
-from src.database.models import DecisionLog, get_db, get_paper_cash_balance, get_vault_balance
+from src.config import TRADE_MODE, settings
+from src.database.models import DecisionLog, get_db, get_vault_balance
 from src.logger import logger
 from src.analysis_payload import enrich_analysis_ai_provider
 from src.reconcile.open_positions import normalize_market_id
@@ -84,7 +84,7 @@ def serialize_decision_log_to_analysis(log: DecisionLog) -> dict:
 
     row = {
         "decision_id": log.id,
-        "trade_mode": getattr(log, "trade_mode", None) or settings.trading_mode,
+        "trade_mode": getattr(log, "trade_mode", None) or TRADE_MODE,
         "market_id": log.market_id,
         "market_title": log.market_title,
         "decision": log.decision,
@@ -152,9 +152,7 @@ def fetch_latest_decision_logs_for_market_ids(
     db: Session, market_ids: List[str], *, trade_mode: Optional[str] = None
 ) -> Dict[str, DecisionLog]:
     """Latest ``DecisionLog`` per normalized ticker (for open legs outside the recent feed window)."""
-    mode = (trade_mode or settings.trading_mode or "paper").strip().lower()
-    if mode not in ("paper", "live"):
-        mode = "paper"
+    mode = (trade_mode or TRADE_MODE).strip().lower()
 
     lookup_ids = decision_log_lookup_sql_ids(market_ids)
     if not lookup_ids:
@@ -195,9 +193,7 @@ def fetch_decision_logs_by_ids(
     db: Session, decision_ids: List[str], *, trade_mode: Optional[str] = None
 ) -> Dict[str, DecisionLog]:
     """Return ``DecisionLog`` rows keyed by ``id`` (string), filtered by trade mode."""
-    mode = (trade_mode or settings.trading_mode or "paper").strip().lower()
-    if mode not in ("paper", "live"):
-        mode = "paper"
+    mode = (trade_mode or TRADE_MODE).strip().lower()
     ids = sorted({str(i).strip() for i in decision_ids if i and str(i).strip()})
     if not ids:
         return {}
@@ -227,13 +223,17 @@ async def analyze_market(
     try:
         logger.info("Manual analysis: %s", market_title)
         canon_mid = normalize_market_id(market_id)
-        from src.database.models import get_paper_cash_balance, get_vault_balance
+        from src.clients.kalshi_client import resting_buy_collateral_estimate_usd
 
-        if settings.trading_mode == "paper":
-            uninvested = float(get_paper_cash_balance(db, settings.paper_starting_balance))
-        else:
-            uninvested = max(0.0, float(settings.paper_starting_balance))
-        vault = float(get_vault_balance(db, trade_mode=settings.trading_mode))
+        kc = app_state.kalshi_client
+        if kc is None:
+            raise HTTPException(status_code=503, detail="Kalshi client not ready")
+        live = await kc.get_portfolio()
+        api_cash = float(live.get("cash", 0.0) or 0.0)
+        resting_orders = await kc.list_orders(status="resting")
+        resting_buy_reserve = resting_buy_collateral_estimate_usd(resting_orders)
+        uninvested = max(0.0, api_cash - float(resting_buy_reserve))
+        vault = float(get_vault_balance(db, trade_mode=TRADE_MODE))
         deployable = max(0.0, uninvested - min(vault, uninvested))
 
         decision = await de.analyze_market(
@@ -294,7 +294,7 @@ async def analyze_market(
             snapshot_no_price=_snap["no_price"],
             snapshot_volume=_snap["volume"],
             snapshot_expires_days=_snap["expires_in_days"],
-            trade_mode=settings.trading_mode,
+            trade_mode=TRADE_MODE,
         )
         db.add(log)
         db.commit()
@@ -306,7 +306,7 @@ async def analyze_market(
             float(decision.get("edge_pct", 0) or 0),
             market_id,
         )
-        decision["trade_mode"] = settings.trading_mode
+        decision["trade_mode"] = TRADE_MODE
         _strip_ephemeral_analysis_fields(decision)
         enrich_analysis_ai_provider(decision)
         await broadcast_update({"type": "analysis", "data": decision})
@@ -326,7 +326,7 @@ async def get_analyses_stats(since_hours: int = 168, db: Session = Depends(get_d
             db.query(DecisionLog)
             .filter(
                 DecisionLog.timestamp >= cutoff,
-                DecisionLog.trade_mode == settings.trading_mode,
+                DecisionLog.trade_mode == TRADE_MODE,
             )
         )
         total_analyses = base.count()
@@ -348,7 +348,7 @@ async def get_analyses(limit: int = 50, db: Session = Depends(get_db)):
     try:
         logs = (
             db.query(DecisionLog)
-            .filter(DecisionLog.trade_mode == settings.trading_mode)
+            .filter(DecisionLog.trade_mode == TRADE_MODE)
             .order_by(DecisionLog.timestamp.desc())
             .limit(limit)
             .all()

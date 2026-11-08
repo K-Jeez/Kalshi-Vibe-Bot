@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
 import { Activity } from 'lucide-react'
 import { AnalysisDetailBody } from '../components/AnalysisDetailPanel'
 import { apiClient, BotStateInfo, DecisionAnalysis, AnalysesStats } from '../api'
@@ -8,10 +8,6 @@ export const AIAnalysis: React.FC = () => {
   const [botInfo, setBotInfo] = useState<BotStateInfo | null>(null)
   const [analyses, setAnalyses] = useState<DecisionAnalysis[]>([])
   const [analysisStats, setAnalysisStats] = useState<AnalysesStats | null>(null)
-  const [refreshKey, setRefreshKey] = useState(0)
-  const [tradingMode, setTradingMode] = useState<'paper' | 'live'>('paper')
-  const tradingModeRef = useRef(tradingMode)
-  tradingModeRef.current = tradingMode
 
   const { data: wsData } = useWebSocket('ws://localhost:8000/ws')
 
@@ -55,20 +51,10 @@ export const AIAnalysis: React.FC = () => {
     }
   }, [dedupeAnalyses])
 
-  const syncTradingMode = useCallback(async () => {
-    try {
-      const h = await apiClient.getHealth()
-      setTradingMode(h.mode === 'live' ? 'live' : 'paper')
-    } catch {
-      /* ignore */
-    }
-  }, [])
-
   useEffect(() => {
-    syncTradingMode()
     loadBotState()
     loadAnalyses()
-  }, [syncTradingMode, loadBotState, loadAnalyses])
+  }, [loadBotState, loadAnalyses])
 
   useEffect(() => {
     if (!wsData) return
@@ -84,7 +70,7 @@ export const AIAnalysis: React.FC = () => {
     if (wsData.type === 'analysis') {
       const incoming = wsData.data as DecisionAnalysis
       const tm = incoming.trade_mode
-      if (tm !== undefined && tm !== tradingModeRef.current) return
+      if (tm !== undefined && tm !== 'live') return
       if (tm === undefined) {
         loadAnalyses()
         return
@@ -94,13 +80,6 @@ export const AIAnalysis: React.FC = () => {
         return dedupeAnalyses([incoming, ...deduped]).slice(0, 30)
       })
       apiClient.getAnalysesStats(168).then(setAnalysisStats).catch(() => {})
-    }
-    if (wsData.type === 'mode_changed') {
-      const md = wsData.data as { mode?: string } | undefined
-      const m = md?.mode === 'live' ? 'live' : 'paper'
-      setTradingMode(m)
-      setRefreshKey((k) => k + 1)
-      loadAnalyses()
     }
   }, [wsData, dedupeAnalyses, loadAnalyses])
 
@@ -125,15 +104,10 @@ export const AIAnalysis: React.FC = () => {
         <p className="text-white mt-1 text-sm">Real-time AI trading activity</p>
       </div>
 
-      <section key={`analysis-${refreshKey}`}>
+      <section>
         <div>
           <div className="flex items-center justify-between mb-3 gap-4">
-            <h2 className="text-base font-semibold text-white">
-              Recent AI Analysis
-              <span className="ml-2 text-xs font-normal text-white normal-case">
-                ({tradingMode})
-              </span>
-            </h2>
+            <h2 className="text-base font-semibold text-white">Recent AI Analysis</h2>
             <span className="text-xs text-white text-right shrink-0 max-w-[70%]">
               {statsHint ?? 'Loading stats…'}
             </span>

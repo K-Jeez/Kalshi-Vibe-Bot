@@ -18,8 +18,6 @@ export const Header: React.FC = () => {
   const [connected, setConnected]     = useState(false)
   const [botState, setBotState]       = useState<'play' | 'pause' | 'stop'>('stop')
   const [botLoading, setBotLoading]   = useState(false)
-  const [mode, setMode]               = useState<'paper' | 'live'>('paper')
-  const [modeLoading, setModeLoading] = useState(false)
   const docVisible = useDocumentVisible()
   const prevVisibleRef = useRef(docVisible)
 
@@ -31,18 +29,13 @@ export const Header: React.FC = () => {
       const d = wsData.data as { state?: string } | undefined
       if (d?.state) setBotState(d.state as 'play' | 'pause' | 'stop')
     }
-    if (wsData.type === 'mode_changed') {
-      const d = wsData.data as { mode?: string } | undefined
-      setMode(d?.mode === 'live' ? 'live' : 'paper')
-    }
   }, [wsData])
 
   const refresh = async () => {
     if (!docVisible) return
     try {
-      const [health, bot] = await Promise.all([apiClient.getHealth(), apiClient.getBotState()])
+      const [_, bot] = await Promise.all([apiClient.getHealth(), apiClient.getBotState()])
       setConnected(true)
-      setMode(health.mode === 'live' ? 'live' : 'paper')
       setBotState(bot.state ?? 'stop')
     } catch {
       setConnected(false)
@@ -69,27 +62,6 @@ export const Header: React.FC = () => {
       setBotState(state)
     } finally {
       setBotLoading(false)
-    }
-  }
-
-  const handleToggleMode = async () => {
-    const next = mode === 'paper' ? 'live' : 'paper'
-    if (next === 'live') {
-      const ok = window.confirm(
-        '⚠ Switch to LIVE trading?\n\nReal money will be used for all trades. ' +
-        'Ensure your Kalshi API credentials are correct and risk settings are reviewed.',
-      )
-      if (!ok) return
-    }
-    setModeLoading(true)
-    try {
-      const res = await apiClient.setTradingMode(next)
-      setMode(next)
-      if (res.bot_state === 'stop') setBotState('stop')
-    } catch {
-      alert('Failed to switch trading mode. Check backend connection.')
-    } finally {
-      setModeLoading(false)
     }
   }
 
@@ -136,18 +108,13 @@ export const Header: React.FC = () => {
           {/* Controls */}
           <div className="flex items-center gap-2 shrink-0">
 
-            {/* Live / Paper toggle */}
-            <button
-              onClick={handleToggleMode}
-              disabled={modeLoading || !connected}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wide transition border ${
-                mode === 'live'
-                  ? 'bg-red-500/20 text-red-400 border-red-500/30 hover:bg-red-500/30'
-                  : 'bg-blue-500/20 text-blue-400 border-blue-500/30 hover:bg-blue-500/30'
-              } ${(modeLoading || !connected) ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+            {/* Live trading badge (not interactive) */}
+            <span
+              className="px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wide border bg-red-500/20 text-red-400 border-red-500/30"
+              title="Live Kalshi trading — real money"
             >
-              {modeLoading ? '…' : mode}
-            </button>
+              LIVE
+            </span>
 
             {/* Play / Pause / Stop */}
             <div className="flex gap-0.5 bg-primary/55 rounded-xl p-1 border border-brand-muted/35 shadow-inner shadow-black/40">

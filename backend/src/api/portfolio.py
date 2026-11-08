@@ -1,6 +1,6 @@
-"""Portfolio metrics, positions, and live Kalshi resting-order visibility.
+"""Portfolio metrics, positions, and Kalshi resting-order visibility.
 
-Live mode exposes resting-order counts and an estimate of cash tied up in resting **buy** limits.
+Exposes resting-order counts and an estimate of cash tied up in resting **buy** limits.
 The bot scan loop applies that estimate internally when sizing risk (API ``balance`` remains Kalshi cash).
 Resting orders are fetched via :meth:`KalshiClient.list_orders` (short TTL cache on the client).
 """
@@ -26,7 +26,7 @@ from src.api.tuning import sync_runtime_from_db
 from src.api.broadcast import broadcast_update
 from src.app_state import app_state, kalshi_open_marks_refresh_lock, kalshi_ui_reconcile_lock
 from src.bot.scan_eligibility import refresh_order_search_scan_ui
-from src.config import settings
+from src.config import TRADE_MODE, settings
 from src.clients.kalshi_client import (
     open_position_estimated_mark_dollars,
     open_position_mark_dollars,
@@ -37,7 +37,6 @@ from src.database.models import (
     PortfolioSnapshot,
     Trade,
     get_db,
-    get_paper_cash_balance,
     get_vault_balance,
     ensure_vault_state,
     get_session_local,
@@ -222,10 +221,10 @@ async def _kalshi_ui_portfolio_pull_if_due(db: Session) -> str:
     the min-interval gate would no-op anyway.
 
     Returns why this call did or did not run reconcile: ``ran`` | ``skipped_lock`` | ``skipped_throttle``
-    | ``skipped_not_live`` | ``failed``.
+    | ``skipped_no_kalshi_client`` | ``failed``.
     """
-    if settings.trading_mode != "live" or app_state.kalshi_client is None:
-        return "skipped_not_live"
+    if app_state.kalshi_client is None:
+        return "skipped_no_kalshi_client"
     now = time.monotonic()
     last = float(getattr(app_state, "_kalshi_ui_reconcile_last_mono", 0.0) or 0.0)
     if now - last < float(_UI_KALSHI_RECONCILE_MIN_INTERVAL_SEC):
@@ -500,11 +499,10 @@ async def _refresh_open_position_marks(
 async def _sync_dashboard_open_legs(db: Session) -> str:
     """Live UI reconcile (throttled), open-leg mark refresh, dedupe — shared by portfolio, positions, bundle."""
     reconcile_outcome = "n/a"
-    if settings.trading_mode == "live":
-        if app_state.kalshi_client is None:
-            reconcile_outcome = "no_kalshi_client"
-        else:
-            reconcile_outcome = await _kalshi_ui_portfolio_pull_if_due(db)
+    if app_state.kalshi_client is None:
+        reconcile_outcome = "no_kalshi_client"
+    else:
+        reconcile_outcome = await _kalshi_ui_portfolio_pull_if_due(db)
         # When the lock is busy, another request is already running the same portfolio pull + open-leg
         # pipeline. A duplicate ``quick_sync`` here caused N concurrent ``GET /portfolio`` storms and
         # SQLite contention; rely on the in-flight sync + mark refresh instead.
@@ -517,14 +515,14 @@ async def _sync_dashboard_open_legs(db: Session) -> str:
     try:
         await _refresh_open_position_marks(
             kalshi_client=app_state.kalshi_client,
-            trade_mode=settings.trading_mode,
-            min_interval_sec=6.5 if settings.trading_mode == "live" else 3.0,
-            refresh_event_titles=(settings.trading_mode != "live"),
+            trade_mode=TRADE_MODE,
+            min_interval_sec=6.5,
+            refresh_event_titles=False,
         )
         db.expire_all()
     except Exception as e:
         logger.debug("Open-position mark refresh skipped: %s", e)
-    dedupe_open_positions(db, settings.trading_mode)
+    dedupe_open_positions(db, TRADE_MODE)
     db.expire_all()
     return reconcile_outcome
 
@@ -535,13 +533,11 @@ async def _run_live_kalshi_portfolio_reconcile(
     settlements: bool,
     broadcast_fn: Any,
 ) -> Tuple[int, int, int, int, int, int, int, int, int]:
-    """One Kalshi ``GET /portfolio/positions`` snapshot and DB sync (live only).
+    """One Kalshi ``GET /portfolio/positions`` snapshot and DB sync.
 
     Returns the nine-tuple from :func:`~src.reconcile.kalshi_live_sync.reconcile_live_positions_from_kalshi`,
     including closure finalizations, open entry/unrealized refreshes, and exchange-finalized closes.
     """
-    if settings.trading_mode != "live":
-        return (0, 0, 0, 0, 0, 0, 0, 0, 0)
     kc = app_state.kalshi_client
     if kc is None:
         return (0, 0, 0, 0, 0, 0, 0, 0, 0)
@@ -549,7 +545,7 @@ async def _run_live_kalshi_portfolio_reconcile(
 
     out = await reconcile_live_positions_from_kalshi(
         db,
-        trade_mode=settings.trading_mode,
+        trade_mode=TRADE_MODE,
         kalshi_client=kc,
         settlements=settlements,
         broadcast_fn=broadcast_fn,
@@ -573,23 +569,17 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
 
     positions = (
         db.query(Position)
-        .filter(Position.status == "open", Position.trade_mode == settings.trading_mode)
+        .filter(Position.status == "open", Position.trade_mode == TRADE_MODE)
         .all()
     )
     unrealized_pnl = sum((unrealized_pnl_display_optional(p) or 0.0) for p in positions)
-    # Position market value used for dashboard tiles.
-    # Paper: display mark (estimated when present). Live: overridden by Kalshi positions_value (source of truth).
-    pos_value = (
-        sum((display_estimated_price_optional(p) or 0.0) * _num(p.quantity) for p in positions)
-        if settings.trading_mode == "paper"
-        else sum(_num(p.current_price) * _num(p.quantity) for p in positions)
-    )
+    pos_value = sum(_num(p.current_price) * _num(p.quantity) for p in positions)
     # Realized P&L: closed Position rows only (Kalshi-synced in live). Never sum Trade sell rows —
     # partial exit fills create multiple sell ledger lines per closed position.
     realized_pnl = float(
         db.query(func.coalesce(func.sum(Position.realized_pnl), 0.0))
         .filter(
-            Position.trade_mode == settings.trading_mode,
+            Position.trade_mode == TRADE_MODE,
             Position.status == "closed",
         )
         .scalar()
@@ -600,31 +590,22 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
     resting_buy_reserve = 0.0
     portfolio_value = 0.0
 
-    # Ensure per-mode vault row exists even before the first transfer.
-    ensure_vault_state(db, trade_mode=settings.trading_mode)
+    ensure_vault_state(db, trade_mode=TRADE_MODE)
 
-    if settings.trading_mode == "paper":
-        starting = _num(getattr(settings, "paper_starting_balance", 0.0))
-        uninvested_cash = max(0.0, _num(get_paper_cash_balance(db, starting)))
-        # Align with Performance / closed table: total mark-to-market P&L from positions.
-        total_pnl = realized_pnl + unrealized_pnl
-    else:
-        kc = app_state.kalshi_client
-        if kc is None:
-            raise HTTPException(status_code=503, detail="Kalshi client not ready")
-        live = await kc.get_portfolio()
-        api_cash = _num(live.get("cash", 0.0))
-        portfolio_value = _num(live.get("portfolio_value", api_cash))
-        positions_value = _num(live.get("positions_value", max(0.0, portfolio_value - api_cash)))
-        resting_orders = await kc.list_orders(status="resting")
-        resting_buy_reserve = resting_buy_collateral_estimate_usd(resting_orders)
-        uninvested_cash = max(0.0, api_cash - resting_buy_reserve)
-        # Kalshi portfolio_value already includes live position market values using Kalshi's convention.
-        # Use it for Total Balance / Total Invested so tiles reconcile with the Kalshi UI.
-        pos_value = max(0.0, positions_value)
-        total_pnl = realized_pnl + unrealized_pnl
+    kc = app_state.kalshi_client
+    if kc is None:
+        raise HTTPException(status_code=503, detail="Kalshi client not ready")
+    live = await kc.get_portfolio()
+    api_cash = _num(live.get("cash", 0.0))
+    portfolio_value = _num(live.get("portfolio_value", api_cash))
+    positions_value = _num(live.get("positions_value", max(0.0, portfolio_value - api_cash)))
+    resting_orders = await kc.list_orders(status="resting")
+    resting_buy_reserve = resting_buy_collateral_estimate_usd(resting_orders)
+    uninvested_cash = max(0.0, api_cash - resting_buy_reserve)
+    pos_value = max(0.0, positions_value)
+    total_pnl = realized_pnl + unrealized_pnl
 
-    vault_balance = get_vault_balance(db, trade_mode=settings.trading_mode)
+    vault_balance = get_vault_balance(db, trade_mode=TRADE_MODE)
     vault_balance = min(max(0.0, vault_balance), float(uninvested_cash))
     available_cash = max(0.0, float(uninvested_cash) - float(vault_balance))
 
@@ -672,9 +653,7 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
 
     # Total balance should represent *all* uninvested cash (cash + vault) + invested mark.
     # Transfers between Available Cash and Vault must not affect this number.
-    total_value_out = (
-        portfolio_value if settings.trading_mode == "live" else (float(uninvested_cash) + pos_value)
-    )
+    total_value_out = portfolio_value
 
     xai_prepaid: Optional[float] = None
     try:
@@ -689,7 +668,6 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
         total_portfolio_value_usd=float(total_value_out),
         xai_prepaid_balance_usd=xai_prepaid,
         open_position_count=npos,
-        ai_provider=getattr(settings, "default_ai_provider", "gemini"),
     )
 
     payload: Dict[str, Any] = {
@@ -706,13 +684,12 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
         "xai_prepaid_balance_usd": round(xai_prepaid, 2) if xai_prepaid is not None else None,
         "order_search_active": bool(scan_active),
         "order_search_label": str(scan_label),
-        "ai_provider": str(getattr(settings, "default_ai_provider", "gemini")),
+        "ai_provider": "xai",
         "stop_loss_selling_enabled": bool(getattr(settings, "stop_loss_selling_enabled", False)),
+        "kalshi_resting_order_count": len(resting_orders),
+        "resting_buy_collateral_estimate_usd": round(resting_buy_reserve, 4),
+        "kalshi_resting_orders_preview": _kalshi_resting_preview(resting_orders),
     }
-    if settings.trading_mode == "live":
-        payload["kalshi_resting_order_count"] = len(resting_orders)
-        payload["resting_buy_collateral_estimate_usd"] = round(resting_buy_reserve, 4)
-        payload["kalshi_resting_orders_preview"] = _kalshi_resting_preview(resting_orders)
     return payload
 
 
@@ -736,18 +713,18 @@ async def get_dashboard_bundle(db: Session = Depends(get_db)):
         portfolio_payload = await _build_portfolio_payload(db)
         position_rows = (
             db.query(Position)
-            .filter(Position.status == "open", Position.trade_mode == settings.trading_mode)
+            .filter(Position.status == "open", Position.trade_mode == TRADE_MODE)
             .order_by(Position.opened_at.asc(), Position.id.asc())
             .all()
         )
         latest_by_mid = fetch_latest_decision_logs_for_market_ids(
-            db, [p.market_id for p in position_rows], trade_mode=settings.trading_mode
+            db, [p.market_id for p in position_rows], trade_mode=TRADE_MODE
         )
         position_analyses = {
             mid: serialize_decision_log_to_analysis(log) for mid, log in latest_by_mid.items()
         }
         serialized_positions = _serialize_open_positions(position_rows)
-        attach_entry_decision_analyses(db, position_rows, serialized_positions, trade_mode=settings.trading_mode)
+        attach_entry_decision_analyses(db, position_rows, serialized_positions, trade_mode=TRADE_MODE)
         return {
             "portfolio": portfolio_payload,
             "positions": serialized_positions,
@@ -780,21 +757,16 @@ async def vault_transfer(payload: Dict[str, Any], db: Session = Depends(get_db))
     if direction not in ("to_vault", "to_cash"):
         raise HTTPException(status_code=400, detail="Invalid direction")
 
-    row = ensure_vault_state(db, trade_mode=settings.trading_mode)
+    row = ensure_vault_state(db, trade_mode=TRADE_MODE)
 
-    # Compute current uninvested cash (same notion as GET /portfolio before vault is applied).
-    if settings.trading_mode == "paper":
-        starting = float(getattr(settings, "paper_starting_balance", 0.0) or 0.0)
-        uninvested_cash = max(0.0, float(get_paper_cash_balance(db, starting)))
-    else:
-        kc = app_state.kalshi_client
-        if kc is None:
-            raise HTTPException(status_code=503, detail="Kalshi client not ready")
-        live = await kc.get_portfolio()
-        api_cash = float(live.get("cash", 0.0) or 0.0)
-        resting_orders = await kc.list_orders(status="resting")
-        resting_buy_reserve = resting_buy_collateral_estimate_usd(resting_orders)
-        uninvested_cash = max(0.0, api_cash - float(resting_buy_reserve))
+    kc = app_state.kalshi_client
+    if kc is None:
+        raise HTTPException(status_code=503, detail="Kalshi client not ready")
+    live = await kc.get_portfolio()
+    api_cash = float(live.get("cash", 0.0) or 0.0)
+    resting_orders = await kc.list_orders(status="resting")
+    resting_buy_reserve = resting_buy_collateral_estimate_usd(resting_orders)
+    uninvested_cash = max(0.0, api_cash - float(resting_buy_reserve))
 
     vault_balance = max(0.0, float(row.vault_balance or 0.0))
     vault_balance = min(vault_balance, float(uninvested_cash))
@@ -825,9 +797,7 @@ async def vault_transfer(payload: Dict[str, Any], db: Session = Depends(get_db))
 
 @router.post("/portfolio/live/cancel-resting-orders")
 async def cancel_kalshi_resting_orders():
-    """Cancel every **resting** order on Kalshi (live). Use to free collateral from stale limits."""
-    if settings.trading_mode != "live":
-        raise HTTPException(status_code=400, detail="Only available in live trading mode")
+    """Cancel every **resting** order on Kalshi. Use to free collateral from stale limits."""
     kc = app_state.kalshi_client
     if kc is None:
         raise HTTPException(status_code=503, detail="Kalshi client not ready")
@@ -859,8 +829,6 @@ async def reconcile_kalshi_portfolio_now(db: Session = Depends(get_db)):
     entry economics from buy orders and recomputes unrealized P&L, then runs settlement closes and
     applies flat-row deltas to pending closed positions.
     """
-    if settings.trading_mode != "live":
-        raise HTTPException(status_code=400, detail="Only available in live trading mode")
     if app_state.kalshi_client is None:
         raise HTTPException(status_code=503, detail="Kalshi client not ready")
     try:
@@ -910,18 +878,18 @@ async def get_positions(db: Session = Depends(get_db)):
 
         positions = (
             db.query(Position)
-            .filter(Position.status == "open", Position.trade_mode == settings.trading_mode)
+            .filter(Position.status == "open", Position.trade_mode == TRADE_MODE)
             .order_by(Position.opened_at.asc(), Position.id.asc())
             .all()
         )
         logger.debug(
             "GET /positions: returning %d open row(s) (trade_mode=%s ui_reconcile=%s)",
             len(positions),
-            settings.trading_mode,
+            TRADE_MODE,
             reconcile_outcome,
         )
         serialized = _serialize_open_positions(positions)
-        attach_entry_decision_analyses(db, positions, serialized, trade_mode=settings.trading_mode)
+        attach_entry_decision_analyses(db, positions, serialized, trade_mode=TRADE_MODE)
         return serialized
     except Exception as e:
         logger.error("Positions error: %s", e)
@@ -936,11 +904,11 @@ async def get_positions_snapshot(db: Session = Depends(get_db)):
     and live imports (same generation / merge logic as the full poll).
     """
     try:
-        out = load_open_positions_snapshot_payload(db, settings.trading_mode)
+        out = load_open_positions_snapshot_payload(db, TRADE_MODE)
         logger.info(
             "GET /positions/snapshot: returning %d open row(s) (trade_mode=%s)",
             len(out),
-            settings.trading_mode,
+            TRADE_MODE,
         )
         return out
     except Exception as e:
@@ -951,7 +919,7 @@ async def get_positions_snapshot(db: Session = Depends(get_db)):
 @router.get("/positions/closed")
 async def get_closed_positions(limit: int = 50, db: Session = Depends(get_db)):
     try:
-        # Live mode: we intentionally do **not** bulk-sync ``Position.realized_pnl`` from
+        # Intentionally do **not** bulk-sync ``Position.realized_pnl`` from
         # ``GET /portfolio/positions`` here. That API returns at most **one** row per ticker
         # (often aggregate or last-settlement realized on a flat position). Mapping
         # ``ticker -> realized`` and applying it to **every** historical closed row for that
@@ -961,7 +929,7 @@ async def get_closed_positions(limit: int = 50, db: Session = Depends(get_db)):
 
         rows = (
             db.query(Position)
-            .filter(Position.status == "closed", Position.trade_mode == settings.trading_mode)
+            .filter(Position.status == "closed", Position.trade_mode == TRADE_MODE)
             .order_by(Position.closed_at.desc())
             .limit(limit)
             .all()
@@ -996,9 +964,9 @@ async def get_closed_positions(limit: int = 50, db: Session = Depends(get_db)):
                     "entry_decision_log_id": getattr(p, "entry_decision_log_id", None),
                 }
             )
-        attach_entry_decision_analyses(db, rows, out, trade_mode=settings.trading_mode)
+        attach_entry_decision_analyses(db, rows, out, trade_mode=TRADE_MODE)
         latest_by_mid = fetch_latest_decision_logs_for_market_ids(
-            db, [p.market_id for p in rows], trade_mode=settings.trading_mode
+            db, [p.market_id for p in rows], trade_mode=TRADE_MODE
         )
         position_analyses = {
             mid: serialize_decision_log_to_analysis(log) for mid, log in latest_by_mid.items()
@@ -1021,9 +989,7 @@ async def refresh_closed_positions_resolution(
     if kc is None:
         raise HTTPException(status_code=503, detail="Kalshi client not ready")
     lim = max(1, min(int(limit), 500))
-    mode = (trade_mode or settings.trading_mode or "paper").strip().lower()
-    if mode not in ("paper", "live"):
-        mode = "paper"
+    mode = (trade_mode or TRADE_MODE).strip().lower()
     try:
         from src.reconcile.kalshi_positions import refresh_closed_positions_resolution_from_kalshi
 
@@ -1054,7 +1020,7 @@ async def reset_history(db: Session = Depends(get_db)):
     try:
         from src.api.tuning import apply_config_defaults_to_tuning_state
 
-        mode = settings.trading_mode
+        mode = TRADE_MODE
         deleted = (
             db.query(Position)
             .filter(Position.status == "closed", Position.trade_mode == mode)
@@ -1087,7 +1053,7 @@ async def close_position_manual(position_id: str, db: Session = Depends(get_db))
     pos = db.query(Position).filter(
         Position.id == position_id,
         Position.status == "open",
-        Position.trade_mode == settings.trading_mode,
+        Position.trade_mode == TRADE_MODE,
     ).first()
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
@@ -1096,152 +1062,142 @@ async def close_position_manual(position_id: str, db: Session = Depends(get_db))
     try:
         exit_order_id = None
 
-        if settings.trading_mode == "live":
-            from src.clients.kalshi_client import (
-                is_order_error_market_unavailable,
-                kalshi_order_avg_contract_price_and_proceeds,
-                kalshi_order_fees_dollars,
-                kalshi_order_filled_contracts,
-            )
+        from src.clients.kalshi_client import (
+            is_order_error_market_unavailable,
+            kalshi_order_avg_contract_price_and_proceeds,
+            kalshi_order_fees_dollars,
+            kalshi_order_filled_contracts,
+        )
 
-            sell_result = await kc.place_sell_market(
-                pos.market_id,
-                pos.side,
-                pos.quantity,
+        sell_result = await kc.place_sell_market(
+            pos.market_id,
+            pos.side,
+            pos.quantity,
+        )
+        floor_d = float(pos.current_price or 0.01)
+        if sell_result.get("skipped_dead_book"):
+            pos.dead_market = True
+            pos.awaiting_settlement = True
+            db.commit()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Dead market: no native bids on the order book for this contract side. "
+                    "The position is flagged on the dashboard; exits retry automatically when bids return."
+                ),
             )
-            floor_d = float(pos.current_price or 0.01)
-            if sell_result.get("skipped_dead_book"):
-                pos.dead_market = True
+        if sell_result.get("error"):
+            if is_order_error_market_unavailable(sell_result["error"]):
                 pos.awaiting_settlement = True
+                pos.dead_market = False
                 db.commit()
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "Dead market: no native bids on the order book for this contract side. "
-                        "The position is flagged on the dashboard; exits retry automatically when bids return."
+                        "Market no longer accepts orders on Kalshi (404). "
+                        "Position marked awaiting settlement; the bot will close it when "
+                        "portfolio/settlement data catches up."
                     ),
                 )
-            if sell_result.get("error"):
-                if is_order_error_market_unavailable(sell_result["error"]):
-                    pos.awaiting_settlement = True
-                    pos.dead_market = False
-                    db.commit()
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "Market no longer accepts orders on Kalshi (404). "
-                            "Position marked awaiting settlement; the bot will close it when "
-                            "portfolio/settlement data catches up."
-                        ),
-                    )
-                raise HTTPException(status_code=502, detail=sell_result["error"])
-            filled_fp = max(0.0, float(kalshi_order_filled_contracts(sell_result)))
-            if filled_fp <= 0:
-                pos.dead_market = True
-                pos.awaiting_settlement = True
-                db.commit()
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Exit IOC did not fill; position left open — illiquid or halted? "
-                        "Marked dead market until native bids return."
-                    ),
-                )
-            sell_result = await kc.refresh_order_fill_snapshot(sell_result)
-            filled_fp = max(0.0, float(kalshi_order_filled_contracts(sell_result)))
-            from src.clients.kalshi_client import kalshi_order_avg_contract_price_and_proceeds_for_held_side
+            raise HTTPException(status_code=502, detail=sell_result["error"])
+        filled_fp = max(0.0, float(kalshi_order_filled_contracts(sell_result)))
+        if filled_fp <= 0:
+            pos.dead_market = True
+            pos.awaiting_settlement = True
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Exit IOC did not fill; position left open — illiquid or halted? "
+                    "Marked dead market until native bids return."
+                ),
+            )
+        sell_result = await kc.refresh_order_fill_snapshot(sell_result)
+        filled_fp = max(0.0, float(kalshi_order_filled_contracts(sell_result)))
+        from src.clients.kalshi_client import kalshi_order_avg_contract_price_and_proceeds_for_held_side
 
-            avg_exit_px, _proceeds = kalshi_order_avg_contract_price_and_proceeds_for_held_side(
-                sell_result,
-                held_side=str(pos.side or "YES"),
-                filled=filled_fp,
-                fallback_per_contract_dollars=float(floor_d),
+        avg_exit_px, _proceeds = kalshi_order_avg_contract_price_and_proceeds_for_held_side(
+            sell_result,
+            held_side=str(pos.side or "YES"),
+            filled=filled_fp,
+            fallback_per_contract_dollars=float(floor_d),
+        )
+        exit_order_id = (
+            sell_result.get("order_id")
+            or sell_result.get("client_order_id")
+            or sell_result.get("id")
+        )
+        sold_whole = max(0, int(math.floor(float(filled_fp) + 1e-9)))
+        if sold_whole < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Exit fill contained no whole contracts; close any Kalshi residual manually.",
             )
-            exit_order_id = (
-                sell_result.get("order_id")
-                or sell_result.get("client_order_id")
-                or sell_result.get("id")
+        sold_qty_trade = sold_whole
+        scale = sold_whole / float(filled_fp) if filled_fp > 1e-9 else 1.0
+        sold_px = float(avg_exit_px)
+        exit_fees_scaled = float(kalshi_order_fees_dollars(sell_result)) * scale
+        pos.fees_paid = float(getattr(pos, "fees_paid", 0) or 0) + exit_fees_scaled
+        gross_exit_notional = float(sold_px) * float(sold_qty_trade)
+        current_value = gross_exit_notional
+        pre_qty = max(0, int(pos.quantity or 0))
+        pre_entry_cost = float(pos.entry_cost or 0.0)
+        pre_entry_price = float(pos.entry_price or 0.0)
+        pre_sync_fees_paid = float(getattr(pos, "fees_paid", 0) or 0.0)
+        per_contract_basis = float(pos.entry_cost or 0.0) / float(pre_qty) if pre_qty > 0 else 0.0
+        sold_basis = per_contract_basis * float(sold_qty_trade)
+        fill_integer = sold_qty_trade > 0 and abs(float(filled_fp) - round(float(filled_fp))) < 1e-6
+        fifo_basis, fifo_ok = (0.0, False)
+        if fill_integer and sold_qty_trade < pre_qty:
+            fifo_basis, fifo_ok = fifo_cost_for_next_sell(
+                db,
+                trade_mode=TRADE_MODE,
+                market_id=pos.market_id,
+                side=pos.side,
+                sell_qty=int(sold_qty_trade),
             )
-            sold_whole = max(0, int(math.floor(float(filled_fp) + 1e-9)))
-            if sold_whole < 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Exit fill contained no whole contracts; close any Kalshi residual manually.",
-                )
-            sold_qty_trade = sold_whole
-            scale = sold_whole / float(filled_fp) if filled_fp > 1e-9 else 1.0
-            sold_px = float(avg_exit_px)
-            exit_fees_scaled = float(kalshi_order_fees_dollars(sell_result)) * scale
-            pos.fees_paid = float(getattr(pos, "fees_paid", 0) or 0) + exit_fees_scaled
-            gross_exit_notional = float(sold_px) * float(sold_qty_trade)
-            current_value = gross_exit_notional
-            pre_qty = max(0, int(pos.quantity or 0))
-            pre_entry_cost = float(pos.entry_cost or 0.0)
-            pre_entry_price = float(pos.entry_price or 0.0)
-            pre_sync_fees_paid = float(getattr(pos, "fees_paid", 0) or 0.0)
-            per_contract_basis = float(pos.entry_cost or 0.0) / float(pre_qty) if pre_qty > 0 else 0.0
-            sold_basis = per_contract_basis * float(sold_qty_trade)
-            fill_integer = sold_qty_trade > 0 and abs(float(filled_fp) - round(float(filled_fp))) < 1e-6
-            fifo_basis, fifo_ok = (0.0, False)
-            if fill_integer and sold_qty_trade < pre_qty:
-                fifo_basis, fifo_ok = fifo_cost_for_next_sell(
-                    db,
-                    trade_mode=settings.trading_mode,
-                    market_id=pos.market_id,
-                    side=pos.side,
-                    sell_qty=int(sold_qty_trade),
-                )
-            realized = closed_leg_realized_pnl_kalshi_dollars(
-                quantity_sold=int(sold_qty_trade),
-                exit_price_per_contract_gross=sold_px,
-                entry_cost_at_open=pre_entry_cost,
-                entry_price_at_open=pre_entry_price,
-                quantity_at_open=pre_qty,
-                fees_paid_roundtrip=pre_sync_fees_paid,
-            )
-            pos.awaiting_settlement = False
-            pos.dead_market = False
+        realized = closed_leg_realized_pnl_kalshi_dollars(
+            quantity_sold=int(sold_qty_trade),
+            exit_price_per_contract_gross=sold_px,
+            entry_cost_at_open=pre_entry_cost,
+            entry_price_at_open=pre_entry_price,
+            quantity_at_open=pre_qty,
+            fees_paid_roundtrip=pre_sync_fees_paid,
+        )
+        pos.awaiting_settlement = False
+        pos.dead_market = False
 
-            synced = await sync_open_position_qty_cost_from_kalshi(kc, pos, db=db)
-            if synced:
-                if int(pos.quantity or 0) <= 0:
-                    pos.quantity = int(sold_qty_trade)
-                    if pre_entry_price > 1e-12:
-                        pos.entry_price = pre_entry_price
-                    if pre_entry_cost > 1e-12:
-                        pos.entry_cost = pre_entry_cost
-                    pos.fees_paid = pre_sync_fees_paid
-                    pos.status = "closed"
-                    pos.closed_at = utc_now()
-                    pos.exit_reason = "manual"
-                    pos.realized_pnl = realized
-                    pos.current_price = sold_px
-                    mark_position_kalshi_flat_reconcile_pending(pos)
-            else:
-                remaining = max(0, int(pre_qty) - int(sold_qty_trade))
-                if remaining <= 0:
-                    pos.status = "closed"
-                    pos.closed_at = utc_now()
-                    pos.exit_reason = "manual"
-                    pos.realized_pnl = realized
-                    pos.current_price = sold_px
-                    mark_position_kalshi_flat_reconcile_pending(pos)
-                else:
-                    pos.quantity = remaining
-                    basis_removed = fifo_basis if fifo_ok else sold_basis
-                    pos.entry_cost = max(0.0, float(pos.entry_cost or 0.0) - basis_removed)
-                    pos.entry_price = (
-                        (pos.entry_cost / pos.quantity) if int(pos.quantity or 0) > 0 else pos.entry_price
-                    )
+        synced = await sync_open_position_qty_cost_from_kalshi(kc, pos, db=db)
+        if synced:
+            if int(pos.quantity or 0) <= 0:
+                pos.quantity = int(sold_qty_trade)
+                if pre_entry_price > 1e-12:
+                    pos.entry_price = pre_entry_price
+                if pre_entry_cost > 1e-12:
+                    pos.entry_cost = pre_entry_cost
+                pos.fees_paid = pre_sync_fees_paid
+                pos.status = "closed"
+                pos.closed_at = utc_now()
+                pos.exit_reason = "manual"
+                pos.realized_pnl = realized
+                pos.current_price = sold_px
+                mark_position_kalshi_flat_reconcile_pending(pos)
         else:
-            sold_qty_trade = int(pos.quantity or 0)
-            current_value = float(pos.current_price or 0.0) * sold_qty_trade
-            sold_px = float(pos.current_price or 0.0)
-            realized = current_value - float(pos.entry_cost or 0.0)
-            pos.status = "closed"
-            pos.closed_at = utc_now()
-            pos.exit_reason = "manual"
-            pos.realized_pnl = realized
+            remaining = max(0, int(pre_qty) - int(sold_qty_trade))
+            if remaining <= 0:
+                pos.status = "closed"
+                pos.closed_at = utc_now()
+                pos.exit_reason = "manual"
+                pos.realized_pnl = realized
+                pos.current_price = sold_px
+                mark_position_kalshi_flat_reconcile_pending(pos)
+            else:
+                pos.quantity = remaining
+                basis_removed = fifo_basis if fifo_ok else sold_basis
+                pos.entry_cost = max(0.0, float(pos.entry_cost or 0.0) - basis_removed)
+                pos.entry_price = (
+                    (pos.entry_cost / pos.quantity) if int(pos.quantity or 0) > 0 else pos.entry_price
+                )
 
         exit_trade = Trade(
             id=str(exit_order_id or uuid.uuid4()),
@@ -1253,7 +1209,7 @@ async def close_position_manual(position_id: str, db: Session = Depends(get_db))
             price=sold_px,
             total_cost=current_value,
             realized_pnl=realized,
-            trade_mode=settings.trading_mode,
+            trade_mode=TRADE_MODE,
         )
         db.add(exit_trade)
         db.commit()

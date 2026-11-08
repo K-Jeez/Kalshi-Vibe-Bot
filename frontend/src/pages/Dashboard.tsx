@@ -10,7 +10,6 @@ import { useWebSocket } from '../hooks/useWebSocket'
 // ── Main component ──────────────────────────────────────────────────────────
 
 export const Dashboard: React.FC = () => {
-  const [tradingMode, setTradingMode] = useState<'paper' | 'live'>('paper')
   const {
     bumpDashboardRefresh,
     dashboardRefreshNonce,
@@ -37,28 +36,11 @@ export const Dashboard: React.FC = () => {
   const [expandedDetailKey, setExpandedDetailKey] = useState<string | null>(null)
 
   useEffect(() => {
-    const syncTradingMode = async () => {
-      try {
-        const h = await apiClient.getHealth()
-        setTradingMode(h.mode === 'live' ? 'live' : 'paper')
-      } catch {
-        /* ignore */
-      }
-    }
-    syncTradingMode()
-  }, [])
-
-  useEffect(() => {
     if (!wsData) return
-    if (wsData.type === 'mode_changed') {
-      const d = wsData.data as { mode?: string } | undefined
-      setTradingMode(d?.mode === 'live' ? 'live' : 'paper')
-      void loadDashboardBundle()
-    }
     if (wsData.type === 'dashboard_refresh') {
       bumpDashboardRefresh()
     }
-  }, [wsData, bumpDashboardRefresh, loadDashboardBundle])
+  }, [wsData, bumpDashboardRefresh])
 
   useEffect(() => {
     void loadDashboardBundle()
@@ -114,7 +96,7 @@ export const Dashboard: React.FC = () => {
       {/* ── Portfolio overview ── */}
       <section>
         <h2 className="text-base font-semibold text-white mb-3">Portfolio</h2>
-        <PortfolioOverview tradingMode={tradingMode} />
+        <PortfolioOverview />
       </section>
 
       <section className="space-y-3">
@@ -123,12 +105,11 @@ export const Dashboard: React.FC = () => {
             <h2 className="text-base font-semibold text-white">Open positions</h2>
             <p className="text-xs text-white/75 mt-0.5 max-w-xl leading-snug">
               Subtitles show trade vs settlement state. Invested $ includes contract cost plus buy-side fees. Marks use
-              bids when liquid; SELL when exit is available (live: IOC against the book).
+              bids when liquid; SELL exits are IOC against the book.
             </p>
           </div>
         </div>
         <PositionsTable
-          tradingMode={tradingMode}
           analyses={analyses}
           expandedDetailKey={expandedDetailKey}
           onToggleDetail={toggleDetail}

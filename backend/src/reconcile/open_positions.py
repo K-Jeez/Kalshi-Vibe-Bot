@@ -508,8 +508,7 @@ def get_open_position(
 def dedupe_open_positions(db: Session, trade_mode: str) -> int:
     """Merge or delete duplicate open Position rows for the same normalized (market_id, side).
 
-    Live: Kalshi holds one leg per key; extras are deleted after syncing identical qty/cost onto keeper.
-    Paper: quantities and entry_cost are summed; entry_price recomputed.
+    Kalshi holds one leg per key; extras are deleted after syncing identical qty/cost onto keeper.
 
     Returns number of rows deleted.
     """
@@ -542,34 +541,9 @@ def dedupe_open_positions(db: Session, trade_mode: str) -> int:
         keeper.market_id = normalize_market_id(keeper.market_id)
         keeper.side = normalize_side(keeper.side)
 
-        if trade_mode == "paper":
-            total_q = sum(max(0, int(x.quantity or 0)) for x in plist)
-            total_c = sum(float(x.entry_cost or 0.0) for x in plist)
-            keeper.quantity = max(0, total_q)
-            keeper.entry_cost = total_c
-            keeper.entry_price = (total_c / total_q) if total_q > 0 else float(keeper.entry_price or 0.0)
-            titles = [x.market_title for x in plist if (x.market_title or "").strip()]
-            if titles:
-                keeper.market_title = max(titles, key=len)
-            last = plist[-1]
-            keeper.current_price = float(last.current_price or keeper.current_price or 0.0)
-            lb = getattr(last, "bid_price", None)
-            keeper.bid_price = float(lb) if lb is not None else float(last.current_price or 0.0)
-            le = getattr(last, "estimated_price", None)
-            if le is not None:
-                keeper.estimated_price = float(le)
-            lk = getattr(last, "kalshi_market_status", None)
-            keeper.kalshi_market_status = str(lk).strip().lower() if lk and str(lk).strip() else None
-            lr = getattr(last, "kalshi_market_result", None)
-            lr_s = str(lr).strip().lower() if lr is not None and str(lr).strip() else ""
-            keeper.kalshi_market_result = lr_s if lr_s in ("yes", "no") else None
-            keeper.unrealized_pnl = float(keeper.current_price or 0.0) * keeper.quantity - open_position_cash_basis_dollars(
-                keeper
-            )
-        else:
-            titles = [x.market_title for x in plist if (x.market_title or "").strip()]
-            if titles:
-                keeper.market_title = max(titles, key=len)
+        titles = [x.market_title for x in plist if (x.market_title or "").strip()]
+        if titles:
+            keeper.market_title = max(titles, key=len)
 
         for d in dupes:
             db.delete(d)

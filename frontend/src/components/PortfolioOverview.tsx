@@ -1,6 +1,5 @@
 import React, { useCallback, useState } from 'react'
-import { apiClient, AiProvider, aiProviderDisplayName } from '../api'
-import { AiProviderLogo } from './AiProviderLogo'
+import { apiClient } from '../api'
 import { useDashboardDataCache } from '../context/DashboardDataCache'
 import {
   TrendingUp,
@@ -27,11 +26,9 @@ interface StatCardProps {
   icon: React.ReactNode
   color: string
   topContent?: React.ReactNode
-  /** Stacked muted rows under the main value (e.g. total balance health + xAI prepaid). */
+  /** Stacked muted rows under the main value (Kalshi balance health only). */
   sublineRows?: StatSublineRow[]
   subtext?: string
-  /** Full-width row at the bottom of the tile (e.g. current AI provider). */
-  footer?: React.ReactNode
 }
 
 /** Dense layout so portfolio tiles fit one row on large screens. */
@@ -43,7 +40,6 @@ const StatCard: React.FC<StatCardProps> = ({
   topContent,
   sublineRows,
   subtext,
-  footer,
 }) => (
   <div className="ui-surface-sm min-w-0 p-3 transition hover:border-white/35 sm:p-3.5 lg:p-3 xl:p-3.5">
     <div className="flex items-start justify-between gap-2 min-w-0">
@@ -87,15 +83,10 @@ const StatCard: React.FC<StatCardProps> = ({
         {icon}
       </div>
     </div>
-    {footer ? <div className="mt-2 pt-2 border-t border-white/10 min-w-0">{footer}</div> : null}
   </div>
 )
 
-interface PortfolioOverviewProps {
-  tradingMode?: 'paper' | 'live'
-}
-
-export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMode = 'paper' }) => {
+export const PortfolioOverview: React.FC = () => {
   const { portfolio, setPortfolio, setPositions, setPositionAnalysesByMarketId } = useDashboardDataCache()
   const loading = portfolio === null
   const [cancelling, setCancelling] = useState(false)
@@ -184,34 +175,24 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
     else if (xaiUsd < 5) xaiSublineAlert = 'warning'
   }
 
+  // Kalshi cash only — Grok API prepaid is separate (shown on the scan status row).
   const totalBalanceSublines: StatSublineRow[] = []
   if (totalBal <= 0) {
     totalBalanceSublines.push({
-      text: 'Zero total balance — search halted',
+      text: 'Zero Kalshi balance — search halted',
       alert: 'error',
       title:
-        'Play mode: market scan is off until total balance is above $0 (matches banner label).',
+        'Play mode: market scan is off until Kalshi total balance is above $0 (matches banner label).',
     })
   } else if (totalBal < 5) {
     totalBalanceSublines.push({
-      text: 'Total balance under $5 — search halted',
+      text: 'Kalshi balance under $5 — search halted',
       alert: 'warning',
       title:
-        'Play mode: market scan is off until total balance reaches at least $5 (matches banner label).',
-    })
-  }
-  const activeProvider = String(portfolio.ai_provider || 'gemini').toLowerCase()
-  const activeAiProvider: AiProvider = activeProvider === 'xai' ? 'xai' : 'gemini'
-  if (xaiUsd !== null && activeProvider === 'xai') {
-    totalBalanceSublines.push({
-      text: `xAI prepaid $${xaiUsd.toFixed(2)}`,
-      alert: xaiSublineAlert,
-      title:
-        'xAI prepaid remaining (this billing cycle). Server: XAI_TEAM_ID + XAI_MANAGEMENT_API_KEY.',
+        'Play mode: market scan is off until Kalshi total balance reaches at least $5 (matches banner label).',
     })
   }
 
-  const aiProviderLabel = aiProviderDisplayName(portfolio.ai_provider)
   const scanActive = portfolio.order_search_active === true
   const scanLabel =
     typeof portfolio.order_search_label === 'string' && portfolio.order_search_label.trim() !== ''
@@ -252,8 +233,8 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
   return (
     <div className="space-y-4">
       <div
-        className="ui-surface-sm flex items-center gap-3 px-3 py-2.5 sm:px-4"
-        title={`Whether the bot will pull open markets and run ${aiProviderLabel} analysis for new entries on the next scan tick.`}
+        className="ui-surface-sm flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5 sm:px-4"
+        title="Whether the bot will pull open markets and run Grok analysis for new entries on the next scan tick."
       >
         <span
           className={`h-2.5 w-2.5 shrink-0 rounded-full shadow-md ${
@@ -262,12 +243,28 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
           aria-hidden
         />
         <span
-          className={`text-xs sm:text-sm font-medium leading-snug ${
+          className={`text-xs sm:text-sm font-medium leading-snug min-w-0 flex-1 ${
             scanActive ? 'text-emerald-100/95' : 'text-red-200/95'
           }`}
         >
           {scanLabel}
         </span>
+        {xaiUsd !== null ? (
+          <p
+            className="text-[10px] sm:text-[11px] text-white/80 tabular-nums flex items-center gap-1.5 shrink-0 sm:ml-auto"
+            title="Grok API prepaid credits (xAI billing) — not Kalshi cash. Needs XAI_TEAM_ID + XAI_MANAGEMENT_API_KEY."
+          >
+            {xaiSublineAlert === 'warning' && (
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-400" aria-hidden />
+            )}
+            {xaiSublineAlert === 'error' && (
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 text-red-500" aria-hidden />
+            )}
+            <span>
+              Grok API prepaid <span className="text-white font-medium">${xaiUsd.toFixed(2)}</span>
+            </span>
+          </p>
+        ) : null}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
@@ -297,7 +294,7 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
           value={`${realizedPositive ? '' : '-'}$${Math.abs(realizedClosed).toFixed(2)}`}
           icon={<CircleDollarSign className="text-emerald-500" />}
           color={realizedPositive ? 'text-green-500' : 'text-red-500'}
-          subtext="Net on closed rows (live: Kalshi-aligned)"
+          subtext="Net on closed rows (Kalshi-aligned)"
         />
         <StatCard
           title="Total P&L"
@@ -353,19 +350,10 @@ export const PortfolioOverview: React.FC<PortfolioOverviewProps> = ({ tradingMod
           value={portfolio.positions}
           icon={<CircleDollarSign className="text-purple-500" />}
           color="text-white"
-          footer={
-            <div
-              className="flex items-center gap-1.5 min-w-0"
-              title={`Active analyzer: ${aiProviderDisplayName(activeAiProvider)}`}
-            >
-              <span className="text-[10px] sm:text-[11px] text-white/85 shrink-0">Current AI Analyzer:</span>
-              <AiProviderLogo provider={activeAiProvider} className="h-6 w-6" />
-            </div>
-          }
         />
       </div>
 
-      {tradingMode === 'live' && liveTok && restingN > 0 && (
+      {liveTok && restingN > 0 && (
         <div className="ui-surface-sm flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
           <ScrollText className="w-5 h-5 text-amber-500 shrink-0" />
           <p className="text-sm text-white flex-1">

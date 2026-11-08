@@ -15,7 +15,13 @@ DEFAULT_MIN_EDGE_TO_BUY_PCT = 5
 DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
 DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.80
 DEFAULT_MAX_OPEN_POSITIONS = 30
-DEFAULT_AI_PROVIDER = "gemini"
+DEFAULT_AI_PROVIDER = "xai"
+
+# Market analysis uses xAI (Grok) only; persisted ``tuning_state.ai_provider`` is always xai.
+AI_PROVIDER: Literal["xai"] = "xai"
+
+# Always live Kalshi trading. Persisted rows use this as ``trade_mode``.
+TRADE_MODE: Literal["live"] = "live"
 
 
 class Settings(BaseSettings):
@@ -25,37 +31,29 @@ class Settings(BaseSettings):
         env_file=str(BASE_DIR / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
-        # Older installs may still have hybrid / edge / vetting-score keys in .env; ignore them.
+        # Ignore unknown keys (e.g. removed TRADING_MODE / GEMINI_* / hybrid-era vars).
         extra="ignore",
     )
 
     # ── Kalshi API ──────────────────────────────────────────────────────────────
     kalshi_api_key: str = ""
     kalshi_private_key_path: str = str(BASE_DIR / "kalshi_private_key.pem")
-    kalshi_base_url: str = "https://api.elections.kalshi.com"
+    # Recommended Trade API host (legacy elections host still works).
+    kalshi_base_url: str = "https://external-api.kalshi.com"
     # Pause between ``GET /markets`` cursor pages (rate-limit cushion). 0 = no pause.
     kalshi_markets_page_delay_sec: float = 0.05
 
-    # ── AI providers ─────────────────────────────────────────────────────────────
-    # Default provider for market analysis: ``gemini`` or ``xai`` (Grok).
-    default_ai_provider: Literal["gemini", "xai"] = DEFAULT_AI_PROVIDER
+    # ── xAI (Grok) ───────────────────────────────────────────────────────────────
     ai_temperature: float = 0.1
-
-    # ── xAI API ─────────────────────────────────────────────────────────────────
     xai_api_key: str = ""
-    xai_model: str = "grok-3"
+    # grok-4.3: current cost-efficient scan model (grok-3 retired; grok-4.7 is the flagship).
+    xai_model: str = "grok-4.3"
     # Optional UUID from xAI Console → Team → Settings (enables xAI prepaid tile on ``GET /portfolio``).
     xai_team_id: str = ""
     # Separate from ``XAI_API_KEY``: prepaid balance uses https://management-api.x.ai (see xAI Console → Management Keys).
     xai_management_api_key: str = ""
 
-    # ── Google Gemini API ───────────────────────────────────────────────────────
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
-
     # ── Trading configuration ────────────────────────────────────────────────────
-    trading_mode: Literal["paper", "live"] = "paper"
-    paper_starting_balance: float = 1000.0  # starting cash for paper mode (USD)
     # Minimum edge (percentage points: AI prob for buy side minus market-implied ask %) to execute a buy.
     min_edge_to_buy_pct: int = DEFAULT_MIN_EDGE_TO_BUY_PCT
     # Minimum AI win probability (0–100) on the **purchased** side before a buy (clamped 51–99).
@@ -90,7 +88,7 @@ class Settings(BaseSettings):
     stop_loss_drawdown_pct: float = DEFAULT_STOP_LOSS_DRAWDOWN_PCT
     # When False, the bot never auto-exits for stop-loss (manual sells still allowed). Default off until enabled in Settings.
     stop_loss_selling_enabled: bool = False
-    # Max simultaneous open positions (per trade mode); at or over this, market scan + AI analysis for new entries pauses.
+    # Max simultaneous open positions; at or over this, market scan + AI analysis for new entries pauses.
     bot_max_open_positions: int = DEFAULT_MAX_OPEN_POSITIONS
     # Periodically ``GET /markets`` for recent closed rows missing ``kalshi_market_result`` (0 = disable).
     closed_resolution_refresh_interval_sec: int = 450
@@ -143,8 +141,6 @@ class Settings(BaseSettings):
         iv = int(self.closed_resolution_refresh_interval_sec)
         self.closed_resolution_refresh_interval_sec = max(0, min(86400, iv))
         self.closed_resolution_refresh_batch = max(1, min(50, int(self.closed_resolution_refresh_batch)))
-        prov = str(self.default_ai_provider or DEFAULT_AI_PROVIDER).strip().lower()
-        self.default_ai_provider = "xai" if prov == "xai" else "gemini"
         return self
 
 

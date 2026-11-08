@@ -5,8 +5,7 @@ from sqlalchemy.orm import Session
 
 from src.api.broadcast import broadcast_update
 from src.api.common import ensure_bot_state
-from src.api.schemas import BotStateRequest, TradingModeRequest
-from src.config import settings
+from src.api.schemas import BotStateRequest
 from src.database.models import get_db
 from src.logger import logger
 
@@ -33,25 +32,3 @@ async def set_bot_state(req: BotStateRequest, db: Session = Depends(get_db)):
     logger.info("Bot state -> %s", req.state)
     await broadcast_update({"type": "bot_state", "data": {"state": req.state}})
     return {"state": req.state}
-
-
-@router.post("/settings/mode")
-async def set_trading_mode(req: TradingModeRequest, db: Session = Depends(get_db)):
-    if req.mode not in ("paper", "live"):
-        raise HTTPException(status_code=400, detail="mode must be paper or live")
-    prev = settings.trading_mode
-    settings.trading_mode = req.mode
-    logger.info("Trading mode -> %s", req.mode)
-    await broadcast_update({"type": "mode_changed", "data": {"mode": req.mode}})
-
-    out: dict = {"mode": req.mode}
-    if prev != req.mode:
-        row = ensure_bot_state(db)
-        row.state = "stop"
-        row.updated_at = utc_now()
-        db.commit()
-        logger.info("Bot state -> stop (trading mode switched from %s)", prev)
-        await broadcast_update({"type": "bot_state", "data": {"state": "stop"}})
-        out["bot_state"] = "stop"
-
-    return out
