@@ -1069,10 +1069,39 @@ async def close_position_manual(position_id: str, db: Session = Depends(get_db))
             kalshi_order_filled_contracts,
         )
 
+        from src.activity_log import (
+            fresh_unresolved_order_hold,
+            make_order_submit_gate,
+            record_order_ack,
+        )
+
+        sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
+        if sell_hold:
+            raise HTTPException(status_code=409, detail=sell_hold)
         sell_result = await kc.place_sell_market(
             pos.market_id,
             pos.side,
             pos.quantity,
+            before_submit=make_order_submit_gate(
+                {
+                    "market_id": pos.market_id,
+                    "side": pos.side,
+                    "action": "sell",
+                    "quantity": int(pos.quantity or 0),
+                    "detail": "manual close",
+                }
+            ),
+        )
+        record_order_ack(
+            sell_result,
+            {
+                "market_id": pos.market_id,
+                "side": pos.side,
+                "action": "sell",
+                "quantity": int(pos.quantity or 0),
+                "client_order_id": sell_result.get("client_order_id"),
+                "detail": "manual close",
+            },
         )
         floor_d = float(pos.current_price or 0.01)
         if sell_result.get("skipped_dead_book"):

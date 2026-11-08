@@ -15,6 +15,15 @@ from src.clients.kalshi_client import (
     open_position_estimated_mark_dollars,
     open_position_mark_dollars,
 )
+from src.activity_log import (
+    fresh_unresolved_order_hold,
+    make_order_submit_gate,
+    persist_order_intent,
+    quote_snapshot,
+    record_activity,
+    record_order_ack,
+    scrub_text,
+)
 from src.analysis_payload import enrich_analysis_ai_provider
 from src.app_state import kalshi_ui_reconcile_lock
 from src.config import (
@@ -484,6 +493,30 @@ def is_bot_playing(db_factory) -> bool:
     return get_bot_state_str(db_factory) == "play"
 
 
+def reentry_cooldown_minutes_from_settings(settings) -> int:
+    """Read ``reentry_cooldown_minutes``. A leftover hours attribute is ignored."""
+    try:
+        return max(0, int(getattr(settings, "reentry_cooldown_minutes", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def losing_exit_cooldown_market_ids(rows, *, now: datetime, cooldown_minutes: int) -> Set[str]:
+    """Tickers whose latest close inside the window has negative realized P&L."""
+    if cooldown_minutes <= 0:
+        return set()
+    cutoff = now - timedelta(minutes=int(cooldown_minutes))
+    latest: Dict[str, Tuple[datetime, float]] = {}
+    for mid, closed_at, realized in rows:
+        if not mid or closed_at is None or closed_at < cutoff:
+            continue
+        key = normalize_market_id(str(mid)).upper()
+        prev = latest.get(key)
+        if prev is None or closed_at > prev[0]:
+            latest[key] = (closed_at, float(realized or 0.0))
+    return {key for key, (_, pnl) in latest.items() if pnl < 0}
+
+
 def _position_age_minutes_utc(opened_at: Optional[datetime]) -> float:
     """Minutes since ``opened_at`` (UTC)."""
     if opened_at is None:
@@ -514,6 +547,7 @@ async def monitor_positions(
     from src.reconcile.open_positions import dedupe_open_positions
 
     db = db_factory()
+    closed_notices: List[dict] = []
 
     try:
         positions = db.query(Position).filter(
@@ -578,6 +612,7 @@ async def monitor_positions(
             return
 
         for pos in positions:
+            prev_mark_cents = int(round(float(pos.current_price or 0.0) * 100))
             # ``reconcile_live_positions_from_kalshi`` already called ``get_market`` per open row via
             # ``recompute_open_live_position_unrealized_pnl``. Skip duplicate fetches when safe so each scan
             # does not pay 2× Kalshi market latency (still fetch when we need the live book).
@@ -653,6 +688,19 @@ async def monitor_positions(
             pos.bid_price = float(mark_last)
             pos.current_price = float(mark_last)
             pos.unrealized_pnl = current_value - cash_basis
+            new_mark_cents = int(round(float(mark_last) * 100))
+            if new_mark_cents != prev_mark_cents:
+                record_activity(
+                    {
+                        "event_type": "mark",
+                        "market_id": pos.market_id,
+                        "event_ticker": getattr(pos, "event_ticker", None),
+                        "side": pos.side,
+                        "quantity": int(pos.quantity or 0),
+                        "fill_price": float(mark_last),
+                        "detail": f"mark {prev_mark_cents}c -> {new_mark_cents}c",
+                    }
+                )
 
             # Align flag clears with **strict liquidation mark** (``mark_last`` / ``open_position_mark_*``)
             # or an official resolved intrinsic (winning YES legs often have **no bids** while ``finalized``).
@@ -727,10 +775,37 @@ async def monitor_positions(
             if sell_n < 1:
                 logger.warning("Skip live exit %s — zero whole-contract quantity in DB", pos.market_id)
                 continue
+            sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
+            if sell_hold:
+                logger.info("Skip auto-exit %s — %s", pos.market_id, sell_hold)
+                continue
+            sell_gate = make_order_submit_gate(
+                {
+                    "market_id": pos.market_id,
+                    "event_ticker": getattr(pos, "event_ticker", None),
+                    "side": pos.side,
+                    "action": "sell",
+                    "quantity": sell_n,
+                    "detail": f"auto-exit {exit_reason}",
+                }
+            )
             sell_result = await kalshi_client.place_sell_market(
                 pos.market_id,
                 pos.side,
                 sell_n,
+                before_submit=sell_gate,
+            )
+            record_order_ack(
+                sell_result,
+                {
+                    "market_id": pos.market_id,
+                    "side": pos.side,
+                    "action": "sell",
+                    "quantity": sell_n,
+                    "client_order_id": sell_result.get("client_order_id"),
+                    "fees_dollars": None,
+                    "detail": f"auto-exit {exit_reason}",
+                },
             )
             floor_d = float(current_price or 0.01)
             if sell_result.get("skipped_dead_book"):
@@ -825,6 +900,21 @@ async def monitor_positions(
             sold_proceeds = float(proceeds) * scale
             sold_px = float(avg_exit_px)
             exit_fees_scaled = float(kalshi_order_fees_dollars(sell_result)) * scale
+            record_activity(
+                {
+                    "event_type": "fill",
+                    "market_id": pos.market_id,
+                    "side": pos.side,
+                    "action": "sell",
+                    "quantity": int(sold_qty_trade),
+                    "fill_qty": float(filled_fp),
+                    "fill_price": float(sold_px),
+                    "fees_dollars": float(exit_fees_scaled),
+                    "client_order_id": sell_result.get("client_order_id"),
+                    "order_status": "filled",
+                    "detail": f"auto-exit {exit_reason}",
+                }
+            )
             pos.fees_paid = float(getattr(pos, "fees_paid", 0) or 0) + exit_fees_scaled
             pos.dead_market = False
             pos.awaiting_settlement = False
@@ -918,24 +1008,41 @@ async def monitor_positions(
                         pos.quantity,
                     )
                     continue
-        await broadcast_fn({
-                "type": "position_closed",
-                "data": {
+            closed_notices.append(
+                {
                     "market_id": pos.market_id,
                     "market_title": pos.market_title,
                     "side": pos.side,
                     "exit_reason": exit_reason,
-                    "realized_pnl": realized,
-                },
-            })
+                    "realized_pnl": float(realized),
+                }
+            )
 
         db.commit()
 
     except Exception as e:
-        logger.error("Error in monitor_positions: %s", e)
+        closed_notices.clear()
+        logger.error("Error in monitor_positions: %s", scrub_text(e))
+        record_activity(
+            {
+                "event_type": "error",
+                "detail": "monitor_positions failed",
+                "error": type(e).__name__,
+            }
+        )
         db.rollback()
     finally:
         db.close()
+
+    for notice in closed_notices:
+        try:
+            await broadcast_fn({"type": "position_closed", "data": notice})
+        except Exception as exc:
+            logger.error(
+                "position_closed broadcast failed for %s: %s",
+                notice.get("market_id"),
+                type(exc).__name__,
+            )
 
 
 # ── Scan and trade ─────────────────────────────────────────────────────────────
@@ -1006,6 +1113,10 @@ async def scan_and_trade(
         fetch_hours = int(getattr(settings, "bot_markets_fetch_max_close_hours", settings.bot_max_hours))
         max_close_ts = now_ts + fetch_hours * 3600
         markets = await kalshi_client.get_markets({"status": "open", "mve_filter": "exclude", "max_close_ts": max_close_ts})
+        quote_captured_at = utc_now()
+        for _m in markets:
+            if isinstance(_m, dict):
+                _m["_quote_captured_at"] = quote_captured_at
         tradeable: List[dict] = []
         fail_counts: Dict[str, int] = {}
         for m in markets:
@@ -1121,14 +1232,13 @@ async def scan_and_trade(
             local_debounce_sec,
         )
 
-        reentry_cd_h = float(getattr(settings, "reentry_cooldown_hours", 0.0) or 0.0)
+        reentry_cd_min = reentry_cooldown_minutes_from_settings(settings)
         loss_exit_cooldown_tickers: Set[str] = set()
-        if reentry_cd_h > 0:
-            cd_cutoff = utc_now() - timedelta(hours=reentry_cd_h)
+        if reentry_cd_min > 0:
+            cd_cutoff = utc_now() - timedelta(minutes=reentry_cd_min)
             # Per ticker: only the **latest** close in the window matters — a later winning exit
             # clears cooldown from an earlier loss on the same market.
-            latest_in_window: Dict[str, Tuple[datetime, float]] = {}
-            for mid, ca, rp in (
+            recent_closes = (
                 db.query(Position.market_id, Position.closed_at, Position.realized_pnl)
                 .filter(
                     Position.status == "closed",
@@ -1137,14 +1247,12 @@ async def scan_and_trade(
                     Position.closed_at >= cd_cutoff,
                 )
                 .all()
-            ):
-                if not mid:
-                    continue
-                k = normalize_market_id(mid).upper()
-                prev = latest_in_window.get(k)
-                if prev is None or ca > prev[0]:
-                    latest_in_window[k] = (ca, float(rp or 0.0))
-            loss_exit_cooldown_tickers = {k for k, (_, rp) in latest_in_window.items() if rp < 0}
+            )
+            loss_exit_cooldown_tickers = losing_exit_cooldown_market_ids(
+                recent_closes,
+                now=utc_now(),
+                cooldown_minutes=reentry_cd_min,
+            )
 
         batch_completed_this_sweep: Set[str] = set()
         scan_queue = _tradeable_scan_queue(tradeable)
@@ -1217,7 +1325,7 @@ async def scan_and_trade(
                     nt = normalize_market_id(str(tid)).upper()
                     if nt in held_tickers or nt in recently_analyzed or tid in batch_completed_this_sweep:
                         continue
-                    if reentry_cd_h > 0 and nt in loss_exit_cooldown_tickers:
+                    if reentry_cd_min > 0 and nt in loss_exit_cooldown_tickers:
                         continue
                     et_m = str(m.get("event_ticker") or "").strip().upper()
                     if _event_series_lock_blocks_market(
@@ -1353,11 +1461,11 @@ async def scan_and_trade(
                 nt0 = normalize_market_id(str(ticker)).upper()
                 if nt0 in held_tickers or nt0 in recently_analyzed or ticker in batch_completed_this_sweep:
                     continue
-                if reentry_cd_h > 0 and nt0 in loss_exit_cooldown_tickers:
+                if reentry_cd_min > 0 and nt0 in loss_exit_cooldown_tickers:
                     logger.info(
-                        "Skip %s — reentry cooldown (losing exit within %.1fh on this ticker)",
+                        "Skip %s — reentry cooldown (losing exit within %d min on this ticker)",
                         ticker,
-                        reentry_cd_h,
+                        reentry_cd_min,
                     )
                     continue
                 et_single = str(market.get("event_ticker") or "").strip().upper()
@@ -1466,6 +1574,7 @@ async def scan_and_trade(
             action_taken: Dict[str, Any]
             executed_trade = False
             stop_scan_after = False
+            kelly_sizing_tag = ""
             trade_side = ""
             trade_quantity = 0
             trade_price = 0.0
@@ -1668,10 +1777,78 @@ async def scan_and_trade(
                                         "signal": signal,
                                     }
                                 else:
-                                    result = await kalshi_client.place_buy_ioc_limit(
-                                        ticker, trade_side, quantity, ioc_limit_dollars
-                                    )
-                                    if result.get("error"):
+                                    buy_hold = fresh_unresolved_order_hold(ticker_clean, "buy")
+                                    order_intent_id = None
+                                    if buy_hold:
+                                        action_taken = {
+                                            "status": "no_trade",
+                                            "summary": f"Skipped — {buy_hold}",
+                                            "signal": signal,
+                                        }
+                                    else:
+                                        order_intent_id = persist_order_intent(
+                                            {
+                                                "market_id": ticker_clean,
+                                                "event_ticker": _pos_et_val,
+                                                "side": trade_side,
+                                                "action": "buy",
+                                                "quantity": int(quantity),
+                                                "limit_price": float(ioc_limit_dollars),
+                                                "model_id": str(
+                                                    (decision.get("xai_analysis") or {}).get("model")
+                                                    or getattr(settings, "xai_model", "")
+                                                    or ""
+                                                ),
+                                                "ai_probability_yes_pct": int(
+                                                    decision.get("ai_probability_yes_pct") or 0
+                                                ),
+                                                "edge_pct": float(decision.get("edge_pct") or 0.0),
+                                                "sizing_tag": kelly_sizing_tag or None,
+                                                "kelly_contracts": int(quantity),
+                                                "detail": "IOC buy intent",
+                                                **quote_snapshot(market),
+                                            }
+                                        )
+                                        if not order_intent_id:
+                                            action_taken = {
+                                                "status": "no_trade",
+                                                "summary": (
+                                                    "Skipped — order intent could not be saved, "
+                                                    "so no order was sent"
+                                                ),
+                                                "signal": signal,
+                                            }
+                                    if order_intent_id:
+                                        result = await kalshi_client.place_buy_ioc_limit(
+                                            ticker,
+                                            trade_side,
+                                            quantity,
+                                            ioc_limit_dollars,
+                                            client_order_id=order_intent_id,
+                                        )
+                                        record_order_ack(
+                                            result,
+                                            {
+                                                "market_id": ticker_clean,
+                                                "event_ticker": _pos_et_val,
+                                                "side": trade_side,
+                                                "action": "buy",
+                                                "quantity": int(quantity),
+                                                "limit_price": float(ioc_limit_dollars),
+                                                "client_order_id": order_intent_id,
+                                                "model_id": str(
+                                                    (decision.get("xai_analysis") or {}).get("model")
+                                                    or getattr(settings, "xai_model", "")
+                                                    or ""
+                                                ),
+                                                **quote_snapshot(market),
+                                            },
+                                        )
+                                    else:
+                                        result = {"error": "order not sent", "order_not_sent": True}
+                                    if result.get("order_not_sent"):
+                                        pass
+                                    elif result.get("error"):
                                         logger.warning(
                                             "Live buy failed %s %s: %s",
                                             ticker,
@@ -1717,6 +1894,22 @@ async def scan_and_trade(
                                             )
                                             scale = qty_int / float(filled) if filled > 1e-9 else 1.0
                                             buy_fees = float(kalshi_order_fees_dollars(result)) * scale
+                                            record_activity(
+                                                {
+                                                    "event_type": "fill",
+                                                    "market_id": ticker_clean,
+                                                    "event_ticker": _pos_et_val,
+                                                    "side": trade_side,
+                                                    "action": "buy",
+                                                    "quantity": qty_int,
+                                                    "fill_qty": float(filled),
+                                                    "fill_price": float(avg_px),
+                                                    "fees_dollars": buy_fees,
+                                                    "client_order_id": order_intent_id,
+                                                    "order_status": "filled",
+                                                    "limit_price": float(ioc_limit_dollars),
+                                                }
+                                            )
                                             fill_notional = float(kalshi_order_fill_cost_dollars(result)) * scale
                                             if fill_notional <= 1e-12 and float(full_cost) > 1e-12:
                                                 fill_notional = max(
@@ -1831,6 +2024,28 @@ async def scan_and_trade(
                 snapshot_expires_days=_snap["expires_in_days"],
                 trade_mode=TRADE_MODE,
             ))
+            xa_model = ""
+            xa_blob = decision.get("xai_analysis")
+            if isinstance(xa_blob, dict):
+                xa_model = str(xa_blob.get("model") or "")
+            record_activity(
+                {
+                    "event_type": "decision",
+                    "market_id": ticker_clean,
+                    "event_ticker": _pos_et_val,
+                    "side": trade_side or decision.get("direction"),
+                    "action": "buy" if str(decision.get("decision") or "").startswith("BUY") else None,
+                    "model_id": xa_model or str(getattr(settings, "xai_model", "") or ""),
+                    "ai_probability_yes_pct": int(decision.get("ai_probability_yes_pct") or 0),
+                    "market_implied_pct": int(decision.get("market_implied_probability_pct") or 0),
+                    "edge_pct": float(decision.get("edge_pct") or 0.0),
+                    "sizing_tag": kelly_sizing_tag or None,
+                    "kelly_contracts": int(decision.get("kelly_contracts") or 0),
+                    "order_status": str((action_taken or {}).get("status") or ""),
+                    "detail": scrub_text((action_taken or {}).get("summary") or decision.get("action_summary") or ""),
+                    **quote_snapshot(market),
+                }
+            )
             db.commit()
 
             decision["trade_mode"] = TRADE_MODE
@@ -1903,7 +2118,14 @@ async def scan_and_trade(
         )
 
     except Exception as e:
-        logger.error("Error in scan_and_trade: %s", e)
+        logger.error("Error in scan_and_trade: %s", scrub_text(e))
+        record_activity(
+            {
+                "event_type": "error",
+                "detail": "scan_and_trade failed",
+                "error": type(e).__name__,
+            }
+        )
         db.rollback()
     finally:
         db.close()

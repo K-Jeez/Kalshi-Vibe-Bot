@@ -5,7 +5,7 @@ import base64
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -1712,6 +1712,7 @@ class KalshiClient:
         limit_price_dollars: float,
         reduce_only: bool = False,
         time_in_force: str = "immediate_or_cancel",
+        client_order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create order using Kalshi recommended V2 endpoint (quantity + price + TIF).
 
@@ -1737,10 +1738,13 @@ class KalshiClient:
             tickers_to_try.append(t_norm)
 
         last_http_err: Optional[Dict[str, Any]] = None
+        # One id for this logical order, including a ticker-alias retry. A new id per
+        # attempt could submit two live orders if the first request was accepted.
+        cid = (client_order_id or "").strip() or str(uuid.uuid4())
         for t_eff in tickers_to_try:
             body: Dict[str, Any] = {
                 "ticker": t_eff,
-                "client_order_id": str(uuid.uuid4()),
+                "client_order_id": cid,
                 "side": book_side,  # bid/ask (YES leg)
                 "count": _count_fp_str(q),
                 "price": _fp_dollars_str(yes_px, places=4),
@@ -1776,6 +1780,7 @@ class KalshiClient:
 
                 out: Dict[str, Any] = {
                     "order_id": data.get("order_id"),
+                    "client_order_id": cid,
                     "status": "executed" if filled_fp > 0 else "open",
                     "action": act_lo,
                     "side": str(side_yesno).lower(),
@@ -1831,7 +1836,7 @@ class KalshiClient:
                 if len(detail) > 800:
                     detail = detail[:800] + "…"
                 code = int(e.response.status_code)
-                last_http_err = {"error": detail, "status_code": code}
+                last_http_err = {"error": detail, "status_code": code, "client_order_id": cid}
                 # Only retry on "market not found" style 404s, and only when we have another ticker candidate.
                 if code == 404 and len(tickers_to_try) > 1:
                     logger.warning("Create order V2 404 for ticker=%s; will retry if alternate id exists", t_eff)
@@ -1840,9 +1845,9 @@ class KalshiClient:
                 return last_http_err
             except Exception as e:
                 logger.error("Create order V2 failed (%s): %s", log_label, e)
-                return {"error": str(e)}
+                return {"error": str(e), "client_order_id": cid}
 
-        return last_http_err or {"error": "Create order failed"}
+        return last_http_err or {"error": "Create order failed", "client_order_id": cid}
 
     async def _abort_resting_exit_unfilled(self, order: Dict[str, Any], log_label: str) -> Dict[str, Any]:
         """Kalshi sometimes accepts exit payloads that **rest** with zero fill; cancel to avoid stacking sells."""
@@ -1917,6 +1922,7 @@ class KalshiClient:
         side: str,
         quantity: int,
         limit_price_dollars: float,
+        client_order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Aggressive **limit** buy with ``immediate_or_cancel`` (IOC).
 
@@ -1937,6 +1943,7 @@ class KalshiClient:
             limit_price_dollars=float(limit_price_dollars),
             reduce_only=False,
             time_in_force="immediate_or_cancel",
+            client_order_id=client_order_id,
         )
         if not out.get("error") and kalshi_order_filled_contracts(out) > 0:
             self.invalidate_market_detail_cache(market_id)
@@ -1982,6 +1989,8 @@ class KalshiClient:
         market_id: str,
         side: str,
         quantity: int,
+        *,
+        before_submit: Optional[Callable[[str], bool]] = None,
     ) -> Dict[str, Any]:
         """Close exposure after fetching **market + orderbook** (no blind legacy/market probes).
 
@@ -2036,6 +2045,7 @@ class KalshiClient:
 
         seen_kw: Set[Tuple[str, ...]] = set()
         last: Dict[str, Any] = {}
+        next_client_order_id = str(uuid.uuid4())
         for label, kw in follow_ups:
             sig = _exit_price_kw_signature(kw)
             if sig in seen_kw:
@@ -2056,6 +2066,13 @@ class KalshiClient:
             if limit_leg <= 0:
                 limit_leg = 0.01
 
+            cid = next_client_order_id
+            if before_submit is not None and not before_submit(cid):
+                return {
+                    "error": "order intent was not persisted; order not sent",
+                    "order_not_sent": True,
+                    "client_order_id": cid,
+                }
             last = await self._post_create_order_v2(
                 ticker=t_eff,
                 action="sell",
@@ -2064,7 +2081,10 @@ class KalshiClient:
                 limit_price_dollars=float(limit_leg),
                 reduce_only=True,
                 time_in_force="immediate_or_cancel",
+                client_order_id=cid,
             )
+            # A later price is a new order, only after this attempt returned a definitive no-fill.
+            next_client_order_id = str(uuid.uuid4())
             if kalshi_order_filled_contracts(last) > 0:
                 self.invalidate_market_detail_cache(t_eff)
                 self.invalidate_portfolio_balance_cache()
