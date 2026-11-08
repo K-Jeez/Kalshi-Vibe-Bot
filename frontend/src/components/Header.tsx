@@ -34,7 +34,7 @@ export const Header: React.FC = () => {
   const refresh = async () => {
     if (!docVisible) return
     try {
-      const [_, bot] = await Promise.all([apiClient.getHealth(), apiClient.getBotState()])
+      const [, bot] = await Promise.all([apiClient.getHealth(), apiClient.getBotState()])
       setConnected(true)
       setBotState(bot.state ?? 'stop')
     } catch {
@@ -125,7 +125,7 @@ export const Header: React.FC = () => {
                   disabled={botLoading || !connected}
                   title={
                     s === 'play'  ? 'Play — scan markets and trade autonomously' :
-                    s === 'pause' ? 'Pause — no new positions; exits still run for open trades' :
+                    s === 'pause' ? 'Pause — no new positions. Stop-loss exits run only if that switch is enabled in Settings' :
                                     'Stop — no scanning; automatic stop-loss exits are off'
                   }
                   className={`p-2 rounded-lg transition ${

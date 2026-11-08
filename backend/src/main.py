@@ -15,6 +15,7 @@ from src.api.bot import router as bot_router
 from src.api.broadcast import broadcast_update
 from src.api.common import ensure_bot_state
 from src.api.health import router as health_router
+from src.api.local_guard import LocalMutationGuard
 from src.api.logs_debug import router as logs_debug_router
 from src.api.markets import router as markets_router
 from src.api.portfolio import router as portfolio_router
@@ -79,6 +80,13 @@ async def lifespan(app: FastAPI):
         logger.warning("KALSHI_API_KEY is empty — Kalshi API calls will fail until set in backend/.env")
     if not (getattr(settings, "xai_api_key", None) or "").strip():
         logger.warning("XAI_API_KEY is empty — xAI analysis will fail until set in backend/.env")
+    if str(getattr(settings, "host", "") or "") in ("0.0.0.0", "::"):
+        if not (getattr(settings, "local_api_token", None) or "").strip():
+            logger.warning(
+                "HOST is %s and LOCAL_API_TOKEN is empty — non-local trading and other "
+                "state-changing requests are denied. Localhost dashboard actions still work.",
+                settings.host,
+            )
 
     logger.info(
         "Application ready — mode=%s scan_interval=%ds min_edge=%d%% stop_loss_drawdown=%.0f%%",
@@ -126,6 +134,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Added after CORS so this runs first. OPTIONS is passed through for browser preflight.
+app.add_middleware(LocalMutationGuard)
 
 app.include_router(health_router)
 app.include_router(websocket_router)

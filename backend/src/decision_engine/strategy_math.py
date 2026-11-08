@@ -204,6 +204,13 @@ def kelly_order_skip_summary(
 
     ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
     deploy = float(bankroll)
+    if max_kelly_contracts is not None and int(max_kelly_contracts) < 1 and max_whole_contracts_for_cash(
+        deploy, per_contract_premium
+    ) >= 1:
+        return (
+            "Skipped — stake cap cannot fund one whole contract at the ask "
+            f"({ask_c}¢ on ${deploy:.2f} deployable). The order is not enlarged to full cash."
+        )
     return (
         "Skipped — Kelly size is zero and available cash cannot buy "
         f"a whole contract at current prices (deployable ${deploy:.2f}, ask {ask_c}¢)"

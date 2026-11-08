@@ -206,7 +206,7 @@ export const AnalysisDetailBody: React.FC<{
   a: DecisionAnalysis
   /** Unused; analyzer is always xAI Grok. */
   fallbackProvider?: AiProvider | null
-}> = ({ a, fallbackProvider: _fallbackProvider }) => {
+}> = ({ a }) => {
   const [ctxOpen, setCtxOpen] = React.useState(false)
   const badgeDecision = effectiveAnalysisBadgeDecision(a)
   const badgeYes = badgeDecision === 'BUY_YES'

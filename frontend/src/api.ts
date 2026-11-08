@@ -223,14 +223,13 @@ export interface AnalysesStats {
 export type AiProvider = 'xai'
 
 /** Human label for the analysis model (xAI Grok). */
-export function aiProviderDisplayName(_provider?: string | null): string {
+export function aiProviderDisplayName(): string {
   return 'xAI'
 }
 
 /** Show the xAI logo when a row has LLM analysis metadata. */
 export function analysisAiProviderId(
   a: Pick<DecisionAnalysis, 'xai_analysis' | 'ai_analysis' | 'ai_provider' | 'escalated_to_xai' | 'escalated_to_ai'>,
-  _fallback?: AiProvider | null,
 ): AiProvider | null {
   if (a.escalated_to_xai || a.escalated_to_ai) return 'xai'
   const blob = a.xai_analysis ?? a.ai_analysis

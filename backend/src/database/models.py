@@ -225,6 +225,49 @@ class TuningState(Base):
     updated_at = Column(DateTime(timezone=True), default=utc_now)
 
 
+class ActivityEvent(Base):
+    """Bounded trace from a decision through order intent, ack, fill, mark, and settlement.
+
+    Stores no API keys, headers, PEM material, or raw broker payloads.
+    """
+
+    __tablename__ = "activity_events"
+
+    id = Column(String, primary_key=True)
+    seq = Column(Integer, nullable=False, default=0, index=True)
+    ts_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
+    run_id = Column(String, nullable=False, index=True)
+    app_version = Column(String, nullable=True)
+    git_sha = Column(String, nullable=True)
+    event_type = Column(String, nullable=False, index=True)
+    market_id = Column(String, nullable=True, index=True)
+    event_ticker = Column(String, nullable=True)
+    side = Column(String, nullable=True)
+    action = Column(String, nullable=True)  # buy | sell
+    model_id = Column(String, nullable=True)
+    ai_probability_yes_pct = Column(Integer, nullable=True)
+    market_implied_pct = Column(Integer, nullable=True)
+    edge_pct = Column(Float, nullable=True)
+    sizing_tag = Column(String, nullable=True)
+    kelly_contracts = Column(Integer, nullable=True)
+    quantity = Column(Integer, nullable=True)
+    limit_price = Column(Float, nullable=True)
+    fill_price = Column(Float, nullable=True)
+    fill_qty = Column(Float, nullable=True)
+    fees_dollars = Column(Float, nullable=True)
+    client_order_id = Column(String, nullable=True, index=True)
+    order_status = Column(String, nullable=True)
+    quote_captured_at = Column(String, nullable=True)
+    quote_age_ms = Column(Integer, nullable=True)
+    yes_bid = Column(Float, nullable=True)
+    yes_ask = Column(Float, nullable=True)
+    no_bid = Column(Float, nullable=True)
+    no_ask = Column(Float, nullable=True)
+    settings_json = Column(Text, nullable=True)
+    detail = Column(Text, nullable=True)
+    error = Column(String, nullable=True)
+
+
 # ── Database helpers ───────────────────────────────────────────────────────────
 
 _engine: Optional[Engine] = None

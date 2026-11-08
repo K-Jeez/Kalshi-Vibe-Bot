@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Kalshi Vibe Bot — offline UI smoke</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; max-width: 720px; line-height: 1.45; }
+    h1 { font-size: 22px; }
+    .badge { display: inline-block; padding: 4px 8px; border: 1px solid #999; font-size: 12px; font-weight: 700; }
+    button { margin-right: 6px; padding: 6px 10px; }
+    button[disabled] { opacity: 0.55; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    td, th { border-bottom: 1px solid #ccc; text-align: left; padding: 6px 4px; font-size: 14px; }
+    .note { font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Offline UI smoke</h1>
+  <p class="note">Fixture screen only. This file has no network calls, no account keys, and no order buttons that do anything. It is not the trading app.</p>
+  <p><span class="badge">LIVE badge (display only)</span></p>
+  <p>
+    <button type="button" disabled>Play</button>
+    <button type="button" disabled>Pause</button>
+    <button type="button" disabled>Stop</button>
+  </p>
+  <p class="note">Play stays disabled here. In the real app, Play sends live orders. Stop-loss selling in the checked local config is off, so the 0.8 threshold does not sell.</p>
+  <table>
+    <thead><tr><th>Item</th><th>Fixture value</th></tr></thead>
+    <tbody>
+      <tr><td>STOP_LOSS_SELLING_ENABLED</td><td>false</td></tr>
+      <tr><td>STOP_LOSS_DRAWDOWN_PCT</td><td>0.8 (80% of entry price, fees excluded)</td></tr>
+      <tr><td>Dashboard poll while the tab is visible</td><td>12 seconds, from dashboardPolling.ts</td></tr>
+      <tr><td>Same poll while the tab is hidden</td><td>36 seconds (three times the visible interval)</td></tr>
+      <tr><td>Balance cache in code</td><td>2.5 seconds. Code comment: balance endpoint 1 request/second, no burst.</td></tr>
+      <tr><td>UI portfolio reconcile spacing in code</td><td>5 seconds</td></tr>
+    </tbody>
+  </table>
+  <p class="note">Those timings are copied from this repository’s source. They are not a claim about Kalshi’s full published rate-limit table.</p>
+</body>
+</html>
