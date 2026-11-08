@@ -1,0 +1,13 @@
+{
+  "market_id": "SYNTHETIC-YES",
+  "event_ticker": "SYNTHETIC-EVENT-A",
+  "forecast_time": "2026-11-08T13:00:00Z",
+  "quote_time": "2026-11-08T12:59:30Z",
+  "model_id": "fixture-model",
+  "model_version": "fixture-1",
+  "ai_probability_yes": 0.7,
+  "yes_bid": 0.4,
+  "yes_ask": 0.42,
+  "no_bid": 0.56,
+  "no_ask": 0.6
+}
