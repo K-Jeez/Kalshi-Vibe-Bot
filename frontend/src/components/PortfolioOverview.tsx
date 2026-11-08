@@ -26,7 +26,7 @@ interface StatCardProps {
   icon: React.ReactNode
   color: string
   topContent?: React.ReactNode
-  /** Stacked muted rows under the main value (Kalshi balance health only). */
+  /** Stacked muted rows under the main value (Kalshi balance health + xAI prepaid). */
   sublineRows?: StatSublineRow[]
   subtext?: string
 }
@@ -175,7 +175,6 @@ export const PortfolioOverview: React.FC = () => {
     else if (xaiUsd < 5) xaiSublineAlert = 'warning'
   }
 
-  // Kalshi cash only — Grok API prepaid is separate (shown on the scan status row).
   const totalBalanceSublines: StatSublineRow[] = []
   if (totalBal <= 0) {
     totalBalanceSublines.push({
@@ -190,6 +189,14 @@ export const PortfolioOverview: React.FC = () => {
       alert: 'warning',
       title:
         'Play mode: market scan is off until Kalshi total balance reaches at least $5 (matches banner label).',
+    })
+  }
+  if (xaiUsd !== null) {
+    totalBalanceSublines.push({
+      text: `xAI prepaid $${xaiUsd.toFixed(2)} (API credits)`,
+      alert: xaiSublineAlert,
+      title:
+        'xAI Grok prepaid remaining this billing cycle — not Kalshi cash. Server: XAI_TEAM_ID + XAI_MANAGEMENT_API_KEY.',
     })
   }
 
@@ -233,7 +240,7 @@ export const PortfolioOverview: React.FC = () => {
   return (
     <div className="space-y-4">
       <div
-        className="ui-surface-sm flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5 sm:px-4"
+        className="ui-surface-sm flex items-center gap-3 px-3 py-2.5 sm:px-4"
         title="Whether the bot will pull open markets and run Grok analysis for new entries on the next scan tick."
       >
         <span
@@ -243,28 +250,12 @@ export const PortfolioOverview: React.FC = () => {
           aria-hidden
         />
         <span
-          className={`text-xs sm:text-sm font-medium leading-snug min-w-0 flex-1 ${
+          className={`text-xs sm:text-sm font-medium leading-snug ${
             scanActive ? 'text-emerald-100/95' : 'text-red-200/95'
           }`}
         >
           {scanLabel}
         </span>
-        {xaiUsd !== null ? (
-          <p
-            className="text-[10px] sm:text-[11px] text-white/80 tabular-nums flex items-center gap-1.5 shrink-0 sm:ml-auto"
-            title="Grok API prepaid credits (xAI billing) — not Kalshi cash. Needs XAI_TEAM_ID + XAI_MANAGEMENT_API_KEY."
-          >
-            {xaiSublineAlert === 'warning' && (
-              <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-400" aria-hidden />
-            )}
-            {xaiSublineAlert === 'error' && (
-              <AlertCircle className="w-3.5 h-3.5 shrink-0 text-red-500" aria-hidden />
-            )}
-            <span>
-              Grok API prepaid <span className="text-white font-medium">${xaiUsd.toFixed(2)}</span>
-            </span>
-          </p>
-        ) : null}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">

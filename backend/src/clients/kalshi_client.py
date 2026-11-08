@@ -737,6 +737,11 @@ class KalshiClient:
     _RESTING_ORDERS_CACHE_TTL_SEC = 4.0
     _SETTLEMENTS_CACHE_TTL_SEC = 45.0
     _EVENT_CACHE_TTL_SEC = 300.0
+    # Kalshi meters ``GET /portfolio/balance`` separately: Basic/Advanced = 1 req/s, no burst.
+    # Dashboard + bot + Strict Mode remounts easily exceed that; cache + coalesce stay under the cap.
+    _PORTFOLIO_BALANCE_CACHE_TTL_SEC = 2.5
+    _PORTFOLIO_BALANCE_STALE_OK_SEC = 120.0
+    _PORTFOLIO_BALANCE_429_MAX_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -755,6 +760,9 @@ class KalshiClient:
         self._resting_orders_cache: Optional[Tuple[float, List[Dict[str, Any]]]] = None
         self._settlements_cache: Optional[Tuple[float, List[Dict[str, Any]]]] = None
         self._event_title_cache: dict[str, Tuple[float, str]] = {}
+        self._portfolio_balance_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+        self._portfolio_balance_lock = asyncio.Lock()
+        self._portfolio_balance_inflight: Optional[asyncio.Future] = None
         self._load_private_key()
         # Shared keep-alive pool — avoids per-request TLS handshakes (dashboard + bot + reconcile).
         self._http = httpx.AsyncClient(
@@ -813,6 +821,10 @@ class KalshiClient:
     def invalidate_settlements_cache(self) -> None:
         """Clear cached settlements list (call after reconciliation closes local positions)."""
         self._settlements_cache = None
+
+    def invalidate_portfolio_balance_cache(self) -> None:
+        """Drop cached balance after fills / exits so the next read hits Kalshi."""
+        self._portfolio_balance_cache = None
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -1344,55 +1356,162 @@ class KalshiClient:
 
     # ── Portfolio ─────────────────────────────────────────────────────────────
 
-    async def get_portfolio(self) -> Dict[str, Any]:
-        """Get current portfolio balance (dollars)."""
-        path = "/trade-api/v2/portfolio/balance"
-        try:
-            response = await self._http_get_signed(path, timeout=10.0)
-            response.raise_for_status()
-            data = response.json()
-            # Kalshi v2 schema variants:
-            # - Top-level ints (cents): {"balance": 7348, "portfolio_value": 1461}
-            #   where portfolio_value is positions market value (not total).
-            # - Nested dict under "balance" with "available_balance" and possibly "portfolio_value".
-            raw_bal = data.get("balance", 0)
-            available_cents = 0.0
-            positions_value_cents = 0.0
+    @staticmethod
+    def _parse_portfolio_balance_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize Kalshi ``GET /portfolio/balance`` JSON to dollar fields used by the bot/UI."""
+        # Kalshi v2 schema variants:
+        # - Top-level ints (cents): {"balance": 7348, "portfolio_value": 1461}
+        #   where portfolio_value is positions market value (not total).
+        # - Nested dict under "balance" with "available_balance" and possibly "portfolio_value".
+        raw_bal = data.get("balance", 0)
+        available_cents = 0.0
+        positions_value_cents = 0.0
 
-            if isinstance(raw_bal, dict):
-                available_cents = float(raw_bal.get("available_balance", raw_bal.get("balance", 0)) or 0)
-                pv = raw_bal.get("portfolio_value", None)
-                if pv is not None:
+        if isinstance(raw_bal, dict):
+            available_cents = float(raw_bal.get("available_balance", raw_bal.get("balance", 0)) or 0)
+            pv = raw_bal.get("portfolio_value", None)
+            if pv is not None:
+                try:
+                    positions_value_cents = float(pv or 0)
+                except (TypeError, ValueError):
+                    positions_value_cents = 0.0
+        else:
+            available_cents = float(raw_bal or 0)
+            pv = data.get("portfolio_value", None)
+            if pv is not None:
+                try:
+                    positions_value_cents = float(pv or 0)
+                except (TypeError, ValueError):
+                    positions_value_cents = 0.0
+
+        out: Dict[str, Any] = {
+            "cash": available_cents / 100.0,
+            "positions_value": positions_value_cents / 100.0,
+            "portfolio_value": (available_cents + positions_value_cents) / 100.0,
+        }
+        if isinstance(raw_bal, dict):
+            for key in ("blocked_balance", "reserved_balance", "payout_balance"):
+                if key in raw_bal and raw_bal[key] is not None:
                     try:
-                        positions_value_cents = float(pv or 0)
+                        out[f"{key}_usd"] = float(raw_bal[key]) / 100.0
                     except (TypeError, ValueError):
-                        positions_value_cents = 0.0
+                        pass
+        return out
+
+    def _cached_portfolio_balance(
+        self, *, max_age_sec: float
+    ) -> Optional[Dict[str, Any]]:
+        hit = self._portfolio_balance_cache
+        if hit is None:
+            return None
+        age = time.monotonic() - float(hit[0] or 0.0)
+        if age > float(max_age_sec):
+            return None
+        return dict(hit[1])
+
+    async def get_portfolio(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+        """Get current portfolio balance (dollars).
+
+        Kalshi rate-limits this endpoint to **1/s** (Basic/Advanced) with **no burst**. Concurrent
+        dashboard + bot callers share one in-flight fetch and a short TTL cache. On 429/errors,
+        return last-good balance (up to ``_PORTFOLIO_BALANCE_STALE_OK_SEC``) instead of zeros so the
+        UI does not flash empty cash.
+        """
+        if not force_refresh:
+            fresh = self._cached_portfolio_balance(max_age_sec=self._PORTFOLIO_BALANCE_CACHE_TTL_SEC)
+            if fresh is not None:
+                return fresh
+
+        async with self._portfolio_balance_lock:
+            if not force_refresh:
+                fresh = self._cached_portfolio_balance(max_age_sec=self._PORTFOLIO_BALANCE_CACHE_TTL_SEC)
+                if fresh is not None:
+                    return fresh
+            inflight = self._portfolio_balance_inflight
+            if inflight is not None and not inflight.done():
+                waiter = inflight
             else:
-                available_cents = float(raw_bal or 0)
-                pv = data.get("portfolio_value", None)
-                if pv is not None:
-                    try:
-                        positions_value_cents = float(pv or 0)
-                    except (TypeError, ValueError):
-                        positions_value_cents = 0.0
+                loop = asyncio.get_running_loop()
+                waiter = loop.create_future()
+                self._portfolio_balance_inflight = waiter
 
-            out: Dict[str, Any] = {
-                "cash": available_cents / 100.0,
-                "positions_value": positions_value_cents / 100.0,
-                "portfolio_value": (available_cents + positions_value_cents) / 100.0,
-            }
-            if isinstance(raw_bal, dict):
-                # Surface numeric cents fields when present (Kalshi schema may evolve).
-                for key in ("blocked_balance", "reserved_balance", "payout_balance"):
-                    if key in raw_bal and raw_bal[key] is not None:
+                async def _run() -> Dict[str, Any]:
+                    path = "/trade-api/v2/portfolio/balance"
+                    last_err: Optional[BaseException] = None
+                    for attempt in range(self._PORTFOLIO_BALANCE_429_MAX_ATTEMPTS):
                         try:
-                            out[f"{key}_usd"] = float(raw_bal[key]) / 100.0
-                        except (TypeError, ValueError):
-                            pass
-            return out
+                            response = await self._http_get_signed(path, timeout=10.0)
+                            if response.status_code == 429:
+                                last_err = httpx.HTTPStatusError(
+                                    f"Client error '429 Too Many Requests' for url '{response.url}'",
+                                    request=response.request,
+                                    response=response,
+                                )
+                                # Bucket refills ~1 token/s; short backoff (+ jitter) before retry.
+                                delay = 0.55 * (attempt + 1) + (0.05 * attempt)
+                                logger.warning(
+                                    "Portfolio balance rate-limited (429); retry in %.2fs (attempt %d/%d)",
+                                    delay,
+                                    attempt + 1,
+                                    self._PORTFOLIO_BALANCE_429_MAX_ATTEMPTS,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            response.raise_for_status()
+                            out = self._parse_portfolio_balance_payload(response.json() or {})
+                            self._portfolio_balance_cache = (time.monotonic(), dict(out))
+                            return out
+                        except httpx.HTTPStatusError as e:
+                            last_err = e
+                            if e.response is not None and e.response.status_code == 429:
+                                delay = 0.55 * (attempt + 1) + (0.05 * attempt)
+                                logger.warning(
+                                    "Portfolio balance rate-limited (429); retry in %.2fs (attempt %d/%d)",
+                                    delay,
+                                    attempt + 1,
+                                    self._PORTFOLIO_BALANCE_429_MAX_ATTEMPTS,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            break
+                        except Exception as e:
+                            last_err = e
+                            break
+
+                    stale = self._cached_portfolio_balance(max_age_sec=self._PORTFOLIO_BALANCE_STALE_OK_SEC)
+                    if stale is not None:
+                        logger.warning(
+                            "Portfolio balance fetch failed (%s); serving cached balance (age ok ≤%.0fs)",
+                            last_err,
+                            self._PORTFOLIO_BALANCE_STALE_OK_SEC,
+                        )
+                        return stale
+                    logger.error("Error fetching portfolio: %s", last_err)
+                    return {"cash": 0.0, "positions_value": 0.0, "portfolio_value": 0.0}
+
+                async def _drive() -> None:
+                    try:
+                        result = await _run()
+                        if not waiter.done():
+                            waiter.set_result(result)
+                    except Exception as e:
+                        if not waiter.done():
+                            waiter.set_exception(e)
+                    finally:
+                        if self._portfolio_balance_inflight is waiter:
+                            self._portfolio_balance_inflight = None
+
+                asyncio.create_task(_drive())
+
+        try:
+            return dict(await waiter)
         except Exception as e:
+            stale = self._cached_portfolio_balance(max_age_sec=self._PORTFOLIO_BALANCE_STALE_OK_SEC)
+            if stale is not None:
+                logger.warning("Portfolio balance wait failed (%s); serving cached balance", e)
+                return stale
             logger.error("Error fetching portfolio: %s", e)
-            return {"cash": 0.0, "portfolio_value": 0.0}
+            return {"cash": 0.0, "positions_value": 0.0, "portfolio_value": 0.0}
 
     async def get_positions(
         self,
@@ -1821,6 +1940,7 @@ class KalshiClient:
         )
         if not out.get("error") and kalshi_order_filled_contracts(out) > 0:
             self.invalidate_market_detail_cache(market_id)
+            self.invalidate_portfolio_balance_cache()
         return out
 
     async def sell_position(self, ticker: str, side: str, quantity: int) -> Dict[str, Any]:
@@ -1854,6 +1974,7 @@ class KalshiClient:
         )
         if kalshi_order_filled_contracts(out) > 0:
             self.invalidate_market_detail_cache(t_eff)
+            self.invalidate_portfolio_balance_cache()
         return out
 
     async def place_sell_market(
@@ -1946,6 +2067,7 @@ class KalshiClient:
             )
             if kalshi_order_filled_contracts(last) > 0:
                 self.invalidate_market_detail_cache(t_eff)
+                self.invalidate_portfolio_balance_cache()
             if kalshi_order_filled_contracts(last) > 0 or last.get("error"):
                 return await self._abort_resting_exit_unfilled(
                     last,
@@ -1958,6 +2080,7 @@ class KalshiClient:
         )
         if kalshi_order_filled_contracts(out_final) > 0:
             self.invalidate_market_detail_cache(t_eff)
+            self.invalidate_portfolio_balance_cache()
         return out_final
 
     async def place_order(
