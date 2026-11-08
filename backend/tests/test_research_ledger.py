@@ -161,6 +161,74 @@ def test_edited_experiment_refuses_to_score(tmp_path):
         raise AssertionError("edited experiment was scored")
 
 
+def test_tampered_forecast_line_is_not_scored(tmp_path):
+    book = ledger.ResearchLedger(tmp_path / "ledger")
+    book.init(_experiment())
+    book.record_snapshot(_snapshot("snapshot_oos_yes.json"))
+    book.record_outcomes(json.loads((FIXTURES / "outcomes.json").read_text(encoding="utf-8")))
+    path = tmp_path / "ledger" / "forecasts.jsonl"
+    row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    row["ai_probability_yes"] = 0.99
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    report = book.score()
+    assert report["counts"]["malformed"] == 1
+    assert report["counts"]["joined"] == 0
+    assert report["pre_registered_scorecard"]["brier_model"] is None
+
+
+def test_equal_resolve_time_does_not_enter_the_scorecard(tmp_path):
+    book = ledger.ResearchLedger(tmp_path / "ledger")
+    book.init(_experiment())
+    book.record_snapshot(_snapshot("snapshot_oos_yes.json"))
+    try:
+        book.record_outcome(
+            {
+                "market_id": "SYNTHETIC-YES",
+                "resolved_at": "2026-11-08T13:00:00Z",
+                "result": "yes",
+            }
+        )
+    except ledger.LedgerError as exc:
+        assert "not after" in str(exc)
+    else:
+        raise AssertionError("resolve time equal to the forecast was stored")
+
+
+def test_one_event_does_not_invent_a_confidence_interval(tmp_path):
+    book = ledger.ResearchLedger(tmp_path / "ledger")
+    book.init(_experiment())
+    first = _snapshot("snapshot_oos_yes.json")
+    second = dict(first)
+    second["market_id"] = "SYNTHETIC-YES-2"
+    second["forecast_time"] = "2026-11-08T13:05:00Z"
+    second["quote_time"] = "2026-11-08T13:04:30Z"
+    book.record_snapshot(first)
+    book.record_snapshot(second)
+    book.record_outcome(
+        {"market_id": "SYNTHETIC-YES", "resolved_at": "2026-11-08T18:00:00Z", "result": "yes"}
+    )
+    book.record_outcome(
+        {"market_id": "SYNTHETIC-YES-2", "resolved_at": "2026-11-08T18:00:00Z", "result": "yes"}
+    )
+    boot = book.score()["pre_registered_scorecard"]["event_bootstrap"]
+    assert boot["status"] == "undefined"
+    assert boot["n_events"] == 1
+
+
+def test_wrong_model_id_is_rejected(tmp_path):
+    book = ledger.ResearchLedger(tmp_path / "ledger")
+    book.init(_experiment())
+    bad = dict(_snapshot("snapshot_oos_yes.json"))
+    bad["model_id"] = "some-other-model"
+    try:
+        book.record_snapshot(bad)
+    except ledger.LedgerError as exc:
+        assert "model_id" in str(exc)
+    else:
+        raise AssertionError("a different model was recorded into a frozen experiment")
+    assert (tmp_path / "ledger" / "forecasts.jsonl").read_text(encoding="utf-8") == ""
+
+
 def test_cli_score_writes_markdown(tmp_path):
     code = ledger.main(
         [
