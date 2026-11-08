@@ -1,0 +1,12 @@
+{
+  "experiment_id": "synthetic-fixture-not-history",
+  "model_id": "fixture-model",
+  "score_not_before": "2026-11-08T12:00:00Z",
+  "max_quote_age_seconds": 120,
+  "bootstrap_draws": 40,
+  "bootstrap_seed": 7,
+  "hypothetical": {
+    "min_edge_points": 5,
+    "illustrative_fee_per_contract_usd": 0.01
+  }
+}

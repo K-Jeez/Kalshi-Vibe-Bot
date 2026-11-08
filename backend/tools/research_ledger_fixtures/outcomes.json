@@ -1,0 +1,12 @@
+[
+  {
+    "market_id": "SYNTHETIC-YES",
+    "resolved_at": "2026-11-08T18:00:00Z",
+    "result": "yes"
+  },
+  {
+    "market_id": "SYNTHETIC-NO",
+    "resolved_at": "2026-11-08T18:05:00Z",
+    "result": "no"
+  }
+]
