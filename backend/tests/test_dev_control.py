@@ -33,6 +33,7 @@ class Fake:
         self.ports = {}
         self.posts = []
         self.opened = []
+        self.calls = []
         self.sleeps = []
         self.attempts = 3
         self.interval = 0
@@ -76,6 +77,7 @@ class Fake:
         return int(pid)
 
     def request(self, method, url, payload, headers):
+        self.calls.append((method, url, dict(headers or {})))
         if method == "POST":
             self.posts.append((url, payload, dict(headers)))
             self.current = str(payload["state"])
@@ -169,6 +171,48 @@ def test_launch_stays_stop_and_keeps_paths_with_spaces(tmp_path):
     saved = json.loads(chosen.session_path.read_text(encoding="utf-8"))
     assert SECRET not in json.dumps(saved)
     assert_secret_free(log)
+
+
+def test_frontend_probe_requests_html_and_launch_stays_stop(tmp_path, monkeypatch):
+    app, fake, log, _chosen = make(tmp_path)
+    assert app.launch() == 0
+    frontend = [item for item in fake.calls if item[1].endswith(":3000/")]
+    health = [item for item in fake.calls if item[1].endswith("/health")]
+    assert frontend and frontend[0][2].get("Accept") == "text/html"
+    assert health and "Accept" not in health[0][2]
+    assert fake.posts == []
+    assert "Trading state: stop" in text(log)
+
+    captured = {}
+
+    class _Response:
+        status = 200
+
+        def read(self):
+            return b"ok"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def _capture(req, timeout=0):
+        captured["accept"] = req.get_header("Accept")
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(control.urlrequest, "urlopen", _capture)
+    status, _body = control._request(
+        "GET",
+        "http://127.0.0.1:3000/",
+        None,
+        {"Accept": "text/html"},
+    )
+    assert status == 200
+    assert captured["accept"] == "text/html"
+    control._request("GET", "http://127.0.0.1:8000/health", None, {})
+    assert captured["accept"] == "application/json"
 
 
 def test_second_launch_does_not_spawn_or_change_state(tmp_path):

@@ -481,7 +481,7 @@ class Control:
                         "GET",
                         f"http://{self.paths.host}:{self.paths.frontend_port}/",
                         None,
-                        {},
+                        {"Accept": "text/html"},
                     )
                 except Exception:
                     front_status = 0
