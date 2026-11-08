@@ -98,7 +98,45 @@ async def place_trade(
             raise HTTPException(status_code=400, detail="Effective IOC limit below ask")
 
         # Place the order using the raw market ticker when possible (some valid tickers can be mis-normalized).
-        result = await kc.place_buy_ioc_limit(raw_mid or mid, side_up, quantity, ioc_limit)
+        from src.activity_log import fresh_unresolved_order_hold, persist_order_intent, record_order_ack
+
+        buy_hold = fresh_unresolved_order_hold(mid, "buy")
+        if buy_hold:
+            raise HTTPException(status_code=409, detail=buy_hold)
+        intent_id = persist_order_intent(
+            {
+                "market_id": mid,
+                "side": side_up,
+                "action": "buy",
+                "quantity": int(quantity),
+                "limit_price": float(ioc_limit),
+                "detail": "manual IOC buy",
+            }
+        )
+        if not intent_id:
+            raise HTTPException(
+                status_code=503,
+                detail="Order was not sent because the activity log could not be saved.",
+            )
+        result = await kc.place_buy_ioc_limit(
+            raw_mid or mid,
+            side_up,
+            quantity,
+            ioc_limit,
+            client_order_id=intent_id,
+        )
+        record_order_ack(
+            result,
+            {
+                "market_id": mid,
+                "side": side_up,
+                "action": "buy",
+                "quantity": int(quantity),
+                "limit_price": float(ioc_limit),
+                "client_order_id": intent_id,
+                "detail": "manual IOC buy",
+            },
+        )
         if result.get("error"):
             raise HTTPException(status_code=502, detail=result["error"])
         filled = kalshi_order_filled_contracts(result)

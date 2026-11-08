@@ -745,12 +745,9 @@ def _parse_event_batch_json(
 
     raw_best = str(result.get("best_market_id") or "").strip()
     best_norm = normalize_market_id(raw_best).upper()
-    if best_norm and best_norm in allowed_ids:
-        best_out = best_norm
-    elif allowed_ids:
-        best_out = sorted(allowed_ids)[0]
-    else:
-        best_out = ""
+    id_ok = bool(best_norm) and best_norm in allowed_ids
+    # An id that is missing or not in this batch must not be swapped for another leg.
+    best_out = best_norm if id_ok else ""
 
     direction = str(result.get("direction", "SKIP") or "SKIP").strip().upper()
     if direction not in ("YES", "NO", "SKIP"):
@@ -762,7 +759,8 @@ def _parse_event_batch_json(
         else:
             direction = "SKIP"
 
-    if direction in ("YES", "NO") and best_out and best_out not in allowed_ids:
+    market_id_rejected = direction in ("YES", "NO") and not id_ok
+    if market_id_rejected:
         direction = "SKIP"
 
     ai_yes = _extract_ai_probability_yes_pct(result)
@@ -795,17 +793,26 @@ def _parse_event_batch_json(
         key_factors = []
     key_factors = [str(f) for f in key_factors[:5]]
 
+    reasoning = str(result.get("reasoning", "")).strip()
+    if market_id_rejected:
+        reasoning = (
+            f"{reasoning} [Rejected: best_market_id is not one of the listed contracts; no order.]"
+        ).strip()
+
     out = {
         "best_market_id": best_out,
         "direction": direction,
         "ai_probability_yes_pct": ai_yes,
-        "reasoning": str(result.get("reasoning", "")).strip(),
+        "reasoning": reasoning,
         "real_time_context": str(result.get("real_time_context", "")).strip(),
         "key_factors": key_factors,
         "evidence": result.get("evidence", []) if isinstance(result.get("evidence", []), list) else [],
     }
     if omap:
         out["outcome_probability_pct_by_market_id"] = omap
+    if market_id_rejected:
+        out["batch_market_id_rejected"] = True
+        out["rejected_market_id"] = best_norm or raw_best
     if ladder_stat_line_batch:
         out = _prioritize_line_ladder_likelihood(out, allowed_ids=allowed_ids)
     return out

@@ -63,8 +63,8 @@ def exit_grace_minutes_for_market(settings_grace_minutes: float, title: str, eve
 def kelly_contract_cap_for_bankroll(bankroll: float, per_contract_premium: float) -> int:
     """Whole-contract cap: ``MAX_KELLY_BANKROLL_PCT`` of deployable cash, never above cash affordance.
 
-    When 5% of bankroll cannot buy a whole contract (small accounts), fall back to cash-limited
-    sizing only so Kelly + affordability still work; the 5% rule applies once stake can fund ≥1 contract.
+    When that fraction cannot pay for one contract, return 0 so the buy is skipped.
+    The order is not enlarged to the rest of the cash balance.
     """
     br = float(bankroll)
     px = float(per_contract_premium)
@@ -76,7 +76,7 @@ def kelly_contract_cap_for_bankroll(bankroll: float, per_contract_premium: float
     stake_cap = br * float(MAX_KELLY_BANKROLL_PCT)
     pct_cap = int(math.floor(stake_cap / px + 1e-12))
     if pct_cap < 1:
-        return cash_cap
+        return 0
     return min(pct_cap, cash_cap)
 
 

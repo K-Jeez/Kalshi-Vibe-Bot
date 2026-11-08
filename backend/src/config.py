@@ -103,7 +103,12 @@ class Settings(BaseSettings):
 
     # ── Server ───────────────────────────────────────────────────────────────────
     port: int = 8000
-    host: str = "0.0.0.0"
+    # Localhost only. Set HOST=0.0.0.0 to listen on the network; trading routes still
+    # reject non-local clients unless LOCAL_API_TOKEN is set (see local_guard.py).
+    host: str = "127.0.0.1"
+    # Optional shared secret for non-local state-changing requests. Header: X-Vibe-Bot-Token.
+    # Empty means remote mutations are denied. The local dashboard does not send this.
+    local_api_token: str = ""
     # Comma-separated browser origins for CORS (dashboard). Empty = http://localhost:3000 and http://127.0.0.1:3000
     cors_origins: str = ""
 

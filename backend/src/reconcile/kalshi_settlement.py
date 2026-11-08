@@ -270,6 +270,31 @@ async def _close_open_position_from_settlement_realized(
     pos.closed_at = utc_now()
     pos.exit_reason = "settlement"
     pos.realized_pnl = rp
+    try:
+        from src.activity_log import record_activity
+
+        fee_v = float(extra_fees) if extra_fees else None
+        result_name = ""
+        if settlement_row:
+            result_name = str(settlement_row.get("market_result") or "").strip().lower()
+            if result_name not in ("yes", "no", "scalar", ""):
+                result_name = ""
+        record_activity(
+            {
+                "event_type": "settlement",
+                "market_id": pos.market_id,
+                "event_ticker": getattr(pos, "event_ticker", None),
+                "side": pos.side,
+                "action": "sell",
+                "quantity": int(qty),
+                "fill_price": float(exit_px),
+                "fees_dollars": fee_v,
+                "order_status": "settled",
+                "detail": f"result={result_name or 'unknown'} realized={float(rp):.4f} source={source}",
+            }
+        )
+    except Exception:
+        pass
     pos.awaiting_settlement = False
     pos.dead_market = False
     pos.current_price = exit_px

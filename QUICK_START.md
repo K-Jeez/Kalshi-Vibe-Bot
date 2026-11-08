@@ -69,7 +69,7 @@ cd ..
 
 If the dashboard runs on a **non-default host or port**, create `frontend/.env` with `VITE_API_BASE_URL` and `VITE_WS_URL` pointing at your backend. Optionally add **`CORS_ORIGINS`** to `backend/.env` (comma-separated origins; default is localhost:3000). Vite dev uses **port 3000**, not 5173.
 
-For a single-machine setup, **`HOST=127.0.0.1`** in `backend/.env` avoids binding the API on all interfaces. Keep **`ENABLE_DEBUG_RAW_KALSHI=false`** unless you need the `GET /debug/raw` Kalshi debug route.
+`HOST` defaults to **`127.0.0.1`**, so the API is only on this computer. The dashboard at http://localhost:3000 keeps working with no extra token. Set `HOST=0.0.0.0` only if another device must reach the API, and set `LOCAL_API_TOKEN` before those devices can change Play, place or cancel orders, or reset history. Keep **`ENABLE_DEBUG_RAW_KALSHI=false`** unless you need the `GET /debug/raw` Kalshi debug route.
 
 ---
 
