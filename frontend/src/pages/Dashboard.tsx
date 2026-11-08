@@ -5,14 +5,11 @@ import { apiClient, DecisionAnalysis } from '../api'
 import { useDashboardDataCache } from '../context/DashboardDataCache'
 import { DASHBOARD_POLL_INTERVAL_MS } from '../dashboardPolling'
 import { useDocumentVisible } from '../hooks/useDocumentVisible'
-import { useWebSocket } from '../hooks/useWebSocket'
 
 // ── Main component ──────────────────────────────────────────────────────────
 
 export const Dashboard: React.FC = () => {
   const {
-    bumpDashboardRefresh,
-    dashboardRefreshNonce,
     setPortfolio,
     setPositions,
     setPositionAnalysesByMarketId,
@@ -30,28 +27,18 @@ export const Dashboard: React.FC = () => {
       console.error('Dashboard bundle:', e)
     }
   }, [setPortfolio, setPositions, setPositionAnalysesByMarketId])
-  const { data: wsData } = useWebSocket('')
   const [analyses, setAnalyses] = useState<DecisionAnalysis[]>([])
   /** Only one expanded detail row across open + closed (`open:id` / `closed:id`). */
   const [expandedDetailKey, setExpandedDetailKey] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (!wsData) return
-    if (wsData.type === 'dashboard_refresh') {
-      bumpDashboardRefresh()
-    }
-  }, [wsData, bumpDashboardRefresh])
-
+  // This page already applies the bundle response. Refetching when that same
+  // request broadcasts ``dashboard_refresh`` duplicated GET /dashboard/bundle.
+  // Other pages still listen for the broadcast. The interval below is unchanged.
   useEffect(() => {
     void loadDashboardBundle()
     const id = setInterval(() => void loadDashboardBundle(), pollMs)
     return () => clearInterval(id)
   }, [loadDashboardBundle, pollMs])
-
-  useEffect(() => {
-    if (dashboardRefreshNonce === 0) return
-    void loadDashboardBundle()
-  }, [dashboardRefreshNonce, loadDashboardBundle])
 
   useEffect(() => {
     const load = async () => {
