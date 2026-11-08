@@ -373,6 +373,10 @@ def _join(
         except LedgerError:
             counts["malformed"] += 1
             continue
+        stored_hash = raw.get("record_sha256")
+        if stored_hash != row["record_sha256"]:
+            counts["malformed"] += 1
+            continue
         outcome = outcomes.get(row["market_id"])
         if outcome is None:
             counts["missing_outcome"] += 1
