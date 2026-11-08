@@ -3,6 +3,7 @@
 .env.local
 backend/.env
 backend/logs/
+backend/.vibe-control/
 logs/
 .venv
 node_modules/

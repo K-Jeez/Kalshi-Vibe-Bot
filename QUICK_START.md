@@ -79,12 +79,12 @@ From the repo root:
 
 1. Double‑click **`start.bat`** (Windows), **or** run it from a terminal in this folder.
 
-That starts the backend and frontend and should open the dashboard in your browser.
+That starts the backend and frontend and should open the dashboard in your browser. The trading state stays **Stop** until you press Play.
 
 - If it doesn’t open automatically, go to **http://localhost:3000**
 - The API lives at **http://localhost:8000**
 
-To stop everything, run **`stop.bat`** (or close the windows it opened).
+To stop the processes **this control started**, run **`stop.bat`** or **`vibe.bat shutdown`**. That does not cancel resting Kalshi orders. Command-line Play, Pause, and Stop, and the difference between closing the app and changing trading state, are in [DEV_CONTROL.md](DEV_CONTROL.md).
 
 ---
 

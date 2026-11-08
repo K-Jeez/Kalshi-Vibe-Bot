@@ -199,6 +199,8 @@ Terminal 1 (venv on, repo root): `python backend\run.py`
 Terminal 2: `cd frontend` → `npm run dev`  
 UI: http://localhost:3000 — API http://localhost:8000 (`/docs` for OpenAPI).
 
+`vibe.bat` can launch, shut down, and restart those processes, and can set Play, Pause, or Stop through the same local `/bot/state` route. Launch stays in Stop. See [DEV_CONTROL.md](DEV_CONTROL.md).
+
 ---
 
 ## Trading (Kalshi)
