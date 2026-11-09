@@ -228,6 +228,12 @@ def settlement_exit_price_and_cash_usd(
     return (px, cash)
 
 
+def preserve_exit_reason(current: object, default: str = "settlement") -> str:
+    """Keep a stop or manual reason. Settlement is only the reason when none was stored."""
+    text = str(current or "").strip()
+    return text or default
+
+
 async def _close_open_position_from_settlement_realized(
     db: Session,
     pos: Position,
@@ -268,9 +274,7 @@ async def _close_open_position_from_settlement_realized(
 
     pos.status = "closed"
     pos.closed_at = utc_now()
-    # A stop or manual sale already recorded why the position closed.
-    if not str(getattr(pos, "exit_reason", "") or "").strip():
-        pos.exit_reason = "settlement"
+    pos.exit_reason = preserve_exit_reason(getattr(pos, "exit_reason", None))
     pos.realized_pnl = rp
     try:
         from src.activity_log import record_activity

@@ -375,6 +375,9 @@ def init_db():
         _ensure_tuning_row(db)
         _ensure_vault_row(db)
         _purge_paper_trade_mode_rows(engine)
+        from src.policy_migration import migrate_database_url
+
+        migrate_database_url(settings.database_url)
         _force_tuning_ai_provider_xai(engine)
         app_logger.info("Database initialized: %s", settings.database_url)
     finally:

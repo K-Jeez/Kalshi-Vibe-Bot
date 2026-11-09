@@ -55,6 +55,11 @@ def tuning_state_payload(row) -> dict:
         "max_open_positions": _coalesce_int(row, "max_open_positions", DEFAULT_MAX_OPEN_POSITIONS),
         "ai_provider": AI_PROVIDER,
         "xai_model": str(getattr(app_settings, "xai_model", "grok-4.3")),
+        "config_source": "database",
+        "config_source_note": (
+            "These values come from the database Settings row. "
+            "The .env file is only the seed for a missing row, or after Restore configuration defaults."
+        ),
         "updated_at": utc_iso_z(row.updated_at),
     }
 

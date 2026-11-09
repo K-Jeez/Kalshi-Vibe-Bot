@@ -8,7 +8,7 @@ import sys
 import time
 from collections import deque
 from datetime import datetime
-from logging.handlers import TimedRotatingFileHandler
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 
@@ -60,7 +60,7 @@ class _BufferAndBroadcastHandler(logging.Handler):
                 pass
 
 
-class _SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+class _SafeTimedRotatingFileHandler(RotatingFileHandler):
     """TimedRotatingFileHandler that won't crash on Windows file-lock rollover.
 
     When another process has the log file open (common on Windows), rollover can raise
@@ -106,13 +106,13 @@ def setup_logging(name: str = "kalshi_bot", level: int = logging.INFO) -> loggin
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
 
-    # Rotating file — one file per day, keep 7 days
+    # Size cap so one day's scan log cannot grow without bound (about 20 MB x 8).
     log_dir = Path(__file__).resolve().parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
     file_handler = _SafeTimedRotatingFileHandler(
         log_dir / "kalshi_bot.log",
-        when="midnight",
-        backupCount=7,
+        maxBytes=20 * 1024 * 1024,
+        backupCount=8,
         encoding="utf-8",
     )
     file_handler.setLevel(level)

@@ -22,6 +22,104 @@ from src.strategy_proposal import PROPOSAL_ACTIVE, PROPOSED_ENTRY_CAP_OF_CASH
 from src.api.trades import denver_close_date
 
 
+def test_monitor_failure_does_not_stop_the_scan():
+    import asyncio as aio
+
+    scans = []
+    passes = {"m": 0}
+
+    async def monitor_once():
+        passes["m"] += 1
+        if passes["m"] == 1:
+            raise RuntimeError("monitor broke")
+
+    async def scan_once():
+        scans.append(1)
+
+    async def main():
+        stop = aio.Event()
+        task = aio.create_task(run_parallel_cycles(monitor_once, scan_once, stop, 0.01))
+        await aio.sleep(0.08)
+        stop.set()
+        await task
+
+    aio.run(main())
+    assert len(scans) >= 2
+    assert passes["m"] >= 2
+
+
+def test_order_status_and_exit_reason_and_whole_contracts():
+    from src.bot.order_outcome import order_status_after_submit
+    from src.ledger_money import realized_pnl, whole_contracts
+    from src.reconcile.kalshi_settlement import preserve_exit_reason
+
+    assert order_status_after_submit("immediate_or_cancel", 0) == "canceled"
+    assert order_status_after_submit("immediate_or_cancel", 2) == "executed"
+    assert preserve_exit_reason("stop_loss") == "stop_loss"
+    assert preserve_exit_reason("") == "settlement"
+    assert whole_contracts(0.9999999995) == 1
+    assert whole_contracts(0.4) == 0
+    assert realized_pnl(quantity=1, entry_price="0.40", won=True, fees="0.02") == realized_pnl(
+        quantity="1.00", entry_price="0.40", won=True, fees="0.02"
+    )
+
+
+def test_event_cap_and_migration(tmp_path: Path):
+    from src.decision_engine.strategy_gates import event_exposure_room
+    from src.policy_migration import migrate_sqlite_file
+
+    assert event_exposure_room(100, 4, 0, 0.5)
+    assert not event_exposure_room(100, 4, 0, 2)
+    db = tmp_path / "bot.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE tuning_state (max_open_positions INT)")
+    conn.execute("INSERT INTO tuning_state VALUES (30)")
+    conn.commit()
+    conn.close()
+    first = migrate_sqlite_file(db)
+    second = migrate_sqlite_file(db)
+    conn = sqlite3.connect(db)
+    value = conn.execute("SELECT max_open_positions FROM tuning_state").fetchone()[0]
+    conn.close()
+    assert first["rows_updated"] == 1
+    assert second["already_applied"] is True
+    assert value == 12
+
+
+def test_shadow_eval_drops_future_leaks():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "shadow_eval",
+        Path(__file__).resolve().parents[1] / "tools" / "shadow_eval.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = mod.score_rows(
+        [
+            {
+                "id": "leak",
+                "decided_at": "2026-11-09T00:00:00Z",
+                "resolved_at": "2026-11-09T00:00:00Z",
+                "outcome": "yes",
+                "model_p_yes": 0.7,
+                "market_p_yes": 0.4,
+            },
+            {
+                "id": "ok",
+                "decided_at": "2026-11-08T00:00:00Z",
+                "resolved_at": "2026-11-09T00:00:00Z",
+                "outcome": "yes",
+                "model_p_yes": 0.7,
+                "market_p_yes": 0.4,
+                "prompt_version": "decision-2026-11-09",
+            },
+        ]
+    )
+    assert report["n"] == 1
+    assert report["excluded"][0]["reason"] == "outcome_not_after_decision"
+
+
 def test_monitor_runs_while_scan_is_blocked():
     started = asyncio.Event()
     release = asyncio.Event()
@@ -69,7 +167,7 @@ def test_routing_cooldown_expires_and_is_not_permanent():
 def test_prefilter_requires_both_sides_unaffordable():
     # 5% of $10 is $0.50. Ask 0.51 cannot buy one. Ask 0.50 can.
     rich = {"yes_ask": 0.40, "no_ask": 0.51}
-    assert either_side_can_buy_one_capped_contract(rich, 10)
+    assert either_side_can_buy_one_capped_contract(rich, 40)
     neither = {"yes_ask": 0.51, "no_ask": 0.80}
     assert not either_side_can_buy_one_capped_contract(neither, 10)
     only_no = {"yes_ask": 0.90, "no_ask": 0.20}
@@ -78,10 +176,10 @@ def test_prefilter_requires_both_sides_unaffordable():
     assert either_side_can_buy_one_capped_contract(missing_yes_cheap_no, 10)
     missing_yes_dear_no = {"no_ask": 0.90}
     assert not either_side_can_buy_one_capped_contract(missing_yes_dear_no, 10)
-    assert kelly_contract_cap_for_bankroll(10, 0.50) == 1
-    assert kelly_contract_cap_for_bankroll(10, 0.51) == 0
-    assert MAX_KELLY_BANKROLL_PCT == 0.05
-    assert PROPOSAL_ACTIVE is False
+    assert kelly_contract_cap_for_bankroll(10, 0.50) == 0
+    assert kelly_contract_cap_for_bankroll(40, 0.50) >= 1
+    assert MAX_KELLY_BANKROLL_PCT == 0.025
+    assert PROPOSAL_ACTIVE is True
     assert PROPOSED_ENTRY_CAP_OF_CASH == 0.025
 
 

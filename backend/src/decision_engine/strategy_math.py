@@ -126,15 +126,18 @@ def kelly_contracts_for_order(
     per_contract_premium: float,
     max_kelly_contracts: Optional[int] = None,
 ) -> Tuple[int, str]:
-    """Whole-contract size for a buy: full Kelly (floored), capped by cash at ``per_contract_premium``.
+    """Whole-contract size: quarter Kelly, then the cash cap.
 
-    If Kelly rounds to **zero** contracts but the Kelly fraction is still **positive** (edge at the ask),
-    the bot buys **one** contract when cash can afford it (``single_contract_retry``).
+    If quarter Kelly is positive but floors to zero contracts, one contract is
+    still allowed when the cash cap can pay for it (``single_contract_retry``).
 
-    Returns ``(quantity, tag)`` where ``tag`` is ``full_kelly``, ``cash_capped``, ``single_contract_retry``,
-    or ``none`` (no edge at ask and/or cannot afford one contract at ``per_contract_premium``).
+    Returns ``(quantity, tag)`` where ``tag`` is ``quarter_kelly``, ``cash_capped``,
+    ``single_contract_retry``, or ``none``.
     """
-    k = kelly_contracts_for_side(bankroll, side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    from src.decision_engine.strategy_gates import KELLY_FRACTION
+
+    k_full = kelly_contracts_for_side(bankroll, side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    k = int(math.floor(float(k_full) * float(KELLY_FRACTION) + 1e-12))
     cap = max_whole_contracts_for_cash(bankroll, per_contract_premium)
     if cap < 1:
         return 0, "none"
@@ -153,9 +156,9 @@ def kelly_contracts_for_order(
         q = _cap(min(int(k), cap))
         if q < 1:
             return 0, "none"
-        return q, "cash_capped" if q < int(k) else "full_kelly"
+        return q, "cash_capped" if q < int(k) else "quarter_kelly"
 
-    f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid) * float(KELLY_FRACTION)
     if f > 1e-12:
         q = _cap(1)
         if q < 1:

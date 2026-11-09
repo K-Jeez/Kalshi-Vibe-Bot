@@ -55,15 +55,15 @@ def test_autonomous_blocks_extreme_ai_confidence():
 
 
 def test_kelly_contract_cap_scales_with_bankroll():
-    assert kelly_contract_cap_for_bankroll(75, 0.50) == 7
-    assert kelly_contract_cap_for_bankroll(1000, 0.50) == 100
+    assert kelly_contract_cap_for_bankroll(75, 0.50) == 3
+    assert kelly_contract_cap_for_bankroll(1000, 0.50) == 48
 
 
 def test_kelly_contract_cap_small_bankroll_skips_instead_of_full_cash():
-    # 5% of $10.46 cannot buy one contract at 67¢. Do not size up to the 15 contracts cash could buy.
+    # 2.5% of $10.46 cannot buy one contract at 67¢. Do not size up to full cash.
     assert kelly_contract_cap_for_bankroll(10.46, 0.67) == 0
 
 
 def test_constants_sane():
     assert MAX_EDGE_TO_BUY_PCT == 22
-    assert MAX_KELLY_BANKROLL_PCT == 0.05
+    assert MAX_KELLY_BANKROLL_PCT == 0.025

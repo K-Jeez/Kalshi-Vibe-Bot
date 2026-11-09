@@ -13,8 +13,13 @@ MAX_EDGE_TO_BUY_PCT = 22
 # Favorites (e.g. 85% NO at 73¢) are allowed; extreme tail confidence is still blocked.
 MAX_AI_WIN_PROB_BUY_SIDE_PCT = 90
 MIN_ENTRY_PRICE_CENTS = 26
-# Max premium at risk per entry: full Kelly is capped to this fraction of deployable cash.
-MAX_KELLY_BANKROLL_PCT = 0.05
+# Approved 2026-11-09 bundle. Quarter Kelly is applied in strategy_math.
+# Per-entry cap is 2.5% of available cash including the estimated entry fee.
+# 5-point edge, 60% win probability, and 80% stop-loss are not part of this cap.
+KELLY_FRACTION = 0.25
+MAX_KELLY_BANKROLL_PCT = 0.025
+EVENT_EXPOSURE_CAP_FRACTION = 0.05
+QUADRATIC_FEE_COEFFICIENT = 0.07
 
 # Sports: stricter scan (volume) and exit grace only — min edge uses your Settings value as-is.
 _SPORTS_MIN_VOLUME_FLOOR = 2000.0
@@ -61,11 +66,51 @@ def exit_grace_minutes_for_market(settings_grace_minutes: float, title: str, eve
     return g
 
 
-def kelly_contract_cap_for_bankroll(bankroll: float, per_contract_premium: float) -> int:
-    """Whole-contract cap: ``MAX_KELLY_BANKROLL_PCT`` of deployable cash, never above cash affordance.
+def estimated_entry_fee_dollars(quantity: int, price: float) -> float:
+    """Quadratic entry-fee estimate, rounded up to the next cent.
 
-    When that fraction cannot pay for one contract, return 0 so the buy is skipped.
-    The order is not enlarged to the rest of the cash balance.
+    Coefficient 0.07 is the general schedule. Series-specific multipliers are
+    not fetched here. Rounding up keeps the cap and EV gate from understating
+    the fee. The exchange fill fee, once known, is the accounting figure.
+    """
+    qty = int(quantity)
+    px = float(price)
+    if qty < 1 or not math.isfinite(px) or px <= 0 or px >= 1:
+        return 0.0
+    raw = QUADRATIC_FEE_COEFFICIENT * qty * px * (1.0 - px)
+    cents = math.ceil(raw * 100.0 - 1e-9)
+    return max(0.0, cents / 100.0)
+
+
+def all_in_entry_dollars(quantity: int, price: float) -> float:
+    """Premium plus one entry-fee estimate. The ask is not reduced by the spread again."""
+    qty = int(quantity)
+    px = float(price)
+    if qty < 1 or px <= 0:
+        return 0.0
+    return qty * px + estimated_entry_fee_dollars(qty, px)
+
+
+def fee_inclusive_ev_dollars(win_probability: float, ask: float, quantity: int = 1) -> float:
+    """Expected dollars for ``quantity`` contracts after one entry fee.
+
+    ``win_probability`` is the chance the bought side wins. Payout is $1 per
+    winning contract. A non-positive result blocks the buy. The 5-point edge
+    rule still applies separately.
+    """
+    qty = int(quantity)
+    p = float(win_probability)
+    px = float(ask)
+    if qty < 1 or not math.isfinite(p) or not math.isfinite(px):
+        return -1.0
+    return p * qty - all_in_entry_dollars(qty, px)
+
+
+def kelly_contract_cap_for_bankroll(bankroll: float, per_contract_premium: float) -> int:
+    """Largest whole-contract count whose all-in entry cost fits in 2.5% of cash.
+
+    When that budget cannot pay for one contract, return 0. The order is not
+    enlarged to the rest of the cash balance.
     """
     br = float(bankroll)
     px = float(per_contract_premium)
@@ -74,11 +119,28 @@ def kelly_contract_cap_for_bankroll(bankroll: float, per_contract_premium: float
     cash_cap = max_whole_contracts_for_cash(br, px)
     if cash_cap < 1:
         return 0
-    stake_cap = br * float(MAX_KELLY_BANKROLL_PCT)
-    pct_cap = int(math.floor(stake_cap / px + 1e-12))
-    if pct_cap < 1:
+    budget = br * float(MAX_KELLY_BANKROLL_PCT)
+    if all_in_entry_dollars(1, px) > budget + 1e-9:
         return 0
-    return min(pct_cap, cash_cap)
+    lo, hi = 1, cash_cap
+    best = 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if all_in_entry_dollars(mid, px) <= budget + 1e-9:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def event_exposure_room(equity: float, open_cost_basis: float, pending_reserve: float, added_all_in: float) -> bool:
+    """True when this buy keeps the event's cost basis within 5% of equity."""
+    eq = float(equity)
+    if not math.isfinite(eq) or eq <= 0:
+        return False
+    total = float(open_cost_basis) + float(pending_reserve) + float(added_all_in)
+    return total <= eq * float(EVENT_EXPOSURE_CAP_FRACTION) + 1e-9
 
 
 def either_side_can_buy_one_capped_contract(market: dict, bankroll: float) -> bool:

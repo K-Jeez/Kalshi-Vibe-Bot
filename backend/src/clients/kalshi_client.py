@@ -1080,6 +1080,31 @@ class KalshiClient:
 
     # ── Markets ───────────────────────────────────────────────────────────────
 
+    def _scan_cursor_path(self):
+        from pathlib import Path
+
+        return Path(__file__).resolve().parents[2] / ".vibe-control" / "scan_cursor.json"
+
+    def _persist_scan_cursor(self, cursor: Optional[str]) -> None:
+        try:
+            from src.bot.scan_checkpoint import write_scan_checkpoint
+
+            write_scan_checkpoint(
+                self._scan_cursor_path(),
+                cursor,
+                getattr(self, "_markets_list_resume_key", None),
+            )
+        except Exception:
+            return
+
+    def _load_scan_cursor(self) -> Optional[str]:
+        try:
+            from src.bot.scan_checkpoint import read_scan_checkpoint
+
+            return read_scan_checkpoint(self._scan_cursor_path())
+        except Exception:
+            return None
+
     async def get_markets(self, filters: Optional[Dict[str, Any]] = None) -> List[Dict]:
         """Get available binary markets via cursor-based pagination, skipping MVE containers.
 
@@ -1127,6 +1152,10 @@ class KalshiClient:
             self._markets_list_resume_key = resume_key
             if not _retry_without_resume:
                 first_page_cursor = self._markets_list_resume_cursor
+                if not first_page_cursor:
+                    first_page_cursor = self._load_scan_cursor()
+                    if first_page_cursor:
+                        self._markets_list_resume_cursor = first_page_cursor
 
         next_cursor: Optional[str] = first_page_cursor
         # Kalshi docs: limit supports up to 1000 per page. Broad ``max_close_ts`` filters often yield a
@@ -1211,9 +1240,11 @@ class KalshiClient:
 
                 if not next_cursor:
                     self._markets_list_resume_cursor = None
+                    self._persist_scan_cursor(None)
                     break
                 if len(all_normalized) >= max_aggregate_kept:
                     self._markets_list_resume_cursor = next_cursor
+                    self._persist_scan_cursor(next_cursor)
                     logger.info(
                         "Kalshi markets fetch capped at %d kept rows (more pages available; next scan continues cursor)",
                         max_aggregate_kept,
@@ -1227,6 +1258,7 @@ class KalshiClient:
                 # Exhausted ``max_pages`` without natural end or cap — continue next scan from last cursor.
                 if resume_key and next_cursor and len(all_normalized) < max_aggregate_kept:
                     self._markets_list_resume_cursor = next_cursor
+                    self._persist_scan_cursor(next_cursor)
                     logger.info(
                         "Kalshi markets fetch stopped after %d pages with cursor still present — will resume next scan",
                         max_pages,
@@ -1778,14 +1810,12 @@ class KalshiClient:
 
                 fee_total = float(avg_fee) * float(filled_fp) if (avg_fee > 0 and filled_fp > 0) else 0.0
 
-                resting = "open"
-                if tif == "immediate_or_cancel" and filled_fp <= 0:
-                    # An IOC that did not trade is canceled. Remaining size is not a live order.
-                    resting = "canceled"
+                from src.bot.order_outcome import order_status_after_submit
+
                 out: Dict[str, Any] = {
                     "order_id": data.get("order_id"),
                     "client_order_id": cid,
-                    "status": "executed" if filled_fp > 0 else resting,
+                    "status": order_status_after_submit(tif, filled_fp),
                     "action": act_lo,
                     "side": str(side_yesno).lower(),
                     "fill_count_fp": data.get("fill_count"),

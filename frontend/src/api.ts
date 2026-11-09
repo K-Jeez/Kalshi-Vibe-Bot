@@ -289,6 +289,8 @@ export interface TuningSnapshot {
   ai_provider?: string
   /** Model id from server config (``XAI_MODEL``; default ``grok-4.3``). */
   xai_model?: string
+  config_source?: string
+  config_source_note?: string
   updated_at?: string | null
 }
 

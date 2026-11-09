@@ -14,7 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MIN_EDGE_TO_BUY_PCT = 5
 DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
 DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.80
-DEFAULT_MAX_OPEN_POSITIONS = 30
+DEFAULT_MAX_OPEN_POSITIONS = 12
 DEFAULT_AI_PROVIDER = "xai"
 
 # Market analysis uses xAI (Grok) only; persisted ``tuning_state.ai_provider`` is always xai.

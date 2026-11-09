@@ -181,6 +181,34 @@ def _prune(db) -> None:
     db.query(ActivityEvent).filter(ActivityEvent.ts_utc < cutoff[0]).delete(synchronize_session=False)
 
 
+def _append_durable_event(row) -> None:
+    """Append one scrubbed line outside the pruned activity table. Failures are ignored."""
+    try:
+        day = (row.ts_utc or utc_now()).strftime("%Y%m%d")
+        directory = Path(__file__).resolve().parents[1] / "logs" / "events"
+        directory.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            {
+                "id": row.id,
+                "run_id": row.run_id,
+                "ts_utc": row.ts_utc.isoformat() if getattr(row.ts_utc, "isoformat", None) else str(row.ts_utc or ""),
+                "event_type": row.event_type,
+                "market_id": row.market_id,
+                "side": row.side,
+                "action": row.action,
+                "client_order_id": row.client_order_id,
+                "order_status": row.order_status,
+                "fees_dollars": row.fees_dollars,
+                "detail": row.detail,
+            },
+            default=str,
+        )
+        with (directory / f"events-{day}.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except Exception:
+        return
+
+
 def record_activity(payload: Dict[str, Any], *, session_factory: Optional[Callable] = None) -> bool:
     """Insert one trace row. Returns False when the write fails. Never raises."""
     global _writes, _seq
@@ -192,6 +220,7 @@ def record_activity(payload: Dict[str, Any], *, session_factory: Optional[Callab
         _apply(row, payload)
         db.add(row)
         db.commit()
+        _append_durable_event(row)
         _writes += 1
         if _writes % _PRUNE_EVERY == 0:
             _prune(db)

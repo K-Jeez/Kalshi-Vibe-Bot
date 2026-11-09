@@ -229,7 +229,9 @@ Do not choose a side mainly because it looks cheap/rich. Never recommend the sid
 
 **Calibration:** If you report **ai_probability_yes_pct** above **75** while the executable ask on your buy side is **40–65¢**, lower your probability or **SKIP** unless you have strong, specific evidence—the market is pricing meaningful risk. Treat implied edge above **~20 percentage points** as a warning sign of overconfidence unless you can defend it point-by-point; otherwise **SKIP**.
 
-The server computes edge and full Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks (whole contracts, cash-capped; may use exactly **one** contract when fractional Kelly is below one contract but edge at the ask remains). Keep that field calibrated and honest."""
+The server computes edge and quarter-Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks (whole contracts, cash-capped; may use exactly **one** contract when quarter Kelly is below one contract but edge at the ask remains). Keep that field calibrated and honest.
+
+Prompt version decision-2026-11-09. Use the contract's exact settlement rule. Name the source and as-of time for any fact you use. If the score, injury, or clock you need is missing or stale for this horizon, output direction SKIP. P(YES) and P(NO) must sum to 100. State uncertainty in reasoning. Do not invent a fee or a size; the server does that."""
 
 USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this contract. Recommend **YES** or **NO** only when that matches your genuine outcome view—not because either side looks under/overpriced.
 
@@ -302,7 +304,9 @@ Use book/quotes/volume secondarily; poor liquidity can justify SKIP. If your pic
 
 Rules: best_market_id must be one from the list (if SKIP, use the first). direction applies to that contract only. Honor BOT FILTER ALIGNMENT if present.
 
-The server computes edge and Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks (whole contracts, cash-capped; may use exactly **one** contract when fractional Kelly is below one contract but edge at the ask remains)."""
+The server computes edge and quarter-Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks (whole contracts, cash-capped; may use exactly **one** contract when quarter Kelly is below one contract but edge at the ask remains).
+
+Prompt version decision-2026-11-09. Use each leg's settlement rule. Name sources and as-of times. If evidence for this horizon is missing or stale, direction SKIP. Probabilities on one contract must be coherent. Do not invent fees or size."""
 
 EVENT_BATCH_USER_TEMPLATE = """EVENT (shared): {event_title}
 EVENT_TICKER: {event_ticker}
@@ -447,6 +451,7 @@ class XAIClient:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             result = _parse_json(content)
+            result["usage"] = data.get("usage") if isinstance(data.get("usage"), dict) else None
             _logger.debug(
                 "xAI direction=%s ai_yes_pct=%s for '%s'",
                 result.get("direction"),
@@ -537,6 +542,7 @@ class XAIClient:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             parsed = _parse_event_batch_json(content, allowed_ids=allowed, ladder_stat_line_batch=ladder)
+            parsed["usage"] = data.get("usage") if isinstance(data.get("usage"), dict) else None
             _logger.debug(
                 "xAI event batch %s best=%s dir=%s",
                 event_ticker,

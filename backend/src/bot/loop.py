@@ -53,7 +53,10 @@ from src.decision_engine.strategy_gates import (
     effective_min_edge_for_market,
     effective_scan_min_volume,
     exit_grace_minutes_for_market,
+    all_in_entry_dollars,
     either_side_can_buy_one_capped_contract,
+    event_exposure_room,
+    fee_inclusive_ev_dollars,
     kelly_contract_cap_for_bankroll,
 )
 from src.decision_engine.strategy_math import (
@@ -63,6 +66,7 @@ from src.decision_engine.strategy_math import (
     kelly_contracts_for_order,
     kelly_order_skip_summary,
 )
+from src.ledger_money import whole_contracts
 from src.bot.order_outcome import buy_fill_status, classify_routing_error
 from src.bot.routing_cooldown import note_untradeable, untradeable_reason
 from src.bot.supervision import market_execution_lock, run_parallel_cycles
@@ -783,23 +787,38 @@ async def monitor_positions(
             if sell_hold:
                 logger.info("Skip auto-exit %s — %s", pos.market_id, sell_hold)
                 continue
-            sell_gate = make_order_submit_gate(
-                {
-                    "market_id": pos.market_id,
-                    "event_ticker": getattr(pos, "event_ticker", None),
-                    "side": pos.side,
-                    "action": "sell",
-                    "quantity": sell_n,
-                    "detail": f"auto-exit {exit_reason}",
-                }
-            )
-            async with market_execution_lock(str(pos.market_id or "")):
-                sell_result = await kalshi_client.place_sell_market(
-                    pos.market_id,
-                    pos.side,
-                    sell_n,
-                    before_submit=sell_gate,
-                )
+            async with market_execution_lock(str(getattr(pos, "event_ticker", "") or pos.market_id or "")):
+                async with market_execution_lock(str(pos.market_id or "")):
+                    db.refresh(pos)
+                    if (pos.status or "") != "open" or int(pos.quantity or 0) < 1:
+                        logger.info(
+                            "Skip auto-exit %s — position changed before the order",
+                            pos.market_id,
+                        )
+                        continue
+                    from src.database.models import BotState
+
+                    state_row = db.query(BotState).filter(BotState.id == 1).first()
+                    if state_row is not None and (state_row.state or "") == "stop":
+                        logger.info("Skip auto-exit %s — bot is stopped", pos.market_id)
+                        continue
+                    sell_n = int(pos.quantity)
+                    sell_gate = make_order_submit_gate(
+                        {
+                            "market_id": pos.market_id,
+                            "event_ticker": getattr(pos, "event_ticker", None),
+                            "side": pos.side,
+                            "action": "sell",
+                            "quantity": sell_n,
+                            "detail": f"auto-exit {exit_reason}",
+                        }
+                    )
+                    sell_result = await kalshi_client.place_sell_market(
+                        pos.market_id,
+                        pos.side,
+                        sell_n,
+                        before_submit=sell_gate,
+                    )
             record_order_ack(
                 sell_result,
                 {
@@ -1315,6 +1334,13 @@ async def scan_and_trade(
                 )
                 break
 
+            try:
+                from src.api.tuning import sync_runtime_from_db
+
+                sync_runtime_from_db(db)
+            except Exception as exc:
+                logger.error("Settings sync before unit failed (%s)", type(exc).__name__)
+
             if not is_bot_playing(db_factory):
                 logger.info(
                     "Scan aborted — bot left play mode (pause/stop); skipping remaining markets "
@@ -1380,6 +1406,28 @@ async def scan_and_trade(
                         else:
                             continue
 
+            if unit_kind == "batch" and et_key:
+                still_open = []
+                for m in list(members):
+                    mid = str(m.get("id") or "")
+                    if untradeable_reason(mid):
+                        logger.info(
+                            "Skip leg %s — recent routing rejection; sibling legs stay eligible",
+                            mid,
+                        )
+                        batch_completed_this_sweep.add(mid)
+                        continue
+                    still_open.append(m)
+                if len(still_open) < 2:
+                    if len(still_open) == 1:
+                        members = still_open
+                        unit_kind = "single"
+                        et_key = None
+                    else:
+                        continue
+                else:
+                    members = still_open
+
             market: dict
             decision: Dict[str, Any]
 
@@ -1392,14 +1440,6 @@ async def scan_and_trade(
                     )
                     for xm in members:
                         batch_completed_this_sweep.add(str(xm.get("id") or ""))
-                    continue
-                held_route = None
-                for m in members:
-                    held_route = untradeable_reason(str(m.get("id") or ""))
-                    if held_route:
-                        break
-                if held_route:
-                    logger.info("Skip model for event %s — recent routing rejection (%s)", et_key, held_route)
                     continue
                 ev_display = ""
                 try:
@@ -1750,7 +1790,25 @@ async def scan_and_trade(
                                 per_contract_premium=float(trade_price),
                                 max_kelly_contracts=kelly_cap,
                             )
-                            if quantity < 1:
+                            action_taken = {}
+                            if quantity >= 1:
+                                ev_dollars = fee_inclusive_ev_dollars(
+                                    ai_buy / 100.0, float(trade_price), int(quantity)
+                                )
+                                if ev_dollars <= 0:
+                                    action_taken = {
+                                        "status": "no_trade",
+                                        "summary": (
+                                            f"Skipped — fee-inclusive expected value "
+                                            f"${ev_dollars:.4f} is not positive"
+                                        ),
+                                        "signal": signal,
+                                    }
+                                    quantity = 0
+                            if quantity < 1 and not (
+                                isinstance(action_taken, dict)
+                                and "expected value" in str(action_taken.get("summary") or "")
+                            ):
                                 kelly_skip = kelly_order_skip_summary(
                                     float(balance),
                                     trade_side,
@@ -1851,14 +1909,59 @@ async def scan_and_trade(
                                                 "signal": signal,
                                             }
                                     if order_intent_id:
-                                        async with market_execution_lock(ticker_clean):
-                                            result = await kalshi_client.place_buy_ioc_limit(
-                                                ticker,
-                                                trade_side,
-                                                quantity,
-                                                ioc_limit_dollars,
-                                                client_order_id=order_intent_id,
-                                            )
+                                        async with market_execution_lock(str(_pos_et_val or ticker_clean)):
+                                            async with market_execution_lock(ticker_clean):
+                                                if not is_bot_playing(db_factory):
+                                                    result = {
+                                                        "error": "order not sent",
+                                                        "order_not_sent": True,
+                                                    }
+                                                    action_taken = {
+                                                        "status": "no_trade",
+                                                        "summary": "Skipped — bot paused/stopped before the order",
+                                                        "signal": signal,
+                                                    }
+                                                elif fresh_unresolved_order_hold(ticker_clean, "buy"):
+                                                    result = {
+                                                        "error": "order not sent",
+                                                        "order_not_sent": True,
+                                                    }
+                                                else:
+                                                    open_basis = 0.0
+                                                    for open_row in db.query(Position).filter(
+                                                        Position.status == "open",
+                                                        Position.trade_mode == TRADE_MODE,
+                                                        Position.event_ticker == _pos_et_val,
+                                                    ).all():
+                                                        open_basis += float(open_row.entry_cost or 0)
+                                                        open_basis += float(getattr(open_row, "fees_paid", 0) or 0)
+                                                    added = all_in_entry_dollars(int(quantity), float(trade_price))
+                                                    if not event_exposure_room(
+                                                        float(total_portfolio_value),
+                                                        open_basis,
+                                                        0.0,
+                                                        added,
+                                                    ):
+                                                        result = {
+                                                            "error": "order not sent",
+                                                            "order_not_sent": True,
+                                                        }
+                                                        action_taken = {
+                                                            "status": "no_trade",
+                                                            "summary": (
+                                                                "Skipped — event cost basis would exceed "
+                                                                "5% of account equity"
+                                                            ),
+                                                            "signal": signal,
+                                                        }
+                                                    else:
+                                                        result = await kalshi_client.place_buy_ioc_limit(
+                                                            ticker,
+                                                            trade_side,
+                                                            quantity,
+                                                            ioc_limit_dollars,
+                                                            client_order_id=order_intent_id,
+                                                        )
                                         record_order_ack(
                                             result,
                                             {
@@ -1894,6 +1997,9 @@ async def scan_and_trade(
                                         )
                                         if route_kind == "exchange_shard_user":
                                             note_untradeable(ticker_clean, route_kind)
+                                            from src.ops_status import note_rejection
+
+                                            note_rejection()
                                             logger.error(
                                                 "Order rejected %s %s class=%s http=%s "
                                                 "exchange_index=omitted ticker_field=ticker detail=%s",
@@ -1911,7 +2017,7 @@ async def scan_and_trade(
                                         }
                                     else:
                                         filled = kalshi_order_filled_contracts(result)
-                                        qty_int = max(0, int(math.floor(float(filled) + 1e-9)))
+                                        qty_int = whole_contracts(filled)
                                         if qty_int < 1:
                                             fill_state = buy_fill_status(
                                                 filled=filled,
@@ -2222,6 +2328,9 @@ async def run_bot_loop(
         finally:
             db_tune.close()
         state = get_bot_state_str(db_factory)
+        from src.ops_status import stamp_monitor
+
+        stamp_monitor()
         logger.info(
             "Position monitor — state=%s trade_mode=%s exits=%s",
             state,
@@ -2244,6 +2353,11 @@ async def run_bot_loop(
         )
 
     async def _scan_once() -> None:
+        db_tune = db_factory()
+        try:
+            sync_runtime_from_db(db_tune)
+        finally:
+            db_tune.close()
         state = get_bot_state_str(db_factory)
         if state != "play":
             return

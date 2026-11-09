@@ -335,6 +335,10 @@ export const Settings: React.FC = () => {
                   {toggleSavingStopLoss ? 'Saving…' : cur.stop_loss_selling_enabled === true ? 'Enabled' : 'Disabled'}
                 </button>
               </div>
+              <p className="text-[11px] text-white/70">
+                {cur.config_source_note ||
+                  'The numbers on this screen come from the database. The .env file applies when that row is missing, or after Restore configuration defaults.'}
+              </p>
 
               <button
                 type="button"

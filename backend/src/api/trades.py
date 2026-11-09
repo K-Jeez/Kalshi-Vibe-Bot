@@ -293,6 +293,8 @@ async def get_performance_stats(db: Session = Depends(get_db)):
             daily_pnl = [{"date": "All closed", "pnl": round(total_realized, 2)}]
 
         return {
+            "stats_scope": "all_closed_positions_in_this_database",
+            "fills_are_not_closed_positions": True,
             "fills_total": len(trades),
             "buy_count": len(buys),
             "sell_count": ledger_sell_rows,
