@@ -71,6 +71,8 @@ from src.decision_engine.strategy_math import (
 from src.ledger_money import whole_contracts
 from src.bot.order_outcome import buy_fill_status, classify_routing_error
 from src.bot.routing_cooldown import note_untradeable, untradeable_reason
+from src.bot.fill_bookkeeping import apply_cumulative_fill, ensure_fill_trade
+from src.bot.order_reconcile import reconcile_open_intents
 from src.bot.supervision import market_execution_lock, run_parallel_cycles, submission_reservation_lock
 from src.bot.event_batch_partition import (
     LINE_LADDER_MAX_LEGS_FOR_XAI,
@@ -787,8 +789,6 @@ async def monitor_positions(
                 continue
             sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
             if sell_hold:
-                from src.bot.order_reconcile import reconcile_open_intents
-
                 await reconcile_open_intents(
                     kalshi_client,
                     db_factory,
@@ -967,21 +967,22 @@ async def monitor_positions(
                 fees_paid_roundtrip=pre_sync_fees_paid,
             )
 
-            db.add(Trade(
-                id=str(exit_order_id or uuid.uuid4()),
-                market_id=pos.market_id,
-                market_title=pos.market_title,
-                action="sell",
-                side=pos.side,
-                quantity=int(sold_qty_trade),
-                price=sold_px,
-                total_cost=gross_exit_notional,
-                realized_pnl=realized,
-                trade_mode=TRADE_MODE,
-            ))
-
             synced = await sync_open_position_qty_cost_from_kalshi(kalshi_client, pos, db=db)
             if synced:
+                ensure_fill_trade(
+                    db,
+                    action="sell",
+                    market_id=pos.market_id,
+                    market_title=pos.market_title or pos.market_id,
+                    side=str(pos.side or ""),
+                    cumulative_qty=int(sold_qty_trade),
+                    delta_qty=int(sold_qty_trade),
+                    price=float(sold_px),
+                    notional=float(gross_exit_notional),
+                    client_order_id=str(sell_result.get("client_order_id") or exit_order_id or ""),
+                    exchange_order_id=str(sell_result.get("order_id") or ""),
+                    realized_pnl=float(realized),
+                )
                 if int(pos.quantity or 0) <= 0:
                     # Kalshi flat-row sync zeros qty and often avg_price; keep exit leg + basis for history/UI.
                     pos.quantity = int(sold_qty_trade)
@@ -1007,8 +1008,6 @@ async def monitor_positions(
                     )
                     continue
             else:
-                from src.bot.fill_bookkeeping import apply_cumulative_fill
-
                 booked_exit = apply_cumulative_fill(
                     db,
                     action="sell",
@@ -1913,8 +1912,6 @@ async def scan_and_trade(
                                     buy_hold = fresh_unresolved_order_hold(ticker_clean, "buy")
                                     order_intent_id = None
                                     if buy_hold:
-                                        from src.bot.order_reconcile import reconcile_open_intents
-
                                         await reconcile_open_intents(
                                             kalshi_client,
                                             db_factory,
@@ -2236,8 +2233,6 @@ async def scan_and_trade(
                                             )
                                             scale = qty_int / float(filled) if filled > 1e-9 else 1.0
                                             buy_fees = float(kalshi_order_fees_dollars(result)) * scale
-                                            from src.bot.fill_bookkeeping import apply_cumulative_fill
-
                                             booked = apply_cumulative_fill(
                                                 db,
                                                 action="buy",
@@ -2455,8 +2450,6 @@ async def run_bot_loop(
         from src.ops_status import stamp_monitor
 
         stamp_monitor()
-        from src.bot.order_reconcile import reconcile_open_intents
-
         await reconcile_open_intents(kalshi_client, db_factory)
         logger.info(
             "Position monitor — state=%s trade_mode=%s exits=%s",

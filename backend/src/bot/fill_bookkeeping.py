@@ -31,19 +31,68 @@ def normalize_order_action(value: object) -> str:
 
 
 def normalize_order_side(intent_side: object, order: dict | None = None) -> str:
-    """YES or NO. ``yes`` and ``YES`` match. Bid is YES and ask is NO on the YES book."""
+    """Return YES or NO. A bid or ask quote is not a contract side.
+
+    The intent side wins when it is YES or NO. An order ``side`` or
+    ``outcome_side`` may confirm it. A conflict, or a missing YES/NO, fails
+    closed instead of inventing the side from the book.
+    """
+    found = ""
     candidates = [intent_side]
     if isinstance(order, dict):
-        candidates.extend((order.get("outcome_side"), order.get("side"), order.get("book_side")))
+        candidates.extend((order.get("outcome_side"), order.get("side")))
     for raw in candidates:
         text = str(raw or "").strip().upper()
-        if text in ("YES", "NO"):
-            return text
-        if text == "BID":
-            return "YES"
-        if text == "ASK":
-            return "NO"
-    raise ValueError("side must be yes or no")
+        if text in ("", "BID", "ASK"):
+            continue
+        if text not in ("YES", "NO"):
+            raise ValueError("side must be yes or no")
+        if found and found != text:
+            raise ValueError("yes/no side conflict")
+        found = text
+    if not found:
+        raise ValueError("side must be yes or no")
+    return found
+
+
+def fill_trade_id(exchange_order_id: str, client_order_id: str, action: str, cumulative_qty: int) -> str:
+    """One id for one exchange fill total. A replay of the same total hits the same row."""
+    stem = str(exchange_order_id or client_order_id or "").strip()
+    return f"{stem}:{normalize_order_action(action)}:{int(cumulative_qty)}"
+
+
+def ensure_fill_trade(
+    db,
+    *,
+    action: str,
+    market_id: str,
+    market_title: str,
+    side: str,
+    cumulative_qty: int,
+    delta_qty: int,
+    price: float,
+    notional: float,
+    client_order_id: str,
+    exchange_order_id: str,
+    realized_pnl: float | None = None,
+) -> str:
+    trade_id = fill_trade_id(exchange_order_id, client_order_id, action, cumulative_qty)
+    if db.query(Trade).filter(Trade.id == trade_id).first() is None:
+        db.add(
+            Trade(
+                id=trade_id,
+                market_id=market_id,
+                market_title=market_title,
+                action=normalize_order_action(action),
+                side=normalize_order_side(side),
+                quantity=int(delta_qty),
+                price=float(price),
+                total_cost=float(notional),
+                realized_pnl=realized_pnl,
+                trade_mode=TRADE_MODE,
+            )
+        )
+    return trade_id
 
 
 def cumulative_exchange_fees(order: dict | None) -> tuple[float, str]:
@@ -289,21 +338,19 @@ def _apply_buy_delta(
         cumulative_qty=cumulative_qty,
         detail="buy fill delta",
     )
-    trade_id = f"{exchange_order_id or client_order_id}:buy:{cumulative_qty}"
-    if db.query(Trade).filter(Trade.id == trade_id).first() is None:
-        db.add(
-            Trade(
-                id=trade_id,
-                market_id=market_id,
-                market_title=market_title,
-                action="buy",
-                side=side,
-                quantity=int(delta_qty),
-                price=float(price),
-                total_cost=notional,
-                trade_mode=TRADE_MODE,
-            )
-        )
+    ensure_fill_trade(
+        db,
+        action="buy",
+        market_id=market_id,
+        market_title=market_title,
+        side=side,
+        cumulative_qty=cumulative_qty,
+        delta_qty=delta_qty,
+        price=price,
+        notional=notional,
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+    )
     return {"ok": True, "delta_qty": delta_qty, "delta_fees": delta_fees, "action": "buy"}
 
 
@@ -367,22 +414,20 @@ def _apply_sell_delta(
         cumulative_qty=cumulative_qty,
         detail="sell fill delta",
     )
-    trade_id = f"{exchange_order_id or client_order_id}:sell:{cumulative_qty}"
-    if db.query(Trade).filter(Trade.id == trade_id).first() is None:
-        db.add(
-            Trade(
-                id=trade_id,
-                market_id=existing.market_id,
-                market_title=existing.market_title,
-                action="sell",
-                side=normalize_side(existing.side),
-                quantity=int(delta_qty),
-                price=float(price),
-                total_cost=float(delta_qty) * float(price),
-                realized_pnl=float(realized),
-                trade_mode=TRADE_MODE,
-            )
-        )
+    ensure_fill_trade(
+        db,
+        action="sell",
+        market_id=existing.market_id,
+        market_title=existing.market_title or existing.market_id,
+        side=normalize_side(existing.side),
+        cumulative_qty=cumulative_qty,
+        delta_qty=delta_qty,
+        price=price,
+        notional=float(delta_qty) * float(price),
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        realized_pnl=float(realized),
+    )
     return {
         "ok": True,
         "delta_qty": delta_qty,

@@ -16,6 +16,13 @@ from __future__ import annotations
 
 from typing import Optional
 
+from src.bot.fill_bookkeeping import (
+    apply_cumulative_fill,
+    cumulative_exchange_fees,
+    normalize_order_action,
+    normalize_order_side,
+)
+
 
 def _matches_order(row: dict, client_order_id: str, exchange_order_id: str) -> bool:
     if not isinstance(row, dict):
@@ -239,8 +246,6 @@ def _apply_found_order(intent, sources, *, session_factory, record_activity, mar
     ticker = str(intent.get("market_id") or "")
     act = str(intent.get("action") or "")
     try:
-        from src.bot.fill_bookkeeping import normalize_order_action, normalize_order_side
-
         act = normalize_order_action(act)
         side = normalize_order_side(intent.get("side"), order)
     except ValueError as exc:
@@ -309,7 +314,6 @@ def _fill_price(intent: dict, order: dict, side: str) -> float:
 
 
 def _book_fill_delta(intent, *, exchange_id, filled, order, side, action, session_factory) -> dict:
-    from src.bot.fill_bookkeeping import apply_cumulative_fill, cumulative_exchange_fees
     from src.database.models import get_session_local
 
     fees, fee_kind = cumulative_exchange_fees(order)
