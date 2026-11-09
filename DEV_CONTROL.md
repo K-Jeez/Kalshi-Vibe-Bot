@@ -75,7 +75,7 @@ cd backend
 ..\venv\Scripts\python.exe tools\reconcile_export.py trading_bot.db
 ```
 
-`pip install` only updates packages that the requirements file asks for. The migration uses the SQLite backup API, so a WAL left by the stopped process is included. It writes a new `trading_bot.db.bak-YYYYMMDDTHHMMSSZ` file every run and does not overwrite `trading_bot.db.pre-bundle.bak` if that older file is already there. It adds missing `activity_events` columns, including `exchange_order_id`, `fee_kind`, and `fill_count_fp`, and lowers an open-position cap above 12 to 12. The 5-point edge, 60% win floor, and 80% stop are not rewritten. It does not start the server.
+`pip install` only updates packages that the requirements file asks for. The migration uses the SQLite backup API, so a WAL left by the stopped process is included. It writes a new `trading_bot.db.bak-YYYYMMDDTHHMMSSZ` file every run and does not overwrite `trading_bot.db.pre-bundle.bak` if that older file is already there. It adds missing `activity_events` columns, including `exchange_order_id`, `fee_kind`, and `fill_count_fp`. Once, even if an older cap-only patch is already recorded, it sets the open cap to 12, the minimum edge to 5, the buy-side win floor to 60, and the stop to 0.80. A later edit in the database is not rewritten the next time the command runs. Other tuning fields and history stay. It does not start the server.
 
 The cash comparison is read-only and comes after that command. Pass statement figures when you have them:
 

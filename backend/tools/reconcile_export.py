@@ -19,12 +19,12 @@ import sys
 from pathlib import Path
 
 
-def _rows(conn: sqlite3.Connection, sql: str) -> list[dict]:
+def _rows(conn: sqlite3.Connection, sql: str) -> tuple[list[dict], str | None]:
     try:
         conn.row_factory = sqlite3.Row
-        return [dict(row) for row in conn.execute(sql).fetchall()]
-    except sqlite3.OperationalError:
-        return []
+        return [dict(row) for row in conn.execute(sql).fetchall()], None
+    except sqlite3.OperationalError as exc:
+        return [], str(exc)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -34,12 +34,59 @@ def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
         return []
 
 
-def _select(conn: sqlite3.Connection, table: str, wanted: list[str], suffix: str) -> list[dict]:
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _select(conn: sqlite3.Connection, table: str, wanted: list[str], suffix: str) -> tuple[list[dict], str | None]:
+    if not _table_exists(conn, table):
+        return [], f"{table} table is missing"
     have = _columns(conn, table)
     cols = [name for name in wanted if name in have]
     if not cols:
-        return []
+        return [], f"{table} has none of the expected columns"
     return _rows(conn, f"SELECT {', '.join(cols)} FROM {table} {suffix}")
+
+
+_UNRESOLVED_INTENT_STATUSES = {"pending", "ambiguous", "open_at_exchange"}
+
+
+def _latest_unresolved_intents(events: list[dict]) -> dict:
+    """Latest order status per client order id, matching the live hold.
+
+    An older pending row is not a current order once a later fill or reconcile
+    exists for that same id. Rows with no client order id are legacy history.
+    """
+    ordered = sorted(events, key=lambda row: str(row.get("ts_utc") or ""))
+    latest: dict[tuple[str, str, str], dict] = {}
+    legacy = []
+    historical_pending = 0
+    for row in ordered:
+        if row.get("event_type") not in ("order_intent", "order_ack"):
+            continue
+        status = str(row.get("order_status") or "").strip().lower()
+        if status == "pending":
+            historical_pending += 1
+        cid = str(row.get("client_order_id") or "").strip()
+        if not cid:
+            if status in _UNRESOLVED_INTENT_STATUSES:
+                legacy.append(row)
+            continue
+        key = (cid, str(row.get("market_id") or ""), str(row.get("action") or "").strip().lower())
+        latest[key] = row
+    current = [
+        row for row in latest.values()
+        if str(row.get("order_status") or "").strip().lower() in _UNRESOLVED_INTENT_STATUSES
+    ]
+    return {
+        "current": current,
+        "historical_pending_rows": historical_pending,
+        "legacy_without_client_order_id": legacy,
+    }
 
 
 def _sum(rows: list[dict], key: str) -> float:
@@ -54,31 +101,49 @@ def _sum(rows: list[dict], key: str) -> float:
 
 def audit_database(db_path: Path, *, cash_start: float | None = None, cash_end: float | None = None) -> dict:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    schema_gaps: list[str] = []
     try:
-        closed = _rows(
+        closed, closed_err = _select(
             conn,
-            """
-            SELECT id, market_id, event_ticker, side, quantity, entry_price, entry_cost,
-                   fees_paid, realized_pnl, exit_reason, status, closed_at
-            FROM positions WHERE status = 'closed' ORDER BY closed_at
-            """,
+            "positions",
+            [
+                "id", "market_id", "event_ticker", "side", "quantity", "entry_price", "entry_cost",
+                "fees_paid", "realized_pnl", "exit_reason", "status", "closed_at",
+            ],
+            "WHERE status = 'closed' ORDER BY closed_at",
         )
-        opens = _rows(
+        if closed_err:
+            schema_gaps.append(f"closed positions: {closed_err}")
+        opens, open_err = _select(
             conn,
-            """
-            SELECT id, market_id, event_ticker, side, quantity, entry_price, entry_cost, fees_paid, status
-            FROM positions WHERE status = 'open'
-            """,
+            "positions",
+            ["id", "market_id", "event_ticker", "side", "quantity", "entry_price", "entry_cost", "fees_paid", "status"],
+            "WHERE status = 'open'",
         )
-        trades = _rows(
-            conn,
-            """
-            SELECT id, market_id, side, action, quantity, price, total_cost, fees, timestamp
-            FROM trades ORDER BY timestamp
-            """,
-        )
+        if open_err:
+            schema_gaps.append(f"open positions: {open_err}")
+        trade_columns = _columns(conn, "trades") if _table_exists(conn, "trades") else []
+        if not trade_columns:
+            schema_gaps.append("trades table is missing")
+            trades, trade_err = [], "trades table is missing"
+        else:
+            if "fees" not in trade_columns:
+                schema_gaps.append(
+                    "trades has no fees column; fees are positions.fees_paid and activity_events.fees_dollars"
+                )
+            trades, trade_err = _select(
+                conn,
+                "trades",
+                [
+                    "id", "market_id", "market_title", "action", "side", "quantity", "price",
+                    "total_cost", "realized_pnl", "timestamp", "trade_mode",
+                ],
+                "ORDER BY timestamp",
+            )
+            if trade_err:
+                schema_gaps.append(f"trades query failed: {trade_err}")
         event_columns = _columns(conn, "activity_events")
-        events = _select(
+        events, event_err = _select(
             conn,
             "activity_events",
             [
@@ -88,6 +153,8 @@ def audit_database(db_path: Path, *, cash_start: float | None = None, cash_end: 
             ],
             "ORDER BY ts_utc",
         )
+        if event_err:
+            schema_gaps.append(f"activity events: {event_err}")
     finally:
         conn.close()
 
@@ -109,12 +176,18 @@ def audit_database(db_path: Path, *, cash_start: float | None = None, cash_end: 
             unresolved.append({"market_id": row.get("market_id"), "gap": "fill has no exchange order id"})
         if row.get("fee_kind") == "unavailable" or row.get("fees_dollars") is None:
             unresolved.append({"market_id": row.get("market_id"), "gap": "fill fee was not on the exchange record"})
-    pending = [
-        row for row in events
-        if row.get("event_type") == "order_intent" and row.get("order_status") == "pending"
-    ]
-    if pending:
-        unresolved.append({"gap": f"{len(pending)} order intent(s) still pending", "count": len(pending)})
+    intent_view = _latest_unresolved_intents(events)
+    current_unresolved = intent_view["current"]
+    if current_unresolved:
+        unresolved.append({
+            "gap": f"{len(current_unresolved)} order(s) still unresolved at their latest status",
+            "count": len(current_unresolved),
+        })
+    if intent_view["legacy_without_client_order_id"]:
+        unresolved.append({
+            "gap": "legacy order rows have no client_order_id and are not counted as current orders",
+            "count": len(intent_view["legacy_without_client_order_id"]),
+        })
 
     realized = _sum(closed, "realized_pnl")
     components = {
@@ -125,10 +198,15 @@ def audit_database(db_path: Path, *, cash_start: float | None = None, cash_end: 
         "sum_closed_realized_pnl": realized,
         "sum_open_entry_cost": _sum(opens, "entry_cost"),
         "sum_open_fees_paid": _sum(opens, "fees_paid"),
-        "trade_row_count": len(trades),
-        "activity_event_count": len(events),
+        "trade_row_count": None if trade_err else len(trades),
+        "trade_scope": "all_trade_rows_in_this_database",
+        "closed_position_scope": "all_closed_positions_in_this_database",
+        "activity_scope": "all_activity_rows_in_this_database_not_one_run",
+        "activity_event_count": None if event_err else len(events),
         "fill_event_count": len(fills),
-        "pending_intent_count": len(pending),
+        "historical_pending_row_count": intent_view["historical_pending_rows"],
+        "current_unresolved_intent_count": len(current_unresolved),
+        "legacy_unresolved_without_client_order_id": len(intent_view["legacy_without_client_order_id"]),
         "run_ids": sorted({str(row.get("run_id")) for row in events if row.get("run_id")}),
     }
     cash = None
@@ -147,6 +225,7 @@ def audit_database(db_path: Path, *, cash_start: float | None = None, cash_end: 
             unresolved.append({"gap": "cash change minus ledger realized P&L is unexplained", "amount": gap})
     return {
         "components": components,
+        "schema_gaps": schema_gaps,
         "unresolved": unresolved,
         "cash_comparison": cash,
         "closed_positions": closed,

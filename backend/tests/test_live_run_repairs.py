@@ -252,7 +252,129 @@ def test_migration_lowers_any_cap_above_12_and_leaves_the_stop(tmp_path: Path):
     ).fetchall()
     conn.close()
     assert report["rows_updated"] == 1
-    assert rows == [(8, 5, 60, 0.8), (12, 5, 60, 0.8)]
+    assert rows == [(12, 5, 60, 0.8), (12, 5, 60, 0.8)]
+
+
+def test_installed_db_gates_are_corrected_once_after_the_cap_patch(tmp_path: Path):
+    from src.policy_migration import GATES_POLICY_ID, POLICY_ID, migrate_sqlite_file
+
+    db = tmp_path / "installed.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE tuning_state (
+            max_open_positions INT,
+            min_edge_to_buy_pct INT,
+            min_ai_win_prob_buy_side_pct INT,
+            stop_loss_drawdown_pct REAL,
+            stop_loss_selling_enabled INT
+        )
+        """
+    )
+    conn.execute("INSERT INTO tuning_state VALUES (12, 4, 55, 0.8, 1)")
+    conn.execute("CREATE TABLE _bot_patches (id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO _bot_patches VALUES (?)", (POLICY_ID,))
+    conn.commit()
+    conn.close()
+    first = migrate_sqlite_file(db)
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        """
+        SELECT max_open_positions, min_edge_to_buy_pct, min_ai_win_prob_buy_side_pct,
+               stop_loss_drawdown_pct, stop_loss_selling_enabled
+        FROM tuning_state
+        """
+    ).fetchone()
+    conn.execute("UPDATE tuning_state SET min_edge_to_buy_pct = 7")
+    conn.commit()
+    conn.close()
+    second = migrate_sqlite_file(db)
+    conn = sqlite3.connect(db)
+    edited = conn.execute("SELECT min_edge_to_buy_pct FROM tuning_state").fetchone()[0]
+    conn.close()
+    assert first["gates_already_applied"] is False
+    assert first["gates_policy_id"] == GATES_POLICY_ID
+    assert first["previous_gates"]["min_edge_to_buy_pct"] == [4]
+    assert first["previous_gates"]["min_ai_win_prob_buy_side_pct"] == [55]
+    assert row == (12, 5, 60, 0.8, 1)
+    assert "stop_loss_selling_enabled" in first["gates_left_untouched"]
+    assert second["gates_already_applied"] is True
+    assert edited == 7
+
+
+def test_export_counts_real_trades_and_only_the_latest_unresolved_intent(tmp_path: Path):
+    import importlib.util
+
+    db = tmp_path / "ledger.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE trades (
+            id TEXT PRIMARY KEY, market_id TEXT, market_title TEXT, action TEXT, side TEXT,
+            quantity INT, price REAL, total_cost REAL, realized_pnl REAL, timestamp TEXT, trade_mode TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("t1", "M1", "One", "buy", "YES", 1, 0.4, 0.4, 0, "2024-01-01", "live"),
+            ("t2", "M2", "Two", "sell", "NO", 1, 0.3, 0.3, 0.1, "2024-01-02", "live"),
+            ("t3", "M3", "Three", "buy", "YES", 2, 0.5, 1.0, 0, "2024-01-03", "live"),
+        ],
+    )
+    conn.execute(
+        """
+        CREATE TABLE positions (
+            id TEXT, market_id TEXT, event_ticker TEXT, side TEXT, quantity INT, entry_price REAL,
+            entry_cost REAL, fees_paid REAL, realized_pnl REAL, exit_reason TEXT, status TEXT, closed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("p1", "M1", "EV", "YES", 1, 0.4, 59.46, 3.0384, 1.95, "stop_loss", "closed", "2024-11-08"),
+    )
+    conn.execute(
+        """
+        CREATE TABLE activity_events (
+            id TEXT, run_id TEXT, ts_utc TEXT, event_type TEXT, market_id TEXT, action TEXT,
+            client_order_id TEXT, order_status TEXT, fees_dollars REAL
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO activity_events VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            ("a1", "run-old", "2024-01-01T00:00:00", "order_intent", "M1", "buy", "cid-1", "pending", None),
+            ("a2", "run-old", "2024-01-01T00:01:00", "order_ack", "M1", "buy", "cid-1", "filled", 0.02),
+            ("a3", "run-old", "2024-01-02T00:00:00", "order_intent", "M2", "sell", "cid-2", "pending", None),
+            ("a4", "run-new", "2024-01-02T00:02:00", "order_ack", "M2", "sell", "cid-2", "reconciled_filled", None),
+            ("a5", "run-new", "2024-01-03T00:00:00", "order_intent", "M3", "buy", "cid-3", "pending", None),
+            ("a6", "legacy", "2024-01-04T00:00:00", "order_intent", "M4", "buy", "", "pending", None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    spec = importlib.util.spec_from_file_location(
+        "reconcile_export_schema",
+        Path(__file__).resolve().parents[1] / "tools" / "reconcile_export.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = mod.audit_database(db, cash_start=100.0, cash_end=101.77)
+    assert report["components"]["trade_row_count"] == 3
+    assert report["components"]["trade_scope"] == "all_trade_rows_in_this_database"
+    assert any("no fees column" in gap for gap in report["schema_gaps"])
+    assert report["components"]["historical_pending_row_count"] == 4
+    assert report["components"]["current_unresolved_intent_count"] == 1
+    assert report["components"]["legacy_unresolved_without_client_order_id"] == 1
+    assert report["components"]["sum_closed_realized_pnl"] == 1.95
+    assert report["components"]["sum_closed_entry_cost"] == 59.46
+    assert report["components"]["sum_closed_fees_paid"] == 3.0384
+    assert report["cash_comparison"]["resolved"] is False
+    assert report["cash_comparison"]["unexplained_gap"] == round(1.77 - 1.95, 4)
+    assert sorted(report["components"]["run_ids"]) == ["legacy", "run-new", "run-old"]
 
 
 def test_restore_source_cannot_load_an_old_open_cap_of_30(monkeypatch):

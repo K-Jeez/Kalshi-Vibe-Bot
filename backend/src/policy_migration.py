@@ -15,8 +15,12 @@ from typing import Optional
 from urllib.parse import unquote, urlparse
 
 POLICY_ID = "approved_bundle_2026_11_09_v2"
+GATES_POLICY_ID = "approved_gates_2026_11_09_v1"
 OLD_MAX_OPEN = 30
 NEW_MAX_OPEN = 12
+APPROVED_MIN_EDGE = 5
+APPROVED_MIN_AI_WIN_PROB = 60
+APPROVED_STOP_LOSS = 0.80
 
 # Columns the activity log can add without rewriting existing rows.
 _ACTIVITY_COLUMNS = (
@@ -108,6 +112,51 @@ def ensure_activity_columns(conn: sqlite3.Connection) -> list[str]:
     return added
 
 
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _apply_approved_gates(conn: sqlite3.Connection) -> dict:
+    """Set the approved edge, probability, stop, and open cap once.
+
+    A later edit in the database is left alone. This does not run on every boot.
+    """
+    columns = _column_names(conn, "tuning_state")
+    if not columns:
+        return {"applied": False, "reason": "tuning_state table is missing", "rows_updated": 0}
+    wanted = {
+        "min_edge_to_buy_pct": APPROVED_MIN_EDGE,
+        "min_ai_win_prob_buy_side_pct": APPROVED_MIN_AI_WIN_PROB,
+        "stop_loss_drawdown_pct": APPROVED_STOP_LOSS,
+        "max_open_positions": NEW_MAX_OPEN,
+    }
+    present = [name for name in wanted if name in columns]
+    previous = {}
+    if present:
+        selected = ", ".join(present)
+        try:
+            previous_rows = [dict(zip(present, row)) for row in conn.execute(f"SELECT {selected} FROM tuning_state")]
+        except sqlite3.OperationalError:
+            previous_rows = []
+        for name in present:
+            previous[name] = [row.get(name) for row in previous_rows]
+        assignments = ", ".join(f"{name} = ?" for name in present)
+        values = [wanted[name] for name in present]
+        changed = conn.execute(f"UPDATE tuning_state SET {assignments}", values).rowcount
+    else:
+        changed = 0
+    return {
+        "applied": True,
+        "rows_updated": int(changed or 0),
+        "previous": previous,
+        "set": {name: wanted[name] for name in present},
+        "left_untouched": sorted(columns - set(wanted)),
+    }
+
+
 def migrate_sqlite_file(path: Path, *, backup: bool = True) -> dict:
     if not path.is_file():
         return {"ok": False, "reason": "database file not found", "path": str(path)}
@@ -119,50 +168,60 @@ def migrate_sqlite_file(path: Path, *, backup: bool = True) -> dict:
             "CREATE TABLE IF NOT EXISTS _bot_patches (id TEXT PRIMARY KEY)"
         )
         added_columns = ensure_activity_columns(conn)
-        already = conn.execute(
+        already_cap = conn.execute(
             "SELECT 1 FROM _bot_patches WHERE id = ?",
             (POLICY_ID,),
         ).fetchone()
-        if already:
-            conn.commit()
-            return {
-                "ok": True,
-                "already_applied": True,
-                "columns_added": added_columns,
-                "backup": str(backup_path) if backup_path else None,
-                "original_pre_bundle_backup": str(original_backup) if original_backup.is_file() else None,
-                "original_pre_bundle_backup_preserved": original_backup.is_file(),
-            }
         previous = []
-        try:
-            previous = [
-                row[0]
-                for row in conn.execute("SELECT max_open_positions FROM tuning_state").fetchall()
-            ]
-        except sqlite3.OperationalError:
-            previous = []
         changed = 0
-        try:
-            changed = conn.execute(
-                "UPDATE tuning_state SET max_open_positions = ? WHERE max_open_positions > ?",
-                (NEW_MAX_OPEN, NEW_MAX_OPEN),
-            ).rowcount
-        except sqlite3.OperationalError:
-            changed = 0
-        conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (POLICY_ID,))
+        if not already_cap:
+            try:
+                previous = [
+                    row[0]
+                    for row in conn.execute("SELECT max_open_positions FROM tuning_state").fetchall()
+                ]
+            except sqlite3.OperationalError:
+                previous = []
+            try:
+                changed = conn.execute(
+                    "UPDATE tuning_state SET max_open_positions = ? WHERE max_open_positions > ?",
+                    (NEW_MAX_OPEN, NEW_MAX_OPEN),
+                ).rowcount
+            except sqlite3.OperationalError:
+                changed = 0
+            conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (POLICY_ID,))
+        already_gates = conn.execute(
+            "SELECT 1 FROM _bot_patches WHERE id = ?",
+            (GATES_POLICY_ID,),
+        ).fetchone()
+        gates = {"applied": False, "rows_updated": 0, "previous": {}, "set": {}, "left_untouched": []}
+        if not already_gates:
+            gates = _apply_approved_gates(conn)
+            conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (GATES_POLICY_ID,))
         conn.commit()
         return {
             "ok": True,
-            "already_applied": False,
-            "previous_max_open_positions": previous,
+            "already_applied": bool(already_cap) and bool(already_gates),
+            "gates_already_applied": bool(already_gates),
+            "previous_max_open_positions": gates.get("previous", {}).get("max_open_positions", previous),
+            "previous_gates": gates.get("previous", {}),
             "rows_updated": int(changed or 0),
+            "gates_rows_updated": int(gates.get("rows_updated") or 0),
             "max_open_positions": NEW_MAX_OPEN,
-            "unchanged": ["min_edge_to_buy_pct", "min_ai_win_prob_buy_side_pct", "stop_loss_drawdown_pct"],
+            "approved_gates": {
+                "min_edge_to_buy_pct": APPROVED_MIN_EDGE,
+                "min_ai_win_prob_buy_side_pct": APPROVED_MIN_AI_WIN_PROB,
+                "stop_loss_drawdown_pct": APPROVED_STOP_LOSS,
+                "max_open_positions": NEW_MAX_OPEN,
+            },
+            "gates_set": gates.get("set", {}),
+            "gates_left_untouched": gates.get("left_untouched", []),
             "columns_added": added_columns,
             "backup": str(backup_path) if backup_path else None,
             "original_pre_bundle_backup": str(original_backup) if original_backup.is_file() else None,
             "original_pre_bundle_backup_preserved": original_backup.is_file(),
             "policy_id": POLICY_ID,
+            "gates_policy_id": GATES_POLICY_ID,
         }
     finally:
         conn.close()
