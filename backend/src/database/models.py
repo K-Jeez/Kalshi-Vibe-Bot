@@ -254,6 +254,7 @@ class ActivityEvent(Base):
     limit_price = Column(Float, nullable=True)
     fill_price = Column(Float, nullable=True)
     fill_qty = Column(Float, nullable=True)
+    fill_count_fp = Column(String, nullable=True)
     fees_dollars = Column(Float, nullable=True)
     client_order_id = Column(String, nullable=True, index=True)
     exchange_order_id = Column(String, nullable=True)
@@ -529,6 +530,7 @@ def _run_migrations(engine):
         ("decision_logs", "kelly_contracts", "INTEGER"),
         ("activity_events", "exchange_order_id", "TEXT"),
         ("activity_events", "fee_kind", "TEXT"),
+        ("activity_events", "fill_count_fp", "TEXT"),
     ]
     with engine.connect() as conn:
         _ensure_kalshi_reconcile_cursor_table(conn)

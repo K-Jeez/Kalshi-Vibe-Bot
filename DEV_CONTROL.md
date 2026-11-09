@@ -63,31 +63,32 @@ Do not start the app for this step. The commands below update the checkout, back
 
 From the repo folder:
 
+The Windows machine already has `venv\Scripts\python.exe` at the repo root. Do not create another virtualenv. The app is stopped. Do not start it.
+
 ```
 cd /d "C:\Users\KJeez\Documents\VibeBot Project\Kalshi Vibe Bot"
 git fetch origin cursor/live-run-repairs-6f97
 git checkout cursor/live-run-repairs-6f97
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 cd backend
-..\.venv\Scripts\python.exe tools\migrate_approved_bundle.py trading_bot.db
-..\.venv\Scripts\python.exe tools\reconcile_export.py trading_bot.db
+..\venv\Scripts\python.exe tools\migrate_approved_bundle.py trading_bot.db
+..\venv\Scripts\python.exe tools\reconcile_export.py trading_bot.db
 ```
 
-If `py -3` is not available, use the Python 3.12 path already on that machine and the same `python -m venv` and `pip install` steps. Install requirements only when that environment is missing a package the app imports.
+`pip install` only updates packages that the requirements file asks for. The migration uses the SQLite backup API, so a WAL left by the stopped process is included. It writes a new `trading_bot.db.bak-YYYYMMDDTHHMMSSZ` file every run and does not overwrite `trading_bot.db.pre-bundle.bak` if that older file is already there. It adds missing `activity_events` columns, including `exchange_order_id`, `fee_kind`, and `fill_count_fp`, and lowers an open-position cap above 12 to 12. The 5-point edge, 60% win floor, and 80% stop are not rewritten. It does not start the server.
 
-The migration copies `trading_bot.db.pre-bundle.bak` once, lowers a stored open-position cap above 12 down to 12, and leaves the 5-point edge, 60% win floor, and 80% stop untouched. Run the audit again with the cash figures from the exchange statement when you have them:
-
-```
-..\.venv\Scripts\python.exe tools\reconcile_export.py trading_bot.db --cash-start 100 --cash-end 98.83
-```
-
-A gap is unresolved. It is not an 18-cent correction.
-
-Rollback of this checkout, without deleting the database or secrets, is:
+The cash comparison is read-only and comes after that command. Pass statement figures when you have them:
 
 ```
-git checkout 3c528999
+..\venv\Scripts\python.exe tools\reconcile_export.py trading_bot.db --cash-start 100 --cash-end 98.83
 ```
 
-That returns the code to the prior Windows control revision. It does not restore a database backup. The backup file stays beside the database.
+A gap stays unresolved. It is not an 18-cent correction. Historical NO-side fees that were never stored are not reconstructed. The shard error root is not proven.
+
+Rollback of this checkout, without deleting the database, secrets, or a backup, is:
+
+```
+git checkout 3c5289997a6412a68cc5373e691bf2d950404d5a
+```
+
+That returns the code to the prior revision. It does not restore a database backup. Use the timestamped backup file if the database itself has to be put back, and do that only while the app is stopped.

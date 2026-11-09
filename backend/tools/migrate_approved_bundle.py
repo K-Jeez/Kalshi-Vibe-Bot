@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Apply the approved position-cap migration without starting the bot.
+"""Apply activity columns and the approved position cap without starting the bot.
 
-From the backend directory:
+From the backend directory, using the repo's existing virtualenv:
 
-python tools/migrate_approved_bundle.py ..\\backend\\trading_bot.db
+..\\venv\\Scripts\\python.exe tools\\migrate_approved_bundle.py trading_bot.db
 
-A copy named trading_bot.db.pre-bundle.bak is written once, next to the file.
-Closed positions, orders, and secrets are not deleted.
+The command first writes a new timestamped backup with the SQLite backup API.
+It does not overwrite trading_bot.db.pre-bundle.bak. It does not call Kalshi.
 """
 
 from __future__ import annotations

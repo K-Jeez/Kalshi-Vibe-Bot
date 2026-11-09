@@ -55,13 +55,13 @@ def test_autonomous_blocks_extreme_ai_confidence():
 
 
 def test_kelly_contract_cap_scales_with_bankroll():
-    assert kelly_contract_cap_for_bankroll(75, 0.50) == 3
-    assert kelly_contract_cap_for_bankroll(1000, 0.50) == 48
+    assert kelly_contract_cap_for_bankroll(75, 0.50, fee_multiplier=1, fee_type="quadratic") == 3
+    assert kelly_contract_cap_for_bankroll(1000, 0.50, fee_multiplier=1, fee_type="quadratic") == 48
 
 
 def test_kelly_contract_cap_small_bankroll_skips_instead_of_full_cash():
     # 2.5% of $10.46 cannot buy one contract at 67¢. Do not size up to full cash.
-    assert kelly_contract_cap_for_bankroll(10.46, 0.67) == 0
+    assert kelly_contract_cap_for_bankroll(10.46, 0.67, fee_multiplier=1, fee_type="quadratic") == 0
 
 
 def test_constants_sane():

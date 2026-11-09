@@ -36,7 +36,7 @@ def _matches_event(row: Any, event_ticker: str, market_id: str) -> bool:
     return bool(et and tk and (tk == et or tk.startswith(et + "-")))
 
 
-def _resting_buy_all_in(order: dict) -> Optional[float]:
+def _resting_buy_all_in(order: dict, *, fee_type: Optional[str], fee_multiplier: Optional[float]) -> Optional[float]:
     if str(order.get("status") or "").lower() != "resting":
         return 0.0
     if str(order.get("action") or "").lower() != "buy":
@@ -50,7 +50,12 @@ def _resting_buy_all_in(order: dict) -> Optional[float]:
     if premium <= 0:
         return None
     quantity = int(round(remaining))
-    return all_in_entry_dollars(quantity, premium / quantity)
+    return all_in_entry_dollars(
+        quantity,
+        premium / quantity,
+        fee_multiplier=fee_multiplier,
+        fee_type=fee_type,
+    )
 
 
 def unconfirmed_buy_exposure(
@@ -61,6 +66,8 @@ def unconfirmed_buy_exposure(
     event_ticker: str,
     market_id: str,
     exclude_client_order_id: Optional[str],
+    fee_type: Optional[str] = None,
+    fee_multiplier: Optional[float] = None,
 ) -> dict:
     """Return reserve dollars for this event and how many other buys are still open orders."""
     if local_rows is None:
@@ -97,7 +104,14 @@ def unconfirmed_buy_exposure(
             }
         extra += 1
         if _matches_event(row, event_ticker, market_id):
-            reserve += all_in_entry_dollars(qty, px)
+            cost = all_in_entry_dollars(qty, px, fee_multiplier=fee_multiplier, fee_type=fee_type)
+            if cost is None:
+                return {
+                    "reserve_dollars": None,
+                    "extra_orders": None,
+                    "reason": "fee schedule unknown, so reserved capital is not a proven cap",
+                }
+            reserve += cost
 
     for order in resting_orders:
         if not isinstance(order, dict):
@@ -106,12 +120,12 @@ def unconfirmed_buy_exposure(
             continue
         if str(order.get("action") or "").lower() != "buy":
             continue
-        cost = _resting_buy_all_in(order)
+        cost = _resting_buy_all_in(order, fee_type=fee_type, fee_multiplier=fee_multiplier)
         if cost is None:
             return {
                 "reserve_dollars": None,
                 "extra_orders": None,
-                "reason": "resting buy has no usable limit price",
+                "reason": "resting buy cannot be reserved without a known quadratic fee schedule",
             }
         if cost <= 0:
             continue

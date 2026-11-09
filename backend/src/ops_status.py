@@ -8,6 +8,7 @@ from typing import List, Optional
 _last_monitor_at: float = 0.0
 _rejections: List[float] = []
 _last_api_error: str = ""
+_unresolved_alert: str = ""
 
 
 def stamp_monitor(now: Optional[float] = None) -> None:
@@ -18,6 +19,11 @@ def stamp_monitor(now: Optional[float] = None) -> None:
 def note_rejection(now: Optional[float] = None) -> None:
     current = time.monotonic() if now is None else float(now)
     _rejections.append(current)
+
+
+def note_unresolved(message: str) -> None:
+    global _unresolved_alert
+    _unresolved_alert = (message or "")[:180]
 
 
 def note_api_error(message: str) -> None:
@@ -47,11 +53,14 @@ def alerts(*, now: Optional[float] = None, monitor_stale_after: float = 90.0) ->
         out.append(f"{len(recent)} order rejections in the last 10 minutes.")
     if _last_api_error:
         out.append(f"Last API error: {_last_api_error}")
+    if _unresolved_alert:
+        out.append(_unresolved_alert)
     return out
 
 
 def reset_for_tests() -> None:
-    global _last_monitor_at, _last_api_error
+    global _last_monitor_at, _last_api_error, _unresolved_alert
     _last_monitor_at = 0.0
     _last_api_error = ""
+    _unresolved_alert = ""
     _rejections.clear()

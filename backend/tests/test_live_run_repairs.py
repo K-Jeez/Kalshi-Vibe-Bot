@@ -169,18 +169,19 @@ def test_routing_cooldown_expires_and_is_not_permanent():
 
 def test_prefilter_requires_both_sides_unaffordable():
     # 2.5% of $40 is $1.00. Ask 0.40 can buy one. Ask 0.51 on $10 cannot.
-    rich = {"yes_ask": 0.40, "no_ask": 0.51}
+    fee = {"fee_type": "quadratic", "fee_multiplier": 1}
+    rich = {"yes_ask": 0.40, "no_ask": 0.51, **fee}
     assert either_side_can_buy_one_capped_contract(rich, 40)
-    neither = {"yes_ask": 0.51, "no_ask": 0.80}
+    neither = {"yes_ask": 0.51, "no_ask": 0.80, **fee}
     assert not either_side_can_buy_one_capped_contract(neither, 10)
-    only_no = {"yes_ask": 0.90, "no_ask": 0.20}
+    only_no = {"yes_ask": 0.90, "no_ask": 0.20, **fee}
     assert either_side_can_buy_one_capped_contract(only_no, 10)
-    missing_yes_cheap_no = {"no_ask": 0.20}
+    missing_yes_cheap_no = {"no_ask": 0.20, **fee}
     assert either_side_can_buy_one_capped_contract(missing_yes_cheap_no, 10)
-    missing_yes_dear_no = {"no_ask": 0.90}
+    missing_yes_dear_no = {"no_ask": 0.90, **fee}
     assert not either_side_can_buy_one_capped_contract(missing_yes_dear_no, 10)
-    assert kelly_contract_cap_for_bankroll(10, 0.50) == 0
-    assert kelly_contract_cap_for_bankroll(40, 0.50) >= 1
+    assert kelly_contract_cap_for_bankroll(10, 0.50, fee_multiplier=1, fee_type="quadratic") == 0
+    assert kelly_contract_cap_for_bankroll(40, 0.50, fee_multiplier=1, fee_type="quadratic") >= 1
     assert MAX_KELLY_BANKROLL_PCT == 0.025
     assert PROPOSAL_ACTIVE is True
     assert PROPOSED_ENTRY_CAP_OF_CASH == 0.025
@@ -331,6 +332,8 @@ def test_unconfirmed_buys_reserve_cash_and_block_when_unknown():
         event_ticker="EVT",
         market_id="EVT-A",
         exclude_client_order_id="this-order",
+        fee_type="quadratic",
+        fee_multiplier=1,
     )
     assert known["reason"] is None
     assert known["extra_orders"] == 2
@@ -342,6 +345,8 @@ def test_unconfirmed_buys_reserve_cash_and_block_when_unknown():
         event_ticker="EVT",
         market_id="EVT-A",
         exclude_client_order_id="this-order",
+        fee_type="quadratic",
+        fee_multiplier=1,
     )
     assert missing["reason"] == "pending buy is missing a price or size"
     unread = unconfirmed_buy_exposure(
@@ -351,6 +356,8 @@ def test_unconfirmed_buys_reserve_cash_and_block_when_unknown():
         event_ticker="EVT",
         market_id="EVT-A",
         exclude_client_order_id="this-order",
+        fee_type="quadratic",
+        fee_multiplier=1,
     )
     assert unread["reserve_dollars"] is None
 

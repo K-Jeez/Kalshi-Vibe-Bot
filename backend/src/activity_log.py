@@ -160,6 +160,7 @@ def _apply(row: ActivityEvent, payload: Dict[str, Any]) -> None:
     ex_id = payload.get("exchange_order_id")
     row.exchange_order_id = scrub_text(ex_id, limit=80) if ex_id else None
     row.fee_kind = scrub_text(payload.get("fee_kind") or "", limit=32) or None
+    row.fill_count_fp = scrub_text(payload.get("fill_count_fp") or "", limit=32) or None
     row.order_status = scrub_text(payload.get("order_status") or "", limit=32) or None
     row.quote_captured_at = scrub_text(payload.get("quote_captured_at") or "", limit=40) or None
     row.sizing_tag = scrub_text(payload.get("sizing_tag") or "", limit=40) or None
@@ -347,12 +348,62 @@ def fresh_unresolved_order_hold(
     *,
     session_factory: Optional[Callable] = None,
     within_minutes: int = _HOLD_MINUTES,
+    exclude_client_order_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Block a repeat send while the newest recent intent for this market is still unresolved."""
+    """Block a repeat send while any intent for this market is still unresolved.
+
+    ``within_minutes`` is ignored. Age is not proof that the exchange never
+    accepted the order. The row stays in SQLite across a process restart.
+    """
+    del within_minutes
     factory = session_factory or get_session_local()
     db = factory()
     try:
-        cutoff = utc_now() - timedelta(minutes=max(1, int(within_minutes)))
+        mid = normalize_market_id(str(market_id or ""))
+        act = (action or "").strip().lower()
+        skip = (exclude_client_order_id or "").strip()
+        rows = (
+            db.query(ActivityEvent)
+            .filter(
+                ActivityEvent.market_id == mid,
+                ActivityEvent.action == act,
+                ActivityEvent.event_type.in_(("order_intent", "order_ack")),
+            )
+            .order_by(ActivityEvent.ts_utc.desc(), ActivityEvent.seq.desc())
+            .all()
+        )
+        seen = set()
+        for row in rows:
+            cid = (row.client_order_id or "").strip()
+            if cid in seen:
+                continue
+            seen.add(cid)
+            if skip and cid == skip:
+                continue
+            status = (row.order_status or "").strip().lower()
+            if status in ("pending", "ambiguous"):
+                return (
+                    f"unresolved {act} ({status}) client_order_id={row.client_order_id}; "
+                    "not sending another order until that id is reconciled"
+                )
+        return None
+    except Exception as exc:
+        logger.error("activity log hold check failed (%s)", type(exc).__name__)
+        return "activity log could not be read; not sending an order that might duplicate an in-flight attempt"
+    finally:
+        db.close()
+
+
+def unresolved_intent(
+    market_id: str,
+    action: str,
+    *,
+    session_factory: Optional[Callable] = None,
+) -> Optional[dict]:
+    """Newest unresolved intent, including rows written by a previous process."""
+    factory = session_factory or get_session_local()
+    db = factory()
+    try:
         mid = normalize_market_id(str(market_id or ""))
         act = (action or "").strip().lower()
         row = (
@@ -361,25 +412,49 @@ def fresh_unresolved_order_hold(
                 ActivityEvent.market_id == mid,
                 ActivityEvent.action == act,
                 ActivityEvent.event_type.in_(("order_intent", "order_ack")),
-                ActivityEvent.ts_utc >= cutoff,
+                ActivityEvent.order_status.in_(("pending", "ambiguous")),
             )
             .order_by(ActivityEvent.ts_utc.desc(), ActivityEvent.seq.desc())
             .first()
         )
         if row is None:
             return None
-        status = (row.order_status or "").strip().lower()
-        if status in ("pending", "ambiguous"):
-            return (
-                f"unresolved {act} ({status}) client_order_id={row.client_order_id}; "
-                "not sending another order until that attempt is acknowledged or the hold expires"
-            )
+        return {
+            "client_order_id": row.client_order_id,
+            "exchange_order_id": row.exchange_order_id,
+            "quantity": row.quantity,
+            "limit_price": row.limit_price,
+            "order_status": row.order_status,
+            "event_ticker": row.event_ticker,
+            "ts_utc": row.ts_utc.isoformat() if getattr(row.ts_utc, "isoformat", None) else None,
+        }
+    except Exception:
         return None
-    except Exception as exc:
-        logger.error("activity log hold check failed (%s)", type(exc).__name__)
-        return "activity log could not be read; not sending an order that might duplicate an in-flight attempt"
     finally:
         db.close()
+
+
+def mark_intent_reconciled(
+    client_order_id: str,
+    *,
+    market_id: str,
+    action: str,
+    order_status: str,
+    session_factory: Optional[Callable] = None,
+    detail: str = "",
+) -> bool:
+    """Record a terminal reconcile result for the same market and action."""
+    return record_activity(
+        {
+            "event_type": "order_ack",
+            "order_status": order_status,
+            "market_id": market_id,
+            "action": action,
+            "client_order_id": client_order_id,
+            "detail": detail,
+        },
+        session_factory=session_factory,
+    )
 
 
 def record_order_ack(

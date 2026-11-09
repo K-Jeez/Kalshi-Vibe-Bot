@@ -86,7 +86,12 @@ def _enrich_strategy_fields(
         premium = float(no_ask_f) if no_ask_f is not None else no_mid
     premium = max(1e-12, min(1.0, float(premium)))
     br = float(bankroll)
-    kcap = kelly_contract_cap_for_bankroll(br, premium)
+    kcap = kelly_contract_cap_for_bankroll(
+        br,
+        premium,
+        fee_multiplier=(current_prices or {}).get("fee_multiplier") if isinstance(current_prices, dict) else None,
+        fee_type=(current_prices or {}).get("fee_type") if isinstance(current_prices, dict) else None,
+    )
     kc, _ = kelly_contracts_for_order(
         br,
         direction,

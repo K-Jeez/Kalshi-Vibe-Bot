@@ -230,7 +230,7 @@ export const Settings: React.FC = () => {
           <p className="text-xs text-white/90">
             Position size uses <strong className="text-white">quarter Kelly</strong> from Grok&apos;s P(YES) and the executable
             ask. One entry, including the estimated entry fee, is capped at <strong className="text-white">2.5% of available cash</strong>.
-            The 0.07 fee inside that cap is an estimate. The series fee multiplier is not loaded, so the multiplier used here is 1. The exchange fill fee is the billed amount, and it is stored when the order response includes it.
+            The 0.07 coefficient is used only when the series fee type is quadratic and its fee multiplier is known. That figure is an estimate, rounded up to the next cent. It is not the billed fee. If the series schedule is missing, the bot does not treat expected value as proven positive and does not treat the 2.5% cap as satisfied. The exchange fill fee is stored when the order response includes it.
             Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
             edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
             no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.

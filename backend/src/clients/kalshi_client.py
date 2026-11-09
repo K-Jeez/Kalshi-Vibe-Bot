@@ -2,9 +2,11 @@
 
 import asyncio
 import base64
+import random
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -47,11 +49,29 @@ def _markets_list_resume_bucket_key(filters: Optional[Dict[str, Any]]) -> Option
     return f"{st}|{mve}|{bucket}"
 
 
-def _fp_count(raw: Any) -> float:
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 0.0
+def bounded_retry_delay_seconds(attempt: int, retry_after: Optional[str] = None) -> float:
+    """Short 429 pause. Retry-After is honored only up to two seconds."""
+    delay = 0.55 * (attempt + 1) + (0.05 * attempt) + random.uniform(0.0, 0.1)
+    if retry_after:
+        try:
+            requested = float(str(retry_after).strip())
+        except ValueError:
+            requested = None
+        else:
+            if requested >= 0:
+                delay = max(delay, requested)
+    return min(2.0, max(0.05, delay))
+
+
+def _fp_count(raw: Any):
+    """Exact fixed-point contract count. Floats are rejected instead of rounded."""
+    from decimal import Decimal
+
+    from src.fixed_point import parse_fixed_point_count
+
+    if raw is None or raw == "":
+        return Decimal("0")
+    return parse_fixed_point_count(raw)
 
 
 def _fp_dollars(raw: Any) -> float:
@@ -652,7 +672,7 @@ def resting_buy_collateral_estimate_usd(orders: List[Dict[str, Any]]) -> float:
     Uses Kalshi order objects from ``GET /portfolio/orders``. This is an estimate for UI / sizing;
     exchange balance semantics may differ slightly.
     """
-    total = 0.0
+    total = Decimal("0")
     for o in orders:
         if (o.get("status") or "").lower() != "resting":
             continue
@@ -679,8 +699,8 @@ def resting_buy_collateral_estimate_usd(orders: List[Dict[str, Any]]) -> float:
             continue
 
         if px > 0:
-            total += rem * px
-    return total
+            total += rem * Decimal(str(px))
+    return float(total)
 
 
 def _fp_dollars_str(v: float, *, places: int = 6) -> str:
@@ -1177,7 +1197,25 @@ class KalshiClient:
                 if filters:
                     params.update(filters)
 
-                response = await self._http_get_signed(path, params=params, timeout=45.0)
+                response = None
+                for attempt in range(3):
+                    response = await self._http_get_signed(path, params=params, timeout=45.0)
+                    if response.status_code != 429 or attempt == 2:
+                        break
+                    delay = bounded_retry_delay_seconds(attempt, response.headers.get("Retry-After"))
+                    logger.warning(
+                        "Kalshi markets page rate-limited (429); retry in %.2fs (attempt %d/3)",
+                        delay,
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(delay)
+                if response is not None and response.status_code == 429:
+                    self._markets_list_resume_cursor = next_cursor
+                    self._persist_scan_cursor(next_cursor)
+                    logger.warning(
+                        "Kalshi markets page still rate-limited; keeping resume cursor and returning pages already kept",
+                    )
+                    break
                 if response.status_code in (401, 403):
                     logger.error(
                         "Kalshi auth failed (%d) — verify KALSHI_API_KEY and that KALSHI_PRIVATE_KEY_PATH points to a valid PEM in backend/",
@@ -1303,6 +1341,34 @@ class KalshiClient:
         except Exception as e:
             logger.error("Error fetching markets: %s", e)
             return []
+
+    async def get_series_fee(self, series_ticker: str) -> dict:
+        """Read ``fee_type`` and ``fee_multiplier`` from ``GET /series/{series_ticker}``.
+
+        A failed or non-quadratic response is unknown. It is not treated as multiplier 1.
+        """
+        from src.decision_engine.strategy_gates import fee_schedule_from_mapping
+
+        key = (series_ticker or "").strip()
+        if not key:
+            return {"known": False, "reason": "no series ticker"}
+        cache = getattr(self, "_series_fee_cache", None)
+        if cache is None:
+            self._series_fee_cache = {}
+            cache = self._series_fee_cache
+        hit = cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < 600:
+            return dict(hit[1])
+        try:
+            response = await self._http_get_signed(f"/trade-api/v2/series/{key}", timeout=10.0)
+            if response.status_code != 200:
+                return {"known": False, "reason": f"series HTTP {response.status_code}"}
+            result = fee_schedule_from_mapping(response.json() or {})
+        except Exception:
+            return {"known": False, "reason": "series fee read failed"}
+        if result.get("known"):
+            cache[key] = (time.monotonic(), result)
+        return result
 
     async def get_market(self, ticker: str) -> Optional[Dict]:
         """Fetch a single market by ticker for price refresh."""
@@ -1480,7 +1546,7 @@ class KalshiClient:
                                     response=response,
                                 )
                                 # Bucket refills ~1 token/s; short backoff (+ jitter) before retry.
-                                delay = 0.55 * (attempt + 1) + (0.05 * attempt)
+                                delay = bounded_retry_delay_seconds(attempt, response.headers.get("Retry-After"))
                                 logger.warning(
                                     "Portfolio balance rate-limited (429); retry in %.2fs (attempt %d/%d)",
                                     delay,
@@ -1496,7 +1562,10 @@ class KalshiClient:
                         except httpx.HTTPStatusError as e:
                             last_err = e
                             if e.response is not None and e.response.status_code == 429:
-                                delay = 0.55 * (attempt + 1) + (0.05 * attempt)
+                                delay = bounded_retry_delay_seconds(
+                                    attempt,
+                                    e.response.headers.get("Retry-After"),
+                                )
                                 logger.warning(
                                     "Portfolio balance rate-limited (429); retry in %.2fs (attempt %d/%d)",
                                     delay,
@@ -1751,9 +1820,12 @@ class KalshiClient:
         Uses ``POST /trade-api/v2/portfolio/events/orders``. Returns a dict shaped like the legacy
         ``order`` object for downstream helpers (fill_count_fp, remaining_count_fp, average_fill_price*).
         """
-        q = int(quantity)
-        if q < 1:
-            return {"error": "count must be at least 1 (whole contracts only)"}
+        from src.fixed_point import FixedPointCountError, require_whole_submit_count
+
+        try:
+            q = require_whole_submit_count(quantity)
+        except FixedPointCountError as exc:
+            return {"error": str(exc)}
 
         book_side, yes_px_raw = _v2_book_side_and_yes_price(action, side_yesno, float(limit_price_dollars))
         # Quantize to 1¢ increments (Kalshi binary tick) to avoid server "precision" rejections.

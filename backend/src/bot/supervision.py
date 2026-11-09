@@ -13,6 +13,16 @@ from typing import Awaitable, Callable, Dict
 
 _market_locks: Dict[str, asyncio.Lock] = {}
 _monitor_gate = asyncio.Lock()
+_submission_lock = asyncio.Lock()
+
+
+def submission_reservation_lock() -> asyncio.Lock:
+    """One short lock around the buy reservation and submit.
+
+    It is not held during a model call. Sell checks do not take it, so a buy
+    in one event does not stop the exit monitor from running.
+    """
+    return _submission_lock
 
 
 def market_execution_lock(market_id: str) -> asyncio.Lock:
