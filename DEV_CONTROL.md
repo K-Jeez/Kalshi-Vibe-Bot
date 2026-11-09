@@ -56,3 +56,38 @@ The processes already open from the old `start.bat` are not in the new pid file.
 6. `vibe.bat shutdown` when you want the new processes stopped.
 
 Do not run `vibe.bat bot pause` or `vibe.bat bot play` in that first check. Play can place real orders. Pause can sell when stop-loss selling is enabled.
+
+## Checkout, migration, and read-only audit
+
+Do not start the app for this step. The commands below update the checkout, back up the database, and print a ledger audit. They do not press Play.
+
+From the repo folder:
+
+```
+cd /d "C:\Users\KJeez\Documents\VibeBot Project\Kalshi Vibe Bot"
+git fetch origin cursor/live-run-repairs-6f97
+git checkout cursor/live-run-repairs-6f97
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+cd backend
+..\.venv\Scripts\python.exe tools\migrate_approved_bundle.py trading_bot.db
+..\.venv\Scripts\python.exe tools\reconcile_export.py trading_bot.db
+```
+
+If `py -3` is not available, use the Python 3.12 path already on that machine and the same `python -m venv` and `pip install` steps. Install requirements only when that environment is missing a package the app imports.
+
+The migration copies `trading_bot.db.pre-bundle.bak` once, lowers a stored open-position cap above 12 down to 12, and leaves the 5-point edge, 60% win floor, and 80% stop untouched. Run the audit again with the cash figures from the exchange statement when you have them:
+
+```
+..\.venv\Scripts\python.exe tools\reconcile_export.py trading_bot.db --cash-start 100 --cash-end 98.83
+```
+
+A gap is unresolved. It is not an 18-cent correction.
+
+Rollback of this checkout, without deleting the database or secrets, is:
+
+```
+git checkout 3c528999
+```
+
+That returns the code to the prior Windows control revision. It does not restore a database backup. The backup file stays beside the database.

@@ -1908,6 +1908,7 @@ class KalshiClient:
         status: Optional[str] = None,
         page_limit: int = 200,
         max_pages: int = 100,
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """Paginated Kalshi orders (e.g. ``status=\"resting\"`` for open orders).
 
@@ -1948,6 +1949,8 @@ class KalshiClient:
             return accum
         except Exception as e:
             logger.error("Error listing orders: %s", e)
+            if strict:
+                raise
             return []
 
     async def place_buy_ioc_limit(

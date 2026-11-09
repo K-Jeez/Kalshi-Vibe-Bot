@@ -16,6 +16,7 @@ from src.clients.kalshi_client import (
     open_position_mark_dollars,
 )
 from src.activity_log import (
+    decision_model_usage,
     fresh_unresolved_order_hold,
     make_order_submit_gate,
     persist_order_intent,
@@ -934,7 +935,9 @@ async def monitor_positions(
                     "fill_qty": float(filled_fp),
                     "fill_price": float(sold_px),
                     "fees_dollars": float(exit_fees_scaled),
+                    "fee_kind": "exchange_fill",
                     "client_order_id": sell_result.get("client_order_id"),
+                    "exchange_order_id": sell_result.get("order_id"),
                     "order_status": "filled",
                     "detail": f"auto-exit {exit_reason}",
                 }
@@ -1799,8 +1802,9 @@ async def scan_and_trade(
                                     action_taken = {
                                         "status": "no_trade",
                                         "summary": (
-                                            f"Skipped — fee-inclusive expected value "
-                                            f"${ev_dollars:.4f} is not positive"
+                                            f"Skipped — estimated fee-inclusive expected value "
+                                            f"${ev_dollars:.4f} is not positive. "
+                                            "That fee is the 0.07 schedule estimate, not the exchange fill fee."
                                         ),
                                         "signal": signal,
                                     }
@@ -1936,10 +1940,68 @@ async def scan_and_trade(
                                                         open_basis += float(open_row.entry_cost or 0)
                                                         open_basis += float(getattr(open_row, "fees_paid", 0) or 0)
                                                     added = all_in_entry_dollars(int(quantity), float(trade_price))
-                                                    if not event_exposure_room(
+                                                    from src.bot.exposure_reserve import unconfirmed_buy_exposure
+                                                    from src.config import APPROVED_MAX_OPEN_POSITIONS
+                                                    from src.database.models import ActivityEvent
+
+                                                    try:
+                                                        local_intents = db.query(ActivityEvent).filter(
+                                                            ActivityEvent.action == "buy",
+                                                            ActivityEvent.event_type.in_(("order_intent", "order_ack")),
+                                                            ActivityEvent.order_status.in_(("pending", "ambiguous")),
+                                                        ).all()
+                                                    except Exception:
+                                                        local_intents = None
+                                                    try:
+                                                        resting_now = await kalshi_client.list_orders(
+                                                            status="resting", strict=True
+                                                        )
+                                                        resting_known = True
+                                                    except Exception as exc:
+                                                        from src.ops_status import note_api_error
+
+                                                        note_api_error(type(exc).__name__)
+                                                        resting_now = None
+                                                        resting_known = False
+                                                    exposure = unconfirmed_buy_exposure(
+                                                        local_rows=local_intents,
+                                                        resting_orders=resting_now,
+                                                        resting_known=resting_known,
+                                                        event_ticker=str(_pos_et_val or ""),
+                                                        market_id=ticker_clean,
+                                                        exclude_client_order_id=order_intent_id,
+                                                    )
+                                                    open_cap = min(
+                                                        APPROVED_MAX_OPEN_POSITIONS,
+                                                        int(getattr(settings, "bot_max_open_positions", APPROVED_MAX_OPEN_POSITIONS) or APPROVED_MAX_OPEN_POSITIONS),
+                                                    )
+                                                    if exposure.get("reason"):
+                                                        result = {
+                                                            "error": "order not sent",
+                                                            "order_not_sent": True,
+                                                        }
+                                                        action_taken = {
+                                                            "status": "no_trade",
+                                                            "summary": f"Skipped — {exposure['reason']}",
+                                                            "signal": signal,
+                                                        }
+                                                    elif num_open + int(exposure.get("extra_orders") or 0) >= open_cap:
+                                                        result = {
+                                                            "error": "order not sent",
+                                                            "order_not_sent": True,
+                                                        }
+                                                        action_taken = {
+                                                            "status": "no_trade",
+                                                            "summary": (
+                                                                f"Skipped — open position limit "
+                                                                f"({num_open} open + {int(exposure.get('extra_orders') or 0)} unconfirmed)/{open_cap}"
+                                                            ),
+                                                            "signal": signal,
+                                                        }
+                                                    elif not event_exposure_room(
                                                         float(total_portfolio_value),
                                                         open_basis,
-                                                        0.0,
+                                                        float(exposure.get("reserve_dollars") or 0.0),
                                                         added,
                                                     ):
                                                         result = {
@@ -1949,8 +2011,10 @@ async def scan_and_trade(
                                                         action_taken = {
                                                             "status": "no_trade",
                                                             "summary": (
-                                                                "Skipped — event cost basis would exceed "
-                                                                "5% of account equity"
+                                                                "Skipped — event cost basis plus unconfirmed buys "
+                                                                "would exceed 5% of account equity. "
+                                                                "The entry fee in that check is an estimate, "
+                                                                "not the exchange fill fee."
                                                             ),
                                                             "signal": signal,
                                                         }
@@ -2076,7 +2140,9 @@ async def scan_and_trade(
                                                     "fill_qty": float(filled),
                                                     "fill_price": float(avg_px),
                                                     "fees_dollars": buy_fees,
+                                                    "fee_kind": "exchange_fill",
                                                     "client_order_id": order_intent_id,
+                                                    "exchange_order_id": result.get("order_id"),
                                                     "order_status": "filled",
                                                     "limit_price": float(ioc_limit_dollars),
                                                 }
@@ -2214,6 +2280,7 @@ async def scan_and_trade(
                     "kelly_contracts": int(decision.get("kelly_contracts") or 0),
                     "order_status": str((action_taken or {}).get("status") or ""),
                     "detail": scrub_text((action_taken or {}).get("summary") or decision.get("action_summary") or ""),
+                    "model_usage": decision_model_usage(xa_blob if isinstance(xa_blob, dict) else None),
                     **quote_snapshot(market),
                 }
             )

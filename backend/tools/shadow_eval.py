@@ -22,6 +22,9 @@ def score_rows(rows: list[dict]) -> dict:
     used = []
     excluded = []
     for row in rows:
+        if not str(row.get("decided_at") or "").strip() or not str(row.get("resolved_at") or "").strip():
+            excluded.append({"id": row.get("id"), "reason": "missing_time"})
+            continue
         try:
             decided = _parse(str(row["decided_at"]))
             resolved = _parse(str(row["resolved_at"]))

@@ -66,18 +66,26 @@ def exit_grace_minutes_for_market(settings_grace_minutes: float, title: str, eve
     return g
 
 
-def estimated_entry_fee_dollars(quantity: int, price: float) -> float:
-    """Quadratic entry-fee estimate, rounded up to the next cent.
+FEE_ESTIMATE_NOTE = (
+    "Entry fee used for the cap and expected-value check is an estimate: "
+    "0.07 times price times one minus price, times contracts, times fee_multiplier, "
+    "rounded up to the next cent. fee_multiplier defaults to 1 because the series "
+    "schedule is not loaded. It is not the billed fee. The fill response is."
+)
 
-    Coefficient 0.07 is the general schedule. Series-specific multipliers are
-    not fetched here. Rounding up keeps the cap and EV gate from understating
-    the fee. The exchange fill fee, once known, is the accounting figure.
+
+def estimated_entry_fee_dollars(quantity: int, price: float, fee_multiplier: float = 1.0) -> float:
+    """Estimated entry fee, rounded up to the next cent.
+
+    This is not a universal billed amount. Kalshi series can carry a different
+    ``fee_multiplier``. Callers that do not know it pass 1.
     """
     qty = int(quantity)
     px = float(price)
-    if qty < 1 or not math.isfinite(px) or px <= 0 or px >= 1:
+    mult = float(fee_multiplier)
+    if qty < 1 or not math.isfinite(px) or px <= 0 or px >= 1 or not math.isfinite(mult) or mult < 0:
         return 0.0
-    raw = QUADRATIC_FEE_COEFFICIENT * qty * px * (1.0 - px)
+    raw = QUADRATIC_FEE_COEFFICIENT * mult * qty * px * (1.0 - px)
     cents = math.ceil(raw * 100.0 - 1e-9)
     return max(0.0, cents / 100.0)
 
@@ -144,10 +152,10 @@ def event_exposure_room(equity: float, open_cost_basis: float, pending_reserve: 
 
 
 def either_side_can_buy_one_capped_contract(market: dict, bankroll: float) -> bool:
-    """True when YES or NO can buy one contract under the existing 5% cash cap.
+    """True when YES or NO can buy one contract under the 2.5% all-in cash cap.
 
     Uses the native ask only. A missing ask is not replaced with the mid price.
-    Model probability is not used. The 5% figure is the existing cap, not a new one.
+    Model probability is not used.
     """
     for side in ("YES", "NO"):
         ask = executable_buy_best_ask_dollars(market, side)

@@ -38,7 +38,7 @@ export const Settings: React.FC = () => {
     setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 5))))
     setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
     setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 60))))
-    setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 30))))
+    setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 12))))
   }, [cur])
 
   useEffect(() => {
@@ -64,8 +64,8 @@ export const Settings: React.FC = () => {
       return
     }
     const mxI = Math.round(mx)
-    if (mxI < 1 || mxI > 500) {
-      alert('Max open positions must be between 1 and 500.')
+    if (mxI < 1 || mxI > 12) {
+      alert('Max open positions must be between 1 and 12.')
       return
     }
     setSavingStrategy(true)
@@ -228,8 +228,9 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Position size uses <strong className="text-white">full Kelly</strong> from Grok&apos;s P(YES) and executable
-            asks, capped by deployable cash and an automatic <strong className="text-white">5% of deployable cash</strong> maximum premium per entry.
+            Position size uses <strong className="text-white">quarter Kelly</strong> from Grok&apos;s P(YES) and the executable
+            ask. One entry, including the estimated entry fee, is capped at <strong className="text-white">2.5% of available cash</strong>.
+            The 0.07 fee inside that cap is an estimate. The series fee multiplier is not loaded, so the multiplier used here is 1. The exchange fill fee is the billed amount, and it is stored when the order response includes it.
             Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
             edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
             no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
@@ -288,7 +289,7 @@ export const Settings: React.FC = () => {
                 </label>
                 <label className="flex min-h-0 flex-col gap-1">
                   <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Max open positions (1–500)
+                    Max open positions (1–12)
                   </span>
                   <input
                     type="text"
@@ -309,10 +310,7 @@ export const Settings: React.FC = () => {
                 {savingStrategy ? 'Saving…' : 'Save strategy settings'}
               </button>
               <p className="text-[11px] text-white/70">
-                Saved values apply immediately to the running bot. To match <code className="text-cyan-200/90">backend/.env</code> defaults
-                (including <code className="text-cyan-200/90">BOT_MAX_OPEN_POSITIONS</code>,{' '}
-                <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT</code>, or <code className="text-cyan-200/90">MIN_AI_WIN_PROB_BUY_SIDE_PCT</code>), use{' '}
-                <strong className="text-white">Restore configuration defaults</strong> — editing the file alone does not overwrite what is already in the database.
+                Saved values apply immediately to the running bot. Restore configuration defaults reloads edge, the 60% win floor, and the stop from <code className="text-cyan-200/90">backend/.env</code>. The open-position cap stays at 12 or lower even if that file still says 30. Editing the file alone does not overwrite the database.
               </p>
 
               <div className="pt-3 border-t border-brand-muted/25 flex flex-wrap items-center justify-between gap-3">

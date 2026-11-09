@@ -99,16 +99,16 @@ def test_shadow_eval_drops_future_leaks():
         [
             {
                 "id": "leak",
-                "decided_at": "2026-11-09T00:00:00Z",
-                "resolved_at": "2026-11-09T00:00:00Z",
+                "decided_at": "2024-11-09T00:00:00Z",
+                "resolved_at": "2024-11-09T00:00:00Z",
                 "outcome": "yes",
                 "model_p_yes": 0.7,
                 "market_p_yes": 0.4,
             },
             {
                 "id": "ok",
-                "decided_at": "2026-11-08T00:00:00Z",
-                "resolved_at": "2026-11-09T00:00:00Z",
+                "decided_at": "2024-11-08T00:00:00Z",
+                "resolved_at": "2024-11-09T00:00:00Z",
                 "outcome": "yes",
                 "model_p_yes": 0.7,
                 "market_p_yes": 0.4,
@@ -118,6 +118,9 @@ def test_shadow_eval_drops_future_leaks():
     )
     assert report["n"] == 1
     assert report["excluded"][0]["reason"] == "outcome_not_after_decision"
+    missing = mod.score_rows([{"id": "no-time", "outcome": "yes", "model_p_yes": 0.5, "market_p_yes": 0.5}])
+    assert missing["n"] == 0
+    assert missing["excluded"][0]["reason"] == "missing_time"
 
 
 def test_monitor_runs_while_scan_is_blocked():
@@ -165,7 +168,7 @@ def test_routing_cooldown_expires_and_is_not_permanent():
 
 
 def test_prefilter_requires_both_sides_unaffordable():
-    # 5% of $10 is $0.50. Ask 0.51 cannot buy one. Ask 0.50 can.
+    # 2.5% of $40 is $1.00. Ask 0.40 can buy one. Ask 0.51 on $10 cannot.
     rich = {"yes_ask": 0.40, "no_ask": 0.51}
     assert either_side_can_buy_one_capped_contract(rich, 40)
     neither = {"yes_ask": 0.51, "no_ask": 0.80}
@@ -195,14 +198,14 @@ def test_export_reads_closed_rows_without_writing(tmp_path: Path):
     conn.execute(
         """
         CREATE TABLE positions (
-            market_id TEXT, side TEXT, quantity INT, entry_price REAL, entry_cost REAL,
-            fees_paid REAL, realized_pnl REAL, exit_reason TEXT, status TEXT, closed_at TEXT
+            id TEXT, market_id TEXT, event_ticker TEXT, side TEXT, quantity INT, entry_price REAL,
+            entry_cost REAL, fees_paid REAL, realized_pnl REAL, exit_reason TEXT, status TEXT, closed_at TEXT
         )
         """
     )
     conn.execute(
-        "INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("M1", "YES", 1, 0.4, 0.4, 0.02, 1.95, "stop_loss", "closed", "2026-11-09T00:33:00Z"),
+        "INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("p1", "M1", "EV", "YES", 1, 0.4, 0.4, 0.02, 1.95, "stop_loss", "closed", "2026-11-09T00:33:00Z"),
     )
     conn.commit()
     conn.close()
@@ -214,8 +217,190 @@ def test_export_reads_closed_rows_without_writing(tmp_path: Path):
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    report = mod.export_closed(db)
-    assert report["closed_count"] == 1
-    assert report["sum_realized_pnl"] == 1.95
-    assert "not computed" in report["note"]
-    assert json.loads(json.dumps(report))["positions"][0]["exit_reason"] == "stop_loss"
+    report = mod.audit_database(db, cash_start=100, cash_end=98.83)
+    assert report["components"]["closed_count"] == 1
+    assert report["components"]["sum_closed_realized_pnl"] == 1.95
+    assert report["cash_comparison"]["resolved"] is False
+    assert any(item.get("amount") for item in report["unresolved"])
+    assert report["cash_comparison"]["unexplained_gap"] != 0
+
+
+def test_migration_lowers_any_cap_above_12_and_leaves_the_stop(tmp_path: Path):
+    from src.policy_migration import migrate_sqlite_file
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE tuning_state (
+            max_open_positions INT,
+            min_edge_to_buy_pct INT,
+            min_ai_win_prob_buy_side_pct INT,
+            stop_loss_drawdown_pct REAL
+        )
+        """
+    )
+    conn.execute("INSERT INTO tuning_state VALUES (20, 5, 60, 0.8)")
+    conn.execute("INSERT INTO tuning_state VALUES (8, 5, 60, 0.8)")
+    conn.commit()
+    conn.close()
+    report = migrate_sqlite_file(db)
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT max_open_positions, min_edge_to_buy_pct, min_ai_win_prob_buy_side_pct, stop_loss_drawdown_pct FROM tuning_state ORDER BY max_open_positions"
+    ).fetchall()
+    conn.close()
+    assert report["rows_updated"] == 1
+    assert rows == [(8, 5, 60, 0.8), (12, 5, 60, 0.8)]
+
+
+def test_restore_source_cannot_load_an_old_open_cap_of_30(monkeypatch):
+    monkeypatch.setenv("BOT_MAX_OPEN_POSITIONS", "30")
+    from src.config import Settings
+    from src.api.tuning import effective_max_open_positions
+
+    fresh = Settings()
+    assert fresh.bot_max_open_positions == 12
+    assert effective_max_open_positions(30) == 12
+    assert effective_max_open_positions(8) == 8
+
+
+def test_stale_database_cap_does_not_raise_the_runtime_limit():
+    from types import SimpleNamespace
+
+    from src.api.tuning import _sync_runtime_from_row
+    from src.config import settings as app_settings
+
+    previous = (
+        app_settings.bot_max_open_positions,
+        app_settings.min_edge_to_buy_pct,
+        app_settings.min_ai_win_prob_buy_side_pct,
+        app_settings.stop_loss_drawdown_pct,
+        app_settings.stop_loss_selling_enabled,
+    )
+    row = SimpleNamespace(
+        stop_loss_drawdown_pct=0.80,
+        min_edge_to_buy_pct=5,
+        stop_loss_selling_enabled=False,
+        min_ai_win_prob_buy_side_pct=60,
+        max_open_positions=30,
+    )
+    try:
+        _sync_runtime_from_row(row)
+        assert app_settings.bot_max_open_positions == 12
+        assert app_settings.min_edge_to_buy_pct == 5
+        assert app_settings.min_ai_win_prob_buy_side_pct == 60
+        assert abs(app_settings.stop_loss_drawdown_pct - 0.80) < 1e-9
+    finally:
+        (
+            app_settings.bot_max_open_positions,
+            app_settings.min_edge_to_buy_pct,
+            app_settings.min_ai_win_prob_buy_side_pct,
+            app_settings.stop_loss_drawdown_pct,
+            app_settings.stop_loss_selling_enabled,
+        ) = previous
+
+
+def test_unconfirmed_buys_reserve_cash_and_block_when_unknown():
+    from src.bot.exposure_reserve import unconfirmed_buy_exposure
+
+    current = {
+        "event_type": "order_intent",
+        "action": "buy",
+        "order_status": "pending",
+        "client_order_id": "this-order",
+        "event_ticker": "EVT",
+        "market_id": "EVT-A",
+        "quantity": 2,
+        "limit_price": 0.40,
+    }
+    other = dict(current, client_order_id="other-order", market_id="EVT-B")
+    resting = {
+        "status": "resting",
+        "action": "buy",
+        "event_ticker": "EVT",
+        "ticker": "EVT-C",
+        "side": "yes",
+        "yes_price_dollars": "0.50",
+        "remaining_count_fp": "1.00",
+    }
+    known = unconfirmed_buy_exposure(
+        local_rows=[current, other],
+        resting_orders=[resting],
+        resting_known=True,
+        event_ticker="EVT",
+        market_id="EVT-A",
+        exclude_client_order_id="this-order",
+    )
+    assert known["reason"] is None
+    assert known["extra_orders"] == 2
+    assert known["reserve_dollars"] > 0
+    missing = unconfirmed_buy_exposure(
+        local_rows=[{**other, "limit_price": None}],
+        resting_orders=[],
+        resting_known=True,
+        event_ticker="EVT",
+        market_id="EVT-A",
+        exclude_client_order_id="this-order",
+    )
+    assert missing["reason"] == "pending buy is missing a price or size"
+    unread = unconfirmed_buy_exposure(
+        local_rows=[],
+        resting_orders=None,
+        resting_known=False,
+        event_ticker="EVT",
+        market_id="EVT-A",
+        exclude_client_order_id="this-order",
+    )
+    assert unread["reserve_dollars"] is None
+
+
+def test_uncertainty_is_structured_and_does_not_invent_a_probability():
+    from src.clients.xai_client import _parse_json, attach_model_usage
+    import time
+
+    old = _parse_json(json.dumps({
+        "direction": "YES",
+        "ai_probability_yes_pct": 70,
+        "reasoning": "old shape",
+    }))
+    assert old["uncertainty"]["status"] == "missing"
+    assert old["direction"] == "YES"
+    assert old["ai_probability_yes_pct"] == 70
+    abstain = _parse_json(json.dumps({
+        "direction": "YES",
+        "ai_probability_yes_pct": 70,
+        "uncertainty": {"level": "abstain", "missing": ["score"], "as_of": "2024-11-08T12:00:00Z"},
+    }))
+    assert abstain["direction"] == "SKIP"
+    assert abstain["ai_probability_yes_pct"] == 70
+    assert abstain["uncertainty"]["missing"] == ["score"]
+    invalid = _parse_json(json.dumps({
+        "direction": "NO",
+        "ai_probability_yes_pct": 40,
+        "uncertainty": "high",
+    }))
+    assert invalid["uncertainty"]["status"] == "invalid"
+    assert invalid["direction"] == "NO"
+    assert invalid["ai_probability_yes_pct"] == 40
+    out = {}
+    attach_model_usage(
+        out,
+        {"usage": {"prompt_tokens": 1000, "completion_tokens": 10, "total_cost_usd": 0.01}, "choices": []},
+        started=time.perf_counter() - 0.2,
+    )
+    assert out["usage"]["actual_usd"] == 0.01
+    assert out["usage"]["cost_label"] == "provider_reported"
+    assert out["usage"]["input_tokens"] == 1000
+    assert out["usage"]["duration_sec"] >= 0
+    assert out["prompt_version"] == "decision-2026-11-09"
+    assert "choices" not in out["usage"]
+    estimate = {}
+    attach_model_usage(
+        estimate,
+        {"usage": {"prompt_tokens": 1000, "completion_tokens": 0}},
+        started=time.perf_counter(),
+    )
+    assert estimate["usage"]["actual_usd"] is None
+    assert estimate["usage"]["cost_label"] == "list_price_estimate"
+    assert estimate["usage"]["estimated_usd"] is not None

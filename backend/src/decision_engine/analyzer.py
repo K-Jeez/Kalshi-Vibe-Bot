@@ -108,7 +108,7 @@ def _enrich_strategy_fields(
 
 
 class DecisionEngine:
-    """xAI (Grok) decision engine with server-side edge and full Kelly sizing."""
+    """xAI (Grok) decision engine with server-side edge and quarter Kelly sizing."""
 
     def __init__(
         self,

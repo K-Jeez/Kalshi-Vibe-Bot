@@ -10,6 +10,7 @@ from src.ai_provider import normalize_ai_provider
 from src.api.schemas import StopLossSellingRequest, StrategyKnobsRequest
 from src.config import (
     AI_PROVIDER,
+    APPROVED_MAX_OPEN_POSITIONS,
     DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
@@ -37,6 +38,17 @@ def _coalesce_int(row, attr: str, default: int) -> int:
     return default if v is None else int(v)
 
 
+def effective_max_open_positions(value) -> int:
+    """Approved ceiling is 12. A stale 30 from an old file cannot raise it."""
+    if value is None:
+        value = DEFAULT_MAX_OPEN_POSITIONS
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = DEFAULT_MAX_OPEN_POSITIONS
+    return max(1, min(APPROVED_MAX_OPEN_POSITIONS, parsed))
+
+
 def _coalesce_ai_provider(row) -> str:
     return normalize_ai_provider(getattr(row, "ai_provider", None))
 
@@ -52,7 +64,9 @@ def tuning_state_payload(row) -> dict:
         "min_ai_win_prob_buy_side_pct": _coalesce_int(
             row, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
         ),
-        "max_open_positions": _coalesce_int(row, "max_open_positions", DEFAULT_MAX_OPEN_POSITIONS),
+        "max_open_positions": effective_max_open_positions(
+            getattr(row, "max_open_positions", None)
+        ),
         "ai_provider": AI_PROVIDER,
         "xai_model": str(getattr(app_settings, "xai_model", "grok-4.3")),
         "config_source": "database",
@@ -81,8 +95,8 @@ def _sync_runtime_from_row(row) -> None:
     app_settings.min_ai_win_prob_buy_side_pct = _coalesce_int(
         row, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
     )
-    app_settings.bot_max_open_positions = _coalesce_int(
-        row, "max_open_positions", DEFAULT_MAX_OPEN_POSITIONS
+    app_settings.bot_max_open_positions = effective_max_open_positions(
+        getattr(row, "max_open_positions", None)
     )
 
 
@@ -94,7 +108,7 @@ def apply_config_defaults_to_tuning_state(db: Session) -> dict:
     row.min_edge_to_buy_pct = int(fresh.min_edge_to_buy_pct)
     row.stop_loss_selling_enabled = bool(fresh.stop_loss_selling_enabled)
     row.min_ai_win_prob_buy_side_pct = int(fresh.min_ai_win_prob_buy_side_pct)
-    row.max_open_positions = int(fresh.bot_max_open_positions)
+    row.max_open_positions = effective_max_open_positions(fresh.bot_max_open_positions)
     row.ai_provider = AI_PROVIDER
 
     row.updated_at = utc_now()
@@ -125,7 +139,7 @@ async def set_strategy_knobs(req: StrategyKnobsRequest, db: Session = Depends(ge
         # Floor 51 = strictly above 50% on the buy side; cap 99 matches ``config.py`` validator.
         row.min_ai_win_prob_buy_side_pct = max(51, min(99, v))
     if req.max_open_positions is not None:
-        row.max_open_positions = max(1, min(500, int(req.max_open_positions)))
+        row.max_open_positions = effective_max_open_positions(req.max_open_positions)
     row.updated_at = utc_now()
     db.add(row)
     db.commit()

@@ -1,4 +1,4 @@
-"""Edge and full Kelly sizing for binary Kalshi contracts (prices as 0–1 dollars per $1 payoff)."""
+"""Edge and quarter Kelly sizing for binary Kalshi contracts (prices as 0–1 dollars per $1 payoff)."""
 
 from __future__ import annotations
 

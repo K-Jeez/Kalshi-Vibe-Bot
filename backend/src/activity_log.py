@@ -157,6 +157,9 @@ def _apply(row: ActivityEvent, payload: Dict[str, Any]) -> None:
             setattr(row, float_name, None)
     cid = payload.get("client_order_id")
     row.client_order_id = scrub_text(cid, limit=80) if cid else None
+    ex_id = payload.get("exchange_order_id")
+    row.exchange_order_id = scrub_text(ex_id, limit=80) if ex_id else None
+    row.fee_kind = scrub_text(payload.get("fee_kind") or "", limit=32) or None
     row.order_status = scrub_text(payload.get("order_status") or "", limit=32) or None
     row.quote_captured_at = scrub_text(payload.get("quote_captured_at") or "", limit=40) or None
     row.sizing_tag = scrub_text(payload.get("sizing_tag") or "", limit=40) or None
@@ -181,7 +184,51 @@ def _prune(db) -> None:
     db.query(ActivityEvent).filter(ActivityEvent.ts_utc < cutoff[0]).delete(synchronize_session=False)
 
 
-def _append_durable_event(row) -> None:
+_USAGE_KEYS = (
+    "prompt_version",
+    "input_tokens",
+    "output_tokens",
+    "estimated_usd",
+    "actual_usd",
+    "duration_sec",
+    "cost_label",
+    "estimate_is_not_a_bill",
+)
+
+
+def decision_model_usage(analysis: Optional[dict]) -> Optional[dict]:
+    """Numeric model accounting only. Prompt text is not copied."""
+    if not isinstance(analysis, dict):
+        return None
+    usage = analysis.get("usage") if isinstance(analysis.get("usage"), dict) else {}
+    out = {
+        "prompt_version": analysis.get("prompt_version"),
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+        "estimated_usd": usage.get("estimated_usd"),
+        "actual_usd": usage.get("actual_usd"),
+        "duration_sec": usage.get("duration_sec"),
+        "cost_label": usage.get("cost_label"),
+        "estimate_is_not_a_bill": usage.get("estimate_is_not_a_bill"),
+    }
+    if not any(val is not None for val in out.values()):
+        return None
+    return out
+
+
+def _public_model_usage(payload: Dict[str, Any]) -> Optional[dict]:
+    raw = payload.get("model_usage")
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for key in _USAGE_KEYS:
+        val = raw.get(key)
+        if isinstance(val, (str, int, float, bool)) or val is None:
+            out[key] = val
+    return out or None
+
+
+def _append_durable_event(row, model_usage: Optional[dict] = None) -> None:
     """Append one scrubbed line outside the pruned activity table. Failures are ignored."""
     try:
         day = (row.ts_utc or utc_now()).strftime("%Y%m%d")
@@ -194,11 +241,19 @@ def _append_durable_event(row) -> None:
                 "ts_utc": row.ts_utc.isoformat() if getattr(row.ts_utc, "isoformat", None) else str(row.ts_utc or ""),
                 "event_type": row.event_type,
                 "market_id": row.market_id,
+                "event_ticker": row.event_ticker,
                 "side": row.side,
                 "action": row.action,
+                "quantity": row.quantity,
+                "limit_price": row.limit_price,
+                "fill_qty": row.fill_qty,
+                "fill_price": row.fill_price,
                 "client_order_id": row.client_order_id,
+                "exchange_order_id": row.exchange_order_id,
                 "order_status": row.order_status,
                 "fees_dollars": row.fees_dollars,
+                "fee_kind": row.fee_kind,
+                "model_usage": model_usage,
                 "detail": row.detail,
             },
             default=str,
@@ -220,7 +275,7 @@ def record_activity(payload: Dict[str, Any], *, session_factory: Optional[Callab
         _apply(row, payload)
         db.add(row)
         db.commit()
-        _append_durable_event(row)
+        _append_durable_event(row, _public_model_usage(payload))
         _writes += 1
         if _writes % _PRUNE_EVERY == 0:
             _prune(db)
@@ -339,9 +394,50 @@ def record_order_ack(
     if isinstance(result, dict):
         if result.get("client_order_id"):
             body["client_order_id"] = result.get("client_order_id")
+        exchange_id = result.get("order_id") or result.get("id")
+        if exchange_id:
+            body["exchange_order_id"] = exchange_id
+        if "taker_fees_dollars" in result or "maker_fees_dollars" in result:
+            from src.clients.kalshi_client import kalshi_order_fees_dollars
+
+            body["fees_dollars"] = float(kalshi_order_fees_dollars(result))
+            body["fee_kind"] = "exchange_fill"
+        elif body.get("fee_kind") is None:
+            body["fee_kind"] = "unavailable"
+        fill = result.get("fill_count_fp")
+        if fill is not None:
+            try:
+                body["fill_qty"] = float(fill)
+            except (TypeError, ValueError):
+                pass
+        avg = result.get("average_fill_price")
+        if avg is not None:
+            try:
+                body["fill_price"] = float(avg)
+            except (TypeError, ValueError):
+                pass
         if result.get("error"):
             body["error"] = scrub_text(result.get("error"), limit=200)
     return record_activity(body, session_factory=session_factory)
+
+
+def pending_intent_count(*, session_factory: Optional[Callable] = None) -> Optional[int]:
+    """How many buy or sell intents are still unconfirmed. None means the log could not be read."""
+    factory = session_factory or get_session_local()
+    db = factory()
+    try:
+        return int(
+            db.query(ActivityEvent)
+            .filter(
+                ActivityEvent.event_type.in_(("order_intent", "order_ack")),
+                ActivityEvent.order_status.in_(("pending", "ambiguous")),
+            )
+            .count()
+        )
+    except Exception:
+        return None
+    finally:
+        db.close()
 
 
 def classify_order_result(result: Optional[dict]) -> str:

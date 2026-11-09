@@ -157,6 +157,8 @@ export interface XAIAnalysis {
   event_batch_market_ids?: string[]
   /** When legs are mutually exclusive (e.g. 1X2), model P(YES) per market_id (sums ~100%). */
   outcome_probability_pct_by_market_id?: Record<string, number>
+  uncertainty?: { status?: string; level?: string; missing?: string[]; as_of?: string }
+  prompt_version?: string
 }
 
 export type AnalysisActionTaken =
@@ -180,7 +182,7 @@ export interface DecisionAnalysis {
   market_implied_probability_pct?: number
   /** Edge in percentage points (AI side prob minus market-implied). */
   edge_pct?: number
-  /** Full Kelly contract count at analysis time and deployable cash snapshot. */
+  /** Quarter Kelly contract count at analysis time and deployable cash snapshot. */
   kelly_contracts?: number
   yes_confidence: number
   no_confidence: number
@@ -315,11 +317,20 @@ export interface HealthResponse {
   status: string
   version?: string
   timestamp?: string
+  monitor_age_sec?: number | null
+  alerts?: string[]
+  fee_estimate_note?: string
+  approved_max_open_positions?: number
 }
 
 export const apiClient = {
   getHealth: async (): Promise<HealthResponse> => {
     const { data } = await client.get('/health')
+    return data
+  },
+
+  getOpsStatus: async (): Promise<{ monitor_age_sec: number | null; alerts: string[] }> => {
+    const { data } = await client.get('/ops/status')
     return data
   },
 

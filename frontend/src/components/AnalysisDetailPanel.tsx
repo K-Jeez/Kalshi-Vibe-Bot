@@ -357,7 +357,7 @@ export const AnalysisDetailBody: React.FC<{
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-brand-muted/25 text-xs">
             <div>
-              <span className="text-white/70">Full Kelly size </span>
+              <span className="text-white/70">Quarter Kelly size </span>
               <span className="font-semibold text-amber-300 tabular-nums">{kelly}</span>
               <span className="text-white/70"> contracts</span>
             </div>
@@ -390,6 +390,15 @@ export const AnalysisDetailBody: React.FC<{
             })}
           </ul>
         </div>
+      )}
+      {a.xai_analysis?.uncertainty?.status && (
+        <p className="text-[10px] text-white/70 mb-1">
+          Uncertainty {a.xai_analysis.uncertainty.status}
+          {a.xai_analysis.uncertainty.level ? ` · ${a.xai_analysis.uncertainty.level}` : ''}
+          {a.xai_analysis.uncertainty.missing?.length
+            ? ` · missing ${a.xai_analysis.uncertainty.missing.join(', ')}`
+            : ''}
+        </p>
       )}
       {a.reasoning && (
         <p className="text-xs text-white leading-relaxed line-clamp-3 mb-2">{a.reasoning}</p>

@@ -14,7 +14,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MIN_EDGE_TO_BUY_PCT = 5
 DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
 DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.80
-DEFAULT_MAX_OPEN_POSITIONS = 12
+APPROVED_MAX_OPEN_POSITIONS = 12
+DEFAULT_MAX_OPEN_POSITIONS = APPROVED_MAX_OPEN_POSITIONS
 DEFAULT_AI_PROVIDER = "xai"
 
 # Market analysis uses xAI (Grok) only; persisted ``tuning_state.ai_provider`` is always xai.
@@ -139,7 +140,7 @@ class Settings(BaseSettings):
         self.local_min_residual_payoff = max(0.0, min(0.50, float(self.local_min_residual_payoff)))
         self.min_edge_to_buy_pct = max(0, min(95, int(self.min_edge_to_buy_pct)))
         self.min_ai_win_prob_buy_side_pct = max(51, min(99, int(self.min_ai_win_prob_buy_side_pct)))
-        self.bot_max_open_positions = max(1, min(500, int(self.bot_max_open_positions)))
+        self.bot_max_open_positions = max(1, min(APPROVED_MAX_OPEN_POSITIONS, int(self.bot_max_open_positions)))
         self.exit_grace_minutes = max(0.0, min(1440.0, float(self.exit_grace_minutes)))
         self.stop_loss_drawdown_pct = max(0.01, min(0.90, float(self.stop_loss_drawdown_pct)))
         self.kalshi_markets_page_delay_sec = max(0.0, min(0.5, float(self.kalshi_markets_page_delay_sec)))

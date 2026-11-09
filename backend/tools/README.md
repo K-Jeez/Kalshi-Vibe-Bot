@@ -1,4 +1,29 @@
-# Offline edge evaluation
+# Offline tools
+
+These commands do not place orders and do not start the app.
+
+## Read-only ledger audit
+
+From the `backend` directory:
+
+```
+python tools/reconcile_export.py trading_bot.db
+python tools/reconcile_export.py trading_bot.db --cash-start 100 --cash-end 98.83
+```
+
+The report lists closed entry cost, fees stored on those rows, realized P&L, open cost, activity run ids, and pending intents. A cash start and end are only compared with the stored realized P&L. A difference is marked unresolved. The tool does not invent an 18-cent fee adjustment. Historical NO-side fees that were never stored stay missing.
+
+## Shadow score
+
+```
+python tools/shadow_eval.py rows.json
+```
+
+Each row needs `decided_at` and `resolved_at`. A missing time is excluded. An outcome at or before the decision is excluded. The score is not a live-edge result.
+
+## Older offline edge study
+
+The study below used the rules in that commit, including a 5% cash cap and a 30-position ceiling. The live bot now uses quarter Kelly, a 2.5% all-in entry estimate, and a maximum of 12 open positions. That study was not rerun.
 
 This folder does not place orders and does not change the trading rules.
 

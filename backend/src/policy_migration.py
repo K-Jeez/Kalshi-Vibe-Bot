@@ -1,7 +1,8 @@
 """Apply the approved sizing bundle to an existing SQLite file.
 
 Does not start the bot. Copies a backup beside the database first.
-Only the previous default of 30 open positions is moved to 12.
+Any stored open-position cap above 12 is lowered to 12.
+A stored cap that is already 12 or lower is left alone.
 Edge, win probability, and stop-loss rows are left as they are.
 Kelly and the entry cap live in code, not in this table.
 """
@@ -55,16 +56,31 @@ def migrate_sqlite_file(path: Path, *, backup: bool = True) -> dict:
                 "already_applied": True,
                 "backup": str(backup_path) if backup_path else None,
             }
-        changed = conn.execute(
-            "UPDATE tuning_state SET max_open_positions = ? WHERE max_open_positions = ?",
-            (NEW_MAX_OPEN, OLD_MAX_OPEN),
-        ).rowcount
+        previous = []
+        try:
+            previous = [
+                row[0]
+                for row in conn.execute("SELECT max_open_positions FROM tuning_state").fetchall()
+            ]
+        except sqlite3.OperationalError:
+            previous = []
+        changed = 0
+        try:
+            changed = conn.execute(
+                "UPDATE tuning_state SET max_open_positions = ? WHERE max_open_positions > ?",
+                (NEW_MAX_OPEN, NEW_MAX_OPEN),
+            ).rowcount
+        except sqlite3.OperationalError:
+            changed = 0
         conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (POLICY_ID,))
         conn.commit()
         return {
             "ok": True,
             "already_applied": False,
+            "previous_max_open_positions": previous,
             "rows_updated": int(changed or 0),
+            "max_open_positions": NEW_MAX_OPEN,
+            "unchanged": ["min_edge_to_buy_pct", "min_ai_win_prob_buy_side_pct", "stop_loss_drawdown_pct"],
             "backup": str(backup_path) if backup_path else None,
             "policy_id": POLICY_ID,
         }
