@@ -11,7 +11,7 @@ python tools/reconcile_export.py trading_bot.db
 python tools/reconcile_export.py trading_bot.db --cash-start 100 --cash-end 98.83
 ```
 
-The report lists closed entry cost, fees stored on those rows, realized P&L, open cost, activity run ids, and pending intents. A cash start and end are only compared with the stored realized P&L. A difference is marked unresolved. The tool does not invent an 18-cent fee adjustment. Historical NO-side fees that were never stored stay missing.
+The report lists closed entry cost, fees stored on those rows, realized P&L, open cost, and activity run ids. It counts an order as current only when its latest status is still pending, ambiguous, or open at the exchange. Older pending rows stay in the history count. A cash start and end are only compared with the stored realized P&L. A difference is marked unresolved. The tool does not invent an 18-cent fee adjustment. Historical NO-side fees that were never stored stay missing.
 
 ## Shadow score
 

@@ -370,23 +370,25 @@ def fresh_unresolved_order_hold(
                 ActivityEvent.action == act,
                 ActivityEvent.event_type.in_(("order_intent", "order_ack")),
             )
-            .order_by(ActivityEvent.ts_utc.desc(), ActivityEvent.seq.desc())
             .all()
         )
-        seen = set()
-        for row in rows:
+        from src.intent_lifecycle import select_intent_lifecycle
+
+        selected = select_intent_lifecycle(rows)
+        for row in selected["current"]:
             cid = (row.client_order_id or "").strip()
-            if cid in seen:
-                continue
-            seen.add(cid)
             if skip and cid == skip:
                 continue
             status = (row.order_status or "").strip().lower()
-            if status in UNRESOLVED_ORDER_STATUSES:
-                return (
-                    f"unresolved {act} ({status}) client_order_id={row.client_order_id}; "
-                    "not sending another order until that id is reconciled"
-                )
+            return (
+                f"unresolved {act} ({status}) client_order_id={row.client_order_id}; "
+                "not sending another order until that id is reconciled"
+            )
+        if selected["legacy_without_client_order_id"]:
+            return (
+                f"unresolved {act} has no client order id; "
+                "not sending another order until that history is reconciled"
+            )
         return None
     except Exception as exc:
         logger.error("activity log hold check failed (%s)", type(exc).__name__)
@@ -452,21 +454,14 @@ def list_unresolved_intents(
             query = query.filter(ActivityEvent.market_id == normalize_market_id(str(market_id)))
         if action:
             query = query.filter(ActivityEvent.action == str(action).strip().lower())
-        rows = query.order_by(ActivityEvent.ts_utc.desc(), ActivityEvent.seq.desc()).all()
-        seen = set()
+        from src.intent_lifecycle import select_intent_lifecycle
+
+        selected = select_intent_lifecycle(query.all())
         out = []
-        for row in rows:
-            cid = (row.client_order_id or "").strip()
-            key = (row.market_id or "", row.action or "", cid)
-            if key in seen:
-                continue
-            seen.add(key)
-            status = (row.order_status or "").strip().lower()
-            if status not in UNRESOLVED_ORDER_STATUSES:
-                continue
+        for row in selected["current"]:
             out.append(
                 {
-                    "client_order_id": cid,
+                    "client_order_id": (row.client_order_id or "").strip(),
                     "exchange_order_id": row.exchange_order_id,
                     "market_id": row.market_id,
                     "action": row.action,
@@ -474,7 +469,7 @@ def list_unresolved_intents(
                     "quantity": row.quantity,
                     "limit_price": row.limit_price,
                     "event_ticker": row.event_ticker,
-                    "order_status": status,
+                    "order_status": (row.order_status or "").strip().lower(),
                     "ts_utc": row.ts_utc,
                 }
             )
@@ -547,23 +542,47 @@ def record_order_ack(
     return record_activity(body, session_factory=session_factory)
 
 
-def pending_intent_count(*, session_factory: Optional[Callable] = None) -> Optional[int]:
-    """How many buy or sell intents are still unconfirmed. None means the log could not be read."""
-    factory = session_factory or get_session_local()
-    db = factory()
+def intent_status_summary(*, session_factory: Optional[Callable] = None) -> Optional[dict]:
+    """Current unresolved orders versus historical pending rows.
+
+    None means the log could not be read. Historical pending rows are kept
+    and are not counted as orders that are still open.
+    """
+    from src.intent_lifecycle import select_intent_lifecycle
+
+    db = None
     try:
-        return int(
+        factory = session_factory or get_session_local()
+        db = factory()
+        rows = (
             db.query(ActivityEvent)
-            .filter(
-                ActivityEvent.event_type.in_(("order_intent", "order_ack")),
-                ActivityEvent.order_status.in_(("pending", "ambiguous")),
-            )
-            .count()
+            .filter(ActivityEvent.event_type.in_(("order_intent", "order_ack")))
+            .all()
         )
+        selected = select_intent_lifecycle(rows)
+        return {
+            "current_unresolved_intent_count": len(selected["current"]),
+            "historical_pending_row_count": selected["historical_pending_rows"],
+            "legacy_unresolved_without_client_order_id": len(selected["legacy_without_client_order_id"]),
+            "current": selected["current"],
+        }
     except Exception:
         return None
     finally:
-        db.close()
+        if db is not None:
+            db.close()
+
+
+def pending_intent_count(*, session_factory: Optional[Callable] = None) -> Optional[int]:
+    """How many orders are still unconfirmed at their latest status.
+
+    None means the log could not be read. This is not a count of every
+    historical pending row.
+    """
+    summary = intent_status_summary(session_factory=session_factory)
+    if summary is None:
+        return None
+    return int(summary["current_unresolved_intent_count"])
 
 
 def classify_order_result(result: Optional[dict]) -> str:

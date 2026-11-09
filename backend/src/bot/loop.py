@@ -514,18 +514,27 @@ def reentry_cooldown_minutes_from_settings(settings) -> int:
 
 
 def losing_exit_cooldown_market_ids(rows, *, now: datetime, cooldown_minutes: int) -> Set[str]:
-    """Tickers whose latest close inside the window has negative realized P&L."""
+    """Tickers whose latest close inside the window has negative realized P&L.
+
+    SQLite returns ``closed_at`` without a timezone. ``now`` is UTC-aware.
+    Both sides are normalized to UTC before they are compared. The instant
+    does not change.
+    """
     if cooldown_minutes <= 0:
         return set()
-    cutoff = now - timedelta(minutes=int(cooldown_minutes))
+    now_utc = ensure_utc(now)
+    if now_utc is None:
+        return set()
+    cutoff = now_utc - timedelta(minutes=int(cooldown_minutes))
     latest: Dict[str, Tuple[datetime, float]] = {}
     for mid, closed_at, realized in rows:
-        if not mid or closed_at is None or closed_at < cutoff:
+        closed_utc = ensure_utc(closed_at) if isinstance(closed_at, datetime) else None
+        if not mid or closed_utc is None or closed_utc < cutoff:
             continue
         key = normalize_market_id(str(mid)).upper()
         prev = latest.get(key)
-        if prev is None or closed_at > prev[0]:
-            latest[key] = (closed_at, float(realized or 0.0))
+        if prev is None or closed_utc > prev[0]:
+            latest[key] = (closed_utc, float(realized or 0.0))
     return {key for key, (_, pnl) in latest.items() if pnl < 0}
 
 
@@ -2408,7 +2417,7 @@ async def scan_and_trade(
         )
 
     except Exception as e:
-        logger.error("Error in scan_and_trade: %s", scrub_text(e))
+        logger.exception("Error in scan_and_trade: %s", scrub_text(e))
         record_activity(
             {
                 "event_type": "error",

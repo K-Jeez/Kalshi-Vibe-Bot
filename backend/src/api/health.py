@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from src.activity_log import pending_intent_count
+from src.activity_log import intent_status_summary
 from src.config import APPROVED_MAX_OPEN_POSITIONS
 from src.decision_engine.strategy_gates import FEE_ESTIMATE_NOTE
 from src.ops_status import alerts, monitor_age_sec
@@ -12,17 +12,43 @@ router = APIRouter(tags=["health"])
 
 def public_health_body() -> dict:
     notes = list(alerts())
-    pending = pending_intent_count()
-    if pending is None:
+    summary = intent_status_summary()
+    current_count = None
+    historical_pending = None
+    legacy_count = None
+    if summary is None:
         notes.append("Order intent log could not be read.")
-    elif pending:
-        notes.append(f"{pending} unconfirmed order intent(s) still pending.")
+    else:
+        current_count = int(summary["current_unresolved_intent_count"])
+        historical_pending = int(summary["historical_pending_row_count"])
+        legacy_count = int(summary["legacy_unresolved_without_client_order_id"])
+        if current_count == 1:
+            notes.append(
+                "1 order is still unconfirmed. Its latest status is pending, ambiguous, or open at the exchange."
+            )
+        elif current_count > 1:
+            notes.append(
+                f"{current_count} orders are still unconfirmed. "
+                "Their latest status is pending, ambiguous, or open at the exchange."
+            )
+        if legacy_count == 1:
+            notes.append(
+                "1 legacy activity row has no client order id. It is not counted as a current order."
+            )
+        elif legacy_count > 1:
+            notes.append(
+                f"{legacy_count} legacy activity rows have no client order id. "
+                "They are not counted as current orders."
+            )
     return {
         "status": "healthy",
         "timestamp": utc_iso_z(utc_now()),
         "version": APP_VERSION,
         "monitor_age_sec": monitor_age_sec(),
         "alerts": notes,
+        "current_unresolved_intent_count": current_count,
+        "historical_pending_row_count": historical_pending,
+        "legacy_unresolved_without_client_order_id": legacy_count,
         "outbound_alerts": False,
         "config_source": "database",
         "approved_max_open_positions": APPROVED_MAX_OPEN_POSITIONS,

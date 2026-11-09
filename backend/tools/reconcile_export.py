@@ -52,41 +52,11 @@ def _select(conn: sqlite3.Connection, table: str, wanted: list[str], suffix: str
     return _rows(conn, f"SELECT {', '.join(cols)} FROM {table} {suffix}")
 
 
-_UNRESOLVED_INTENT_STATUSES = {"pending", "ambiguous", "open_at_exchange"}
-
-
 def _latest_unresolved_intents(events: list[dict]) -> dict:
-    """Latest order status per client order id, matching the live hold.
+    """Same latest-status rule as /health and the live order hold."""
+    from src.intent_lifecycle import select_intent_lifecycle
 
-    An older pending row is not a current order once a later fill or reconcile
-    exists for that same id. Rows with no client order id are legacy history.
-    """
-    ordered = sorted(events, key=lambda row: str(row.get("ts_utc") or ""))
-    latest: dict[tuple[str, str, str], dict] = {}
-    legacy = []
-    historical_pending = 0
-    for row in ordered:
-        if row.get("event_type") not in ("order_intent", "order_ack"):
-            continue
-        status = str(row.get("order_status") or "").strip().lower()
-        if status == "pending":
-            historical_pending += 1
-        cid = str(row.get("client_order_id") or "").strip()
-        if not cid:
-            if status in _UNRESOLVED_INTENT_STATUSES:
-                legacy.append(row)
-            continue
-        key = (cid, str(row.get("market_id") or ""), str(row.get("action") or "").strip().lower())
-        latest[key] = row
-    current = [
-        row for row in latest.values()
-        if str(row.get("order_status") or "").strip().lower() in _UNRESOLVED_INTENT_STATUSES
-    ]
-    return {
-        "current": current,
-        "historical_pending_rows": historical_pending,
-        "legacy_without_client_order_id": legacy,
-    }
+    return select_intent_lifecycle(events)
 
 
 def _sum(rows: list[dict], key: str) -> float:
@@ -178,15 +148,33 @@ def audit_database(db_path: Path, *, cash_start: float | None = None, cash_end: 
             unresolved.append({"market_id": row.get("market_id"), "gap": "fill fee was not on the exchange record"})
     intent_view = _latest_unresolved_intents(events)
     current_unresolved = intent_view["current"]
-    if current_unresolved:
+    n_current = len(current_unresolved)
+    if n_current == 1:
         unresolved.append({
-            "gap": f"{len(current_unresolved)} order(s) still unresolved at their latest status",
-            "count": len(current_unresolved),
+            "gap": "1 order is still unconfirmed. Its latest status is pending, ambiguous, or open at the exchange.",
+            "count": 1,
         })
-    if intent_view["legacy_without_client_order_id"]:
+    elif n_current > 1:
         unresolved.append({
-            "gap": "legacy order rows have no client_order_id and are not counted as current orders",
-            "count": len(intent_view["legacy_without_client_order_id"]),
+            "gap": (
+                f"{n_current} orders are still unconfirmed. "
+                "Their latest status is pending, ambiguous, or open at the exchange."
+            ),
+            "count": n_current,
+        })
+    n_legacy = len(intent_view["legacy_without_client_order_id"])
+    if n_legacy == 1:
+        unresolved.append({
+            "gap": "1 legacy activity row has no client order id. It is not counted as a current order.",
+            "count": 1,
+        })
+    elif n_legacy > 1:
+        unresolved.append({
+            "gap": (
+                f"{n_legacy} legacy activity rows have no client order id. "
+                "They are not counted as current orders."
+            ),
+            "count": n_legacy,
         })
 
     realized = _sum(closed, "realized_pnl")
