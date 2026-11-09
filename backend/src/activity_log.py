@@ -27,6 +27,7 @@ logger = setup_logging("activity_log")
 _MAX_ROWS = 4000
 _PRUNE_EVERY = 25
 _HOLD_MINUTES = 30
+UNRESOLVED_ORDER_STATUSES = ("pending", "ambiguous", "open_at_exchange")
 
 _writes = 0
 _seq = 0
@@ -381,7 +382,7 @@ def fresh_unresolved_order_hold(
             if skip and cid == skip:
                 continue
             status = (row.order_status or "").strip().lower()
-            if status in ("pending", "ambiguous"):
+            if status in UNRESOLVED_ORDER_STATUSES:
                 return (
                     f"unresolved {act} ({status}) client_order_id={row.client_order_id}; "
                     "not sending another order until that id is reconciled"
@@ -428,6 +429,56 @@ def unresolved_intent(
             "event_ticker": row.event_ticker,
             "ts_utc": row.ts_utc.isoformat() if getattr(row.ts_utc, "isoformat", None) else None,
         }
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
+def list_unresolved_intents(
+    *,
+    session_factory: Optional[Callable] = None,
+    market_id: Optional[str] = None,
+    action: Optional[str] = None,
+) -> list[dict]:
+    """Newest unresolved intent for each client order id. Age does not drop a row."""
+    factory = session_factory or get_session_local()
+    db = factory()
+    try:
+        query = db.query(ActivityEvent).filter(
+            ActivityEvent.event_type.in_(("order_intent", "order_ack")),
+        )
+        if market_id:
+            query = query.filter(ActivityEvent.market_id == normalize_market_id(str(market_id)))
+        if action:
+            query = query.filter(ActivityEvent.action == str(action).strip().lower())
+        rows = query.order_by(ActivityEvent.ts_utc.desc(), ActivityEvent.seq.desc()).all()
+        seen = set()
+        out = []
+        for row in rows:
+            cid = (row.client_order_id or "").strip()
+            key = (row.market_id or "", row.action or "", cid)
+            if key in seen:
+                continue
+            seen.add(key)
+            status = (row.order_status or "").strip().lower()
+            if status not in UNRESOLVED_ORDER_STATUSES:
+                continue
+            out.append(
+                {
+                    "client_order_id": cid,
+                    "exchange_order_id": row.exchange_order_id,
+                    "market_id": row.market_id,
+                    "action": row.action,
+                    "side": row.side,
+                    "quantity": row.quantity,
+                    "limit_price": row.limit_price,
+                    "event_ticker": row.event_ticker,
+                    "order_status": status,
+                    "ts_utc": row.ts_utc,
+                }
+            )
+        return out
     except Exception:
         return None
     finally:

@@ -787,6 +787,16 @@ async def monitor_positions(
                 continue
             sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
             if sell_hold:
+                from src.bot.order_reconcile import reconcile_open_intents
+
+                await reconcile_open_intents(
+                    kalshi_client,
+                    db_factory,
+                    market_id=pos.market_id,
+                    action="sell",
+                )
+                sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
+            if sell_hold:
                 from src.ops_status import note_unresolved
 
                 note_unresolved(sell_hold)
@@ -1913,6 +1923,16 @@ async def scan_and_trade(
                                     buy_hold = fresh_unresolved_order_hold(ticker_clean, "buy")
                                     order_intent_id = None
                                     if buy_hold:
+                                        from src.bot.order_reconcile import reconcile_open_intents
+
+                                        await reconcile_open_intents(
+                                            kalshi_client,
+                                            db_factory,
+                                            market_id=ticker_clean,
+                                            action="buy",
+                                        )
+                                        buy_hold = fresh_unresolved_order_hold(ticker_clean, "buy")
+                                    if buy_hold:
                                         from src.ops_status import note_unresolved
 
                                         note_unresolved(buy_hold)
@@ -2011,11 +2031,15 @@ async def scan_and_trade(
                                                             from src.database.models import ActivityEvent
 
                                                             try:
-                                                                local_intents = db.query(ActivityEvent).filter(
-                                                                    ActivityEvent.action == "buy",
-                                                                    ActivityEvent.event_type.in_(("order_intent", "order_ack")),
-                                                                    ActivityEvent.order_status.in_(("pending", "ambiguous")),
-                                                                ).all()
+                                                                local_intents = (
+                                                                    db.query(ActivityEvent)
+                                                                    .filter(
+                                                                        ActivityEvent.action == "buy",
+                                                                        ActivityEvent.event_type.in_(("order_intent", "order_ack")),
+                                                                    )
+                                                                    .order_by(ActivityEvent.ts_utc.desc(), ActivityEvent.seq.desc())
+                                                                    .all()
+                                                                )
                                                             except Exception:
                                                                 local_intents = None
                                                             try:
@@ -2491,6 +2515,9 @@ async def run_bot_loop(
         from src.ops_status import stamp_monitor
 
         stamp_monitor()
+        from src.bot.order_reconcile import reconcile_open_intents
+
+        await reconcile_open_intents(kalshi_client, db_factory)
         logger.info(
             "Position monitor — state=%s trade_mode=%s exits=%s",
             state,

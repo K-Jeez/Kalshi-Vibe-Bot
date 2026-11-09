@@ -2256,6 +2256,76 @@ class KalshiClient:
             logger.error("Error cancelling order %s: %s", order_id, e)
             return False
 
+    async def _reconcile_pages(self, path: str, list_key: str, params: Dict[str, str], *, max_pages: int = 20) -> Dict[str, Any]:
+        """Read one documented list until the cursor is empty. A leftover cursor is unknown."""
+        rows: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        try:
+            for _ in range(max(1, max_pages)):
+                qp = {key: value for key, value in params.items() if value}
+                qp["limit"] = "200"
+                if cursor:
+                    qp["cursor"] = cursor
+                response = await self._http_get_signed(path, params=qp, timeout=20.0)
+                if response.status_code != 200:
+                    return {"state": "unknown", "rows": rows, "http_status": response.status_code}
+                data = response.json() or {}
+                batch = data.get(list_key) or []
+                if not isinstance(batch, list):
+                    return {"state": "unknown", "rows": rows}
+                rows.extend(batch)
+                cursor = str(data.get("cursor") or "").strip()
+                if not cursor:
+                    return {"state": "complete", "rows": rows}
+                if not batch:
+                    return {"state": "unknown", "rows": rows, "reason": "cursor without rows"}
+            return {"state": "unknown", "rows": rows, "reason": "pagination incomplete"}
+        except Exception:
+            return {"state": "unknown", "rows": rows}
+
+    async def _reconcile_get_order(self, order_id: str) -> Dict[str, Any]:
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        try:
+            response = await self._http_get_signed(path, timeout=12.0)
+            if response.status_code == 404:
+                return {"state": "not_found", "order": None}
+            if response.status_code != 200:
+                return {"state": "unknown", "order": None, "http_status": response.status_code}
+            data = response.json() or {}
+            order = data.get("order") if isinstance(data, dict) else None
+            if not isinstance(order, dict):
+                order = data if isinstance(data, dict) else None
+            if not isinstance(order, dict):
+                return {"state": "unknown", "order": None}
+            return {"state": "found", "order": order}
+        except Exception:
+            return {"state": "unknown", "order": None}
+
+    async def collect_reconcile_sources(self, *, ticker: str, exchange_order_id: Optional[str] = None) -> Dict[str, Any]:
+        """Live orders, historical orders, fills, and positions for one ticker.
+
+        Paths are ``GET /trade-api/v2/portfolio/orders``, ``/historical/orders``,
+        ``/portfolio/fills``, and ``/portfolio/positions``. A single order read is
+        ``GET /portfolio/orders/{order_id}`` when an exchange id is already known.
+        """
+        ticker_q = {"ticker": normalize_market_id(ticker)}
+        get_order = (
+            await self._reconcile_get_order(exchange_order_id)
+            if exchange_order_id
+            else {"state": "not_found", "order": None}
+        )
+        return {
+            "get_order": get_order,
+            "live_orders": await self._reconcile_pages("/trade-api/v2/portfolio/orders", "orders", ticker_q),
+            "historical_orders": await self._reconcile_pages("/trade-api/v2/historical/orders", "orders", ticker_q),
+            "fills": await self._reconcile_pages("/trade-api/v2/portfolio/fills", "fills", ticker_q),
+            "positions": await self._reconcile_pages(
+                "/trade-api/v2/portfolio/positions",
+                "market_positions",
+                ticker_q,
+            ),
+        }
+
     async def get_order(self, order_id: str) -> Dict[str, Any]:
         """Fetch a single order by id (authoritative fills / fees after IOC exits)."""
         path = f"/trade-api/v2/portfolio/orders/{order_id}"

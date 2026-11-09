@@ -91,3 +91,279 @@ def verdict_from_sources(
         "verdict": "not_found",
         "reason": "live orders, historical orders, and fills finished with no matching id",
     }
+
+
+VISIBILITY_LAG_SEC = 45
+
+
+def _matched_order(verdict_inputs: dict, client_order_id: str, exchange_order_id: str) -> Optional[dict]:
+    looked = verdict_inputs.get("get_order") or {}
+    if str(looked.get("state")) == "found" and _matches_order(looked.get("order") or {}, client_order_id, exchange_order_id):
+        return looked.get("order") or {}
+    for key in ("live_orders", "historical_orders"):
+        source = verdict_inputs.get(key) or {}
+        for row in source.get("rows") or []:
+            if _matches_order(row, client_order_id, exchange_order_id):
+                return row
+    return None
+
+
+async def reconcile_open_intents(
+    client,
+    session_factory,
+    *,
+    market_id: Optional[str] = None,
+    action: Optional[str] = None,
+    now=None,
+    visibility_lag_sec: float = VISIBILITY_LAG_SEC,
+) -> list[dict]:
+    """Production reconcile pass. Loads unresolved intents and reads the exchange.
+
+    ``client.collect_reconcile_sources`` performs the documented paginated reads.
+    This function does not send an order. A ``not_found`` result is applied only
+    after the visibility lag and only when all four reads finished. ``found``
+    updates ledger facts and clears the hold only when the order is terminal
+    and any whole-contract fill has been recorded once.
+    """
+    from datetime import datetime, timezone
+
+    from src.activity_log import list_unresolved_intents, mark_intent_reconciled, record_activity
+    from src.ops_status import note_unresolved
+
+    current = now or datetime.now(timezone.utc)
+    intents = list_unresolved_intents(
+        session_factory=session_factory,
+        market_id=market_id,
+        action=action,
+    )
+    if intents is None:
+        note_unresolved("Order intent log could not be read. Unconfirmed orders stay reserved.")
+        return [{"verdict": "unknown", "reason": "intent log unreadable"}]
+
+    results = []
+    for intent in intents:
+        cid = str(intent.get("client_order_id") or "")
+        oid = str(intent.get("exchange_order_id") or "")
+        ticker = str(intent.get("market_id") or "")
+        try:
+            sources = await client.collect_reconcile_sources(ticker=ticker, exchange_order_id=oid or None)
+        except Exception:
+            sources = None
+        if not isinstance(sources, dict):
+            note_unresolved(f"Reconcile read failed for {ticker or cid}. The order stays reserved.")
+            results.append({"client_order_id": cid, "verdict": "unknown", "reason": "reconcile read failed"})
+            continue
+        verdict = verdict_from_sources(
+            client_order_id=cid,
+            exchange_order_id=oid,
+            get_order=sources.get("get_order"),
+            live_orders=sources.get("live_orders"),
+            historical_orders=sources.get("historical_orders"),
+            fills=sources.get("fills"),
+            positions=sources.get("positions"),
+        )
+        if verdict["verdict"] == "not_found":
+            started = intent.get("ts_utc")
+            if started is None or not hasattr(started, "timestamp"):
+                verdict = {"verdict": "unknown", "reason": "intent has no timestamp, so absence is not definitive"}
+            else:
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                if current.tzinfo is None:
+                    current = current.replace(tzinfo=timezone.utc)
+                age = (current - started).total_seconds()
+                if age < float(visibility_lag_sec):
+                    verdict = {
+                        "verdict": "unknown",
+                        "reason": "order is inside the visibility lag, so absence is not definitive",
+                    }
+        if verdict["verdict"] == "unknown":
+            note_unresolved(
+                f"Unconfirmed {intent.get('action') or 'order'} {ticker} client_order_id={cid} stays reserved. "
+                f"{verdict.get('reason')}"
+            )
+            results.append({"client_order_id": cid, "verdict": "unknown", "reason": verdict.get("reason")})
+            continue
+        if verdict["verdict"] == "not_found":
+            mark_intent_reconciled(
+                cid,
+                market_id=ticker,
+                action=str(intent.get("action") or ""),
+                order_status="reconciled_absent",
+                session_factory=session_factory,
+                detail=verdict["reason"],
+            )
+            results.append({"client_order_id": cid, "verdict": "not_found", "reason": verdict["reason"]})
+            continue
+        applied = _apply_found_order(
+            intent,
+            sources,
+            session_factory=session_factory,
+            record_activity=record_activity,
+            mark_intent_reconciled=mark_intent_reconciled,
+        )
+        if not applied.get("ok"):
+            note_unresolved(
+                f"Matched order {ticker} client_order_id={cid} was not booked. It stays reserved. "
+                f"{applied.get('reason')}"
+            )
+            results.append({"client_order_id": cid, "verdict": "unknown", "reason": applied.get("reason")})
+            continue
+        results.append({"client_order_id": cid, "verdict": "found", **applied})
+    return results
+
+
+def _apply_found_order(intent, sources, *, session_factory, record_activity, mark_intent_reconciled) -> dict:
+    """Record a matched order once. An open remainder stays reserved."""
+    from src.fixed_point import FixedPointCountError, format_count_fp, is_whole_count, parse_fixed_point_count
+
+    cid = str(intent.get("client_order_id") or "")
+    oid = str(intent.get("exchange_order_id") or "")
+    order = _matched_order(sources, cid, oid) or {}
+    exchange_id = str(order.get("order_id") or order.get("id") or oid or "")
+    status = str(order.get("status") or "").strip().lower()
+    try:
+        filled = parse_fixed_point_count(order.get("fill_count_fp")) if order.get("fill_count_fp") not in (None, "") else parse_fixed_point_count("0")
+        remaining_raw = order.get("remaining_count_fp")
+        remaining = parse_fixed_point_count(remaining_raw) if remaining_raw not in (None, "") else parse_fixed_point_count("0")
+    except FixedPointCountError as exc:
+        return {"ok": False, "reason": f"matched order count is not fixed-point ({exc})"}
+    if not is_whole_count(filled) or not is_whole_count(remaining):
+        return {
+            "ok": False,
+            "reason": (
+                f"matched fill_count_fp={format_count_fp(filled)} "
+                f"remaining_count_fp={format_count_fp(remaining)} was not relabeled"
+            ),
+        }
+    ticker = str(intent.get("market_id") or "")
+    act = str(intent.get("action") or "")
+    side = str(intent.get("side") or order.get("side") or "")
+    if filled > 0:
+        _record_fill_once(
+            intent,
+            exchange_id=exchange_id,
+            filled=filled,
+            order=order,
+            session_factory=session_factory,
+            record_activity=record_activity,
+        )
+    terminal = status in ("canceled", "executed") and remaining == 0
+    if terminal:
+        mark_intent_reconciled(
+            cid,
+            market_id=ticker,
+            action=act,
+            order_status="reconciled_filled" if filled > 0 else "reconciled_canceled",
+            session_factory=session_factory,
+            detail=f"exchange order {exchange_id or 'unknown'} status {status or 'unknown'}",
+        )
+        return {"ok": True, "terminal": True, "filled": format_count_fp(filled), "exchange_order_id": exchange_id}
+    if status not in ("resting", "executed"):
+        return {"ok": False, "reason": f"matched order status {status or 'missing'} is not booked"}
+    record_activity(
+        {
+            "event_type": "order_ack",
+            "order_status": "open_at_exchange",
+            "market_id": ticker,
+            "action": act,
+            "side": side or None,
+            "client_order_id": cid,
+            "exchange_order_id": exchange_id or None,
+            "quantity": int(remaining) if remaining > 0 else int(intent.get("quantity") or 0),
+            "limit_price": intent.get("limit_price"),
+            "fill_count_fp": format_count_fp(filled),
+            "detail": "matched open order; remainder stays reserved",
+        },
+        session_factory=session_factory,
+    )
+    return {
+        "ok": True,
+        "terminal": False,
+        "filled": format_count_fp(filled),
+        "remaining": format_count_fp(remaining),
+        "exchange_order_id": exchange_id,
+    }
+
+
+def _record_fill_once(intent, *, exchange_id, filled, order, session_factory, record_activity) -> None:
+    from src.database.models import ActivityEvent, Position, get_session_local
+    from src.fixed_point import format_count_fp
+
+    factory = session_factory or get_session_local()
+    db = factory()
+    try:
+        cid = str(intent.get("client_order_id") or "")
+        already = (
+            db.query(ActivityEvent)
+            .filter(ActivityEvent.client_order_id == cid, ActivityEvent.event_type == "fill")
+            .count()
+        )
+    finally:
+        db.close()
+    if already:
+        return
+    ticker = str(intent.get("market_id") or "")
+    side = str(intent.get("side") or order.get("side") or "YES")
+    price = intent.get("limit_price")
+    try:
+        px = float(price or order.get("yes_price_dollars") or 0)
+    except (TypeError, ValueError):
+        px = 0.0
+    whole = int(filled)
+    record_activity(
+        {
+            "event_type": "fill",
+            "order_status": "filled",
+            "market_id": ticker,
+            "event_ticker": intent.get("event_ticker"),
+            "action": intent.get("action"),
+            "side": side,
+            "client_order_id": cid,
+            "exchange_order_id": exchange_id or None,
+            "quantity": whole,
+            "fill_qty": float(whole),
+            "fill_count_fp": format_count_fp(filled),
+            "fill_price": px or None,
+            "fee_kind": "exchange_fill" if order.get("taker_fees_dollars") not in (None, "") else "unavailable",
+            "fees_dollars": order.get("taker_fees_dollars"),
+            "detail": "reconciled fill recorded once",
+        },
+        session_factory=session_factory,
+    )
+    db = factory()
+    try:
+        from src.config import TRADE_MODE
+
+        existing = (
+            db.query(Position)
+            .filter(
+                Position.market_id == ticker,
+                Position.side == side,
+                Position.status == "open",
+                Position.trade_mode == TRADE_MODE,
+            )
+            .first()
+        )
+        if existing is None and whole >= 1 and px > 0:
+            import uuid
+
+            db.add(
+                Position(
+                    id=str(uuid.uuid4()),
+                    market_id=ticker,
+                    market_title=ticker,
+                    event_ticker=intent.get("event_ticker"),
+                    side=side,
+                    quantity=whole,
+                    entry_price=px,
+                    entry_cost=whole * px,
+                    current_price=px,
+                    fees_paid=0.0,
+                    status="open",
+                    trade_mode=TRADE_MODE,
+                )
+            )
+            db.commit()
+    finally:
+        db.close()

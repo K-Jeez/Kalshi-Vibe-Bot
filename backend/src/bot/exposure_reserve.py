@@ -78,15 +78,19 @@ def unconfirmed_buy_exposure(
     reserve = 0.0
     extra = 0
     skip_id = str(exclude_client_order_id or "").strip()
+    seen_clients: set[str] = set()
     for row in local_rows:
         status = str(_value(row, "order_status") or "").strip().lower()
         action = str(_value(row, "action") or "").strip().lower()
         event_type = str(_value(row, "event_type") or "order_intent").strip().lower()
         if event_type not in ("order_intent", "order_ack") or action != "buy":
             continue
-        if status not in ("pending", "ambiguous"):
-            continue
         cid = str(_value(row, "client_order_id") or "").strip()
+        if cid in seen_clients:
+            continue
+        seen_clients.add(cid)
+        if status not in ("pending", "ambiguous", "open_at_exchange"):
+            continue
         if skip_id and cid == skip_id:
             continue
         quantity = _value(row, "quantity")

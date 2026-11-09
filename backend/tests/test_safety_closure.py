@@ -170,6 +170,172 @@ def test_backup_is_consistent_and_does_not_overwrite_the_original(tmp_path: Path
     assert second["already_applied"] is True
 
 
+def _sources(*, orders=None, historical=None, fills=None, positions=None, get_order=None, live_state="complete", hist_state="complete", fill_state="complete", pos_state="complete"):
+    return {
+        "get_order": get_order or {"state": "not_found", "order": None},
+        "live_orders": {"state": live_state, "rows": orders or []},
+        "historical_orders": {"state": hist_state, "rows": historical or []},
+        "fills": {"state": fill_state, "rows": fills or []},
+        "positions": {"state": pos_state, "rows": positions or []},
+    }
+
+
+class _FakeExchange:
+    def __init__(self, sources):
+        self.sources = sources
+        self.calls = []
+
+    async def collect_reconcile_sources(self, *, ticker, exchange_order_id=None):
+        self.calls.append((ticker, exchange_order_id))
+        return self.sources
+
+
+def _seed_old_intent(factory, *, hours=2, quantity=2):
+    cid = persist_order_intent(
+        {
+            "market_id": "KXTEST-1",
+            "action": "buy",
+            "side": "YES",
+            "quantity": quantity,
+            "limit_price": 0.4,
+            "event_ticker": "EVT",
+        },
+        session_factory=factory,
+    )
+    db = factory()
+    from src.database.models import ActivityEvent
+
+    row = db.query(ActivityEvent).filter(ActivityEvent.client_order_id == cid).one()
+    row.ts_utc = datetime.now(timezone.utc) - timedelta(hours=hours)
+    db.commit()
+    db.close()
+    return cid
+
+
+def test_production_reconcile_clears_only_complete_absence(tmp_path: Path):
+    from src.bot.order_reconcile import reconcile_open_intents
+    from src.database.models import ActivityEvent, Position
+
+    factory = _factory(tmp_path)
+    cid = _seed_old_intent(factory)
+    exchange = _FakeExchange(_sources())
+    results = asyncio.run(reconcile_open_intents(exchange, factory, now=datetime.now(timezone.utc)))
+    assert results[0]["verdict"] == "not_found"
+    assert exchange.calls[0][0] == "KXTEST-1"
+    assert fresh_unresolved_order_hold("KXTEST-1", "buy", session_factory=factory) is None
+    restarted = _factory(tmp_path)
+    assert fresh_unresolved_order_hold("KXTEST-1", "buy", session_factory=restarted) is None
+    db = factory()
+    assert db.query(Position).count() == 0
+    assert db.query(ActivityEvent).filter(ActivityEvent.client_order_id == cid, ActivityEvent.order_status == "reconciled_absent").count() == 1
+    db.close()
+
+
+def test_production_reconcile_books_a_found_partial_once_and_keeps_the_rest(tmp_path: Path):
+    from src.bot.order_reconcile import reconcile_open_intents
+    from src.database.models import ActivityEvent, Position
+
+    factory = _factory(tmp_path)
+    cid = _seed_old_intent(factory, quantity=2)
+    order = {
+        "order_id": "ord-1",
+        "client_order_id": cid,
+        "status": "resting",
+        "side": "yes",
+        "fill_count_fp": "1.00",
+        "remaining_count_fp": "1.00",
+        "taker_fees_dollars": "0.0200",
+    }
+    exchange = _FakeExchange(_sources(orders=[order]))
+    asyncio.run(reconcile_open_intents(exchange, factory, now=datetime.now(timezone.utc)))
+    asyncio.run(reconcile_open_intents(exchange, factory, now=datetime.now(timezone.utc)))
+    assert fresh_unresolved_order_hold("KXTEST-1", "buy", session_factory=factory)
+    db = factory()
+    fills = db.query(ActivityEvent).filter(ActivityEvent.event_type == "fill", ActivityEvent.client_order_id == cid).all()
+    assert len(fills) == 1
+    assert fills[0].fill_count_fp == "1.00"
+    assert fills[0].exchange_order_id == "ord-1"
+    positions = db.query(Position).filter(Position.market_id == "KXTEST-1", Position.status == "open").all()
+    assert len(positions) == 1
+    assert positions[0].quantity == 1
+    newest = (
+        db.query(ActivityEvent)
+        .filter(ActivityEvent.client_order_id == cid, ActivityEvent.event_type == "order_ack")
+        .order_by(ActivityEvent.seq.desc())
+        .first()
+    )
+    assert newest.order_status == "open_at_exchange"
+    assert newest.quantity == 1
+    db.close()
+
+
+def test_production_reconcile_keeps_hold_when_a_read_is_incomplete(tmp_path: Path):
+    from src.bot.order_reconcile import reconcile_open_intents
+
+    factory = _factory(tmp_path)
+    _seed_old_intent(factory)
+    exchange = _FakeExchange(_sources(live_state="unknown"))
+    results = asyncio.run(reconcile_open_intents(exchange, factory, now=datetime.now(timezone.utc)))
+    assert results[0]["verdict"] == "unknown"
+    assert fresh_unresolved_order_hold("KXTEST-1", "buy", session_factory=factory)
+    (tmp_path / "young").mkdir()
+    young = _factory(tmp_path / "young")
+    cid = _seed_old_intent(young, hours=0)
+    # The seed helper moves the row two hours back when hours=0 is still "now minus 0".
+    db = young()
+    from src.database.models import ActivityEvent
+
+    row = db.query(ActivityEvent).filter(ActivityEvent.client_order_id == cid).one()
+    row.ts_utc = datetime.now(timezone.utc)
+    db.commit()
+    db.close()
+    fresh = _FakeExchange(_sources())
+    lagged = asyncio.run(reconcile_open_intents(fresh, young, now=datetime.now(timezone.utc), visibility_lag_sec=45))
+    assert lagged[0]["verdict"] == "unknown"
+    assert fresh_unresolved_order_hold("KXTEST-1", "buy", session_factory=young)
+
+
+def test_reconcile_pages_stop_when_the_cursor_remains():
+    from src.clients.kalshi_client import KalshiClient
+
+    client = KalshiClient.__new__(KalshiClient)
+    pages = {"n": 0}
+
+    async def fake_get(path, params=None, timeout=20.0):
+        pages["n"] += 1
+        resp = type("R", (), {})()
+        resp.status_code = 200
+        cursor = "" if pages["n"] >= 3 else f"c{pages['n']}"
+        resp.json = lambda: {"orders": [{"order_id": str(pages["n"])}], "cursor": cursor}
+        return resp
+
+    client._http_get_signed = fake_get
+    done = asyncio.run(
+        client._reconcile_pages("/trade-api/v2/portfolio/orders", "orders", {"ticker": "KXTEST-1"}, max_pages=5)
+    )
+    assert done["state"] == "complete"
+    assert len(done["rows"]) == 3
+    pages["n"] = 0
+
+    async def stuck(path, params=None, timeout=20.0):
+        resp = type("R", (), {})()
+        resp.status_code = 200
+        resp.json = lambda: {"fills": [{"order_id": "x"}], "cursor": "more"}
+        return resp
+
+    client._http_get_signed = stuck
+    incomplete = asyncio.run(
+        client._reconcile_pages("/trade-api/v2/portfolio/fills", "fills", {"ticker": "KXTEST-1"}, max_pages=2)
+    )
+    assert incomplete["state"] == "unknown"
+    assert incomplete["reason"] == "pagination incomplete"
+
+
+def test_monitor_and_buy_path_call_the_production_reconcile():
+    text = Path("/tmp/vibe-integrate/backend/src/bot/loop.py").read_text(encoding="utf-8")
+    assert text.count("await reconcile_open_intents(") >= 3
+
+
 def test_concurrent_buys_share_one_submission_lock():
     results = []
 
