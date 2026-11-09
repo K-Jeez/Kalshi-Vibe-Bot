@@ -238,16 +238,25 @@ def _apply_found_order(intent, sources, *, session_factory, record_activity, mar
         }
     ticker = str(intent.get("market_id") or "")
     act = str(intent.get("action") or "")
-    side = str(intent.get("side") or order.get("side") or "")
+    try:
+        from src.bot.fill_bookkeeping import normalize_order_action, normalize_order_side
+
+        act = normalize_order_action(act)
+        side = normalize_order_side(intent.get("side"), order)
+    except ValueError as exc:
+        return {"ok": False, "reason": str(exc)}
     if filled > 0:
-        _record_fill_once(
+        booked = _book_fill_delta(
             intent,
             exchange_id=exchange_id,
-            filled=filled,
+            filled=int(filled),
             order=order,
+            side=side,
+            action=act,
             session_factory=session_factory,
-            record_activity=record_activity,
         )
+        if not booked.get("ok"):
+            return booked
     terminal = status in ("canceled", "executed") and remaining == 0
     if terminal:
         mark_intent_reconciled(
@@ -286,84 +295,49 @@ def _apply_found_order(intent, sources, *, session_factory, record_activity, mar
     }
 
 
-def _record_fill_once(intent, *, exchange_id, filled, order, session_factory, record_activity) -> None:
-    from src.database.models import ActivityEvent, Position, get_session_local
-    from src.fixed_point import format_count_fp
+def _fill_price(intent: dict, order: dict, side: str) -> float:
+    if side == "NO":
+        raw = order.get("no_price_dollars") or order.get("average_fill_price")
+    else:
+        raw = order.get("yes_price_dollars") or order.get("average_fill_price")
+    if raw in (None, ""):
+        raw = intent.get("limit_price")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
 
+
+def _book_fill_delta(intent, *, exchange_id, filled, order, side, action, session_factory) -> dict:
+    from src.bot.fill_bookkeeping import apply_cumulative_fill, cumulative_exchange_fees
+    from src.database.models import get_session_local
+
+    fees, fee_kind = cumulative_exchange_fees(order)
     factory = session_factory or get_session_local()
     db = factory()
     try:
-        cid = str(intent.get("client_order_id") or "")
-        already = (
-            db.query(ActivityEvent)
-            .filter(ActivityEvent.client_order_id == cid, ActivityEvent.event_type == "fill")
-            .count()
+        result = apply_cumulative_fill(
+            db,
+            action=action,
+            side=side,
+            market_id=str(intent.get("market_id") or ""),
+            cumulative_qty=int(filled),
+            cumulative_fees=fees,
+            price=_fill_price(intent, order, side),
+            client_order_id=str(intent.get("client_order_id") or ""),
+            exchange_order_id=exchange_id,
+            event_ticker=intent.get("event_ticker"),
+            market_title=str(intent.get("market_id") or ""),
+            order=order,
+            fee_kind=fee_kind,
         )
-    finally:
-        db.close()
-    if already:
-        return
-    ticker = str(intent.get("market_id") or "")
-    side = str(intent.get("side") or order.get("side") or "YES")
-    price = intent.get("limit_price")
-    try:
-        px = float(price or order.get("yes_price_dollars") or 0)
-    except (TypeError, ValueError):
-        px = 0.0
-    whole = int(filled)
-    record_activity(
-        {
-            "event_type": "fill",
-            "order_status": "filled",
-            "market_id": ticker,
-            "event_ticker": intent.get("event_ticker"),
-            "action": intent.get("action"),
-            "side": side,
-            "client_order_id": cid,
-            "exchange_order_id": exchange_id or None,
-            "quantity": whole,
-            "fill_qty": float(whole),
-            "fill_count_fp": format_count_fp(filled),
-            "fill_price": px or None,
-            "fee_kind": "exchange_fill" if order.get("taker_fees_dollars") not in (None, "") else "unavailable",
-            "fees_dollars": order.get("taker_fees_dollars"),
-            "detail": "reconciled fill recorded once",
-        },
-        session_factory=session_factory,
-    )
-    db = factory()
-    try:
-        from src.config import TRADE_MODE
-
-        existing = (
-            db.query(Position)
-            .filter(
-                Position.market_id == ticker,
-                Position.side == side,
-                Position.status == "open",
-                Position.trade_mode == TRADE_MODE,
-            )
-            .first()
-        )
-        if existing is None and whole >= 1 and px > 0:
-            import uuid
-
-            db.add(
-                Position(
-                    id=str(uuid.uuid4()),
-                    market_id=ticker,
-                    market_title=ticker,
-                    event_ticker=intent.get("event_ticker"),
-                    side=side,
-                    quantity=whole,
-                    entry_price=px,
-                    entry_cost=whole * px,
-                    current_price=px,
-                    fees_paid=0.0,
-                    status="open",
-                    trade_mode=TRADE_MODE,
-                )
-            )
+        if result.get("ok"):
             db.commit()
+        else:
+            db.rollback()
+        return result
+    except Exception as exc:
+        db.rollback()
+        return {"ok": False, "reason": f"fill bookkeeping failed ({type(exc).__name__})"}
     finally:
         db.close()

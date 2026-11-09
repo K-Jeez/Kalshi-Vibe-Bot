@@ -939,30 +939,12 @@ async def monitor_positions(
             sold_proceeds = float(proceeds) * scale
             sold_px = float(avg_exit_px)
             exit_fees_scaled = float(kalshi_order_fees_dollars(sell_result)) * scale
-            record_activity(
-                {
-                    "event_type": "fill",
-                    "market_id": pos.market_id,
-                    "side": pos.side,
-                    "action": "sell",
-                    "quantity": int(sold_qty_trade),
-                    "fill_qty": float(filled_fp),
-                    "fill_price": float(sold_px),
-                    "fees_dollars": float(exit_fees_scaled),
-                    "fee_kind": "exchange_fill",
-                    "client_order_id": sell_result.get("client_order_id"),
-                    "exchange_order_id": sell_result.get("order_id"),
-                    "order_status": "filled",
-                    "detail": f"auto-exit {exit_reason}",
-                }
-            )
-            pos.fees_paid = float(getattr(pos, "fees_paid", 0) or 0) + exit_fees_scaled
             pos.dead_market = False
             pos.awaiting_settlement = False
             pre_qty = max(0, int(pos.quantity or 0))
             pre_entry_cost = float(pos.entry_cost or 0.0)
             pre_entry_price = float(pos.entry_price or 0.0)
-            pre_sync_fees_paid = float(getattr(pos, "fees_paid", 0) or 0.0)
+            pre_sync_fees_paid = float(getattr(pos, "fees_paid", 0) or 0.0) + float(exit_fees_scaled)
             per_contract_basis = float(cash_basis) / float(pre_qty) if pre_qty > 0 else 0.0
             sold_basis = per_contract_basis * float(sold_qty_trade)
             fill_integer = filled_fp > 1e-9 and abs(float(filled_fp) - round(float(filled_fp))) < 1e-6
@@ -1025,30 +1007,38 @@ async def monitor_positions(
                     )
                     continue
             else:
-                remaining = max(0, int(pre_qty) - int(sold_qty_trade))
-                if remaining <= 0:
-                    pos.status = "closed"
-                    pos.closed_at = utc_now()
-                    pos.exit_reason = exit_reason
-                    pos.realized_pnl = realized
-                    pos.current_price = sold_px
-                    mark_position_kalshi_flat_reconcile_pending(pos)
-                else:
-                    pos.quantity = remaining
-                    basis_removed = fifo_basis if fifo_ok else sold_basis
-                    pos.entry_cost = max(0.0, float(pos.entry_cost or 0.0) - basis_removed)
-                    pos.entry_price = (
-                        (pos.entry_cost / pos.quantity) if int(pos.quantity or 0) > 0 else pos.entry_price
-                    )
-                    logger.info(
-                        "Partial exit IOC filled: %s %s filled_fp=%.4f proceeds=%.2f remaining=%d (local fallback)",
+                from src.bot.fill_bookkeeping import apply_cumulative_fill
+
+                booked_exit = apply_cumulative_fill(
+                    db,
+                    action="sell",
+                    side=pos.side,
+                    market_id=pos.market_id,
+                    cumulative_qty=int(sold_qty_trade),
+                    cumulative_fees=float(exit_fees_scaled),
+                    price=float(sold_px),
+                    client_order_id=str(sell_result.get("client_order_id") or exit_order_id or ""),
+                    exchange_order_id=str(sell_result.get("order_id") or ""),
+                    event_ticker=getattr(pos, "event_ticker", None),
+                    exit_reason=exit_reason,
+                    order=sell_result,
+                )
+                if not booked_exit.get("ok"):
+                    logger.error(
+                        "Live exit filled but was not booked %s: %s",
                         pos.market_id,
-                        pos.side,
-                        filled_fp,
-                        sold_proceeds,
-                        pos.quantity,
+                        booked_exit.get("reason"),
                     )
                     continue
+                if not booked_exit.get("closed"):
+                    logger.info(
+                        "Partial exit booked %s remaining=%s",
+                        pos.market_id,
+                        booked_exit.get("remaining"),
+                    )
+                    continue
+                realized = booked_exit.get("realized_pnl", realized)
+                mark_position_kalshi_flat_reconcile_pending(pos)
             closed_notices.append(
                 {
                     "market_id": pos.market_id,
@@ -2246,86 +2236,36 @@ async def scan_and_trade(
                                             )
                                             scale = qty_int / float(filled) if filled > 1e-9 else 1.0
                                             buy_fees = float(kalshi_order_fees_dollars(result)) * scale
-                                            record_activity(
-                                                {
-                                                    "event_type": "fill",
-                                                    "market_id": ticker_clean,
-                                                    "event_ticker": _pos_et_val,
-                                                    "side": trade_side,
-                                                    "action": "buy",
-                                                    "quantity": qty_int,
-                                                    "fill_qty": float(filled),
-                                                    "fill_price": float(avg_px),
-                                                    "fees_dollars": buy_fees,
-                                                    "fee_kind": "exchange_fill",
-                                                    "client_order_id": order_intent_id,
-                                                    "exchange_order_id": result.get("order_id"),
-                                                    "order_status": "filled",
-                                                    "limit_price": float(ioc_limit_dollars),
-                                                }
-                                            )
-                                            fill_notional = float(kalshi_order_fill_cost_dollars(result)) * scale
-                                            if fill_notional <= 1e-12 and float(full_cost) > 1e-12:
-                                                fill_notional = max(
-                                                    0.0, float(full_cost) * scale - buy_fees
-                                                )
-                                            order_id_out = (
-                                                result.get("order_id")
-                                                or result.get("client_order_id")
-                                                or str(uuid.uuid4())
-                                            )
-                                            db.add(
-                                                Trade(
-                                                    id=order_id_out,
-                                                    market_id=ticker_clean,
-                                                    market_title=title,
-                                                    action="buy",
-                                                    side=trade_side,
-                                                    quantity=qty_int,
-                                                    price=avg_px,
-                                                    total_cost=fill_notional,
-                                                    trade_mode=TRADE_MODE,
-                                                )
-                                            )
-                                            existing_open = get_open_position(
-                                                db,
-                                                trade_mode=TRADE_MODE,
-                                                market_id=ticker_clean,
-                                                side=trade_side,
-                                            )
-                                            if not existing_open:
-                                                db.add(
-                                                    Position(
-                                                        id=str(uuid.uuid4()),
-                                                        market_id=ticker_clean,
-                                                        market_title=title,
-                                                        event_ticker=_pos_et_val,
-                                                        side=trade_side,
-                                                        quantity=qty_int,
-                                                        entry_price=avg_px,
-                                                        entry_cost=fill_notional,
-                                                        entry_decision_log_id=decision_log_row_id,
-                                                        stop_loss_drawdown_pct_at_entry=float(settings.stop_loss_drawdown_pct),
-                                                        current_price=avg_px,
-                                                        fees_paid=buy_fees,
-                                                        status="open",
-                                                        close_time=contractual_close,
-                                                        expected_expiration_time=expected_expiration_iso,
-                                                        trade_mode=TRADE_MODE,
-                                                    )
-                                                )
-                                            else:
-                                                existing_open.quantity += qty_int
-                                                existing_open.entry_cost += fill_notional
-                                                existing_open.fees_paid = float(
-                                                    getattr(existing_open, "fees_paid", 0) or 0
-                                                ) + buy_fees
-                                                if int(existing_open.quantity or 0) > 0:
-                                                    existing_open.entry_price = (
-                                                        existing_open.entry_cost / existing_open.quantity
-                                                    )
+                                            from src.bot.fill_bookkeeping import apply_cumulative_fill
 
-                                            action_taken = {
+                                            booked = apply_cumulative_fill(
+                                                db,
+                                                action="buy",
+                                                side=trade_side,
+                                                market_id=ticker_clean,
+                                                cumulative_qty=qty_int,
+                                                cumulative_fees=buy_fees,
+                                                price=float(avg_px),
+                                                client_order_id=str(order_intent_id or ""),
+                                                exchange_order_id=str(result.get("order_id") or ""),
+                                                event_ticker=_pos_et_val,
+                                                market_title=title,
+                                                order=result,
+                                                entry_decision_log_id=decision_log_row_id,
+                                                stop_loss_drawdown_pct_at_entry=float(settings.stop_loss_drawdown_pct),
+                                                close_time=contractual_close,
+                                                expected_expiration_time=expected_expiration_iso,
+                                            )
+                                            if not booked.get("ok"):
+                                                action_taken = {
+                                                    "status": "no_trade",
+                                                    "summary": f"Skipped — {booked.get('reason')}",
+                                                    "signal": signal,
+                                                }
+                                                result = {"error": booked.get("reason"), "order_not_sent": True}
+                                            else:
+                                                fill_notional = float(qty_int) * float(avg_px)
+                                                action_taken = {
                                                 "status": "partial" if qty_int < int(quantity) else "executed",
                                                 "side": trade_side,
                                                 "quantity": qty_int,
@@ -2334,11 +2274,11 @@ async def scan_and_trade(
                                                 "at": utc_iso_z(traded_at),
                                                 "execution": "ioc_limit",
                                                 "ioc_limit_dollars": round(ioc_limit_dollars, 4),
-                                            }
-                                            executed_trade = True
-                                            trade_quantity = qty_int
-                                            trade_price = avg_px
-                                            trade_cost = fill_notional + buy_fees
+                                                }
+                                                executed_trade = True
+                                                trade_quantity = qty_int
+                                                trade_price = avg_px
+                                                trade_cost = fill_notional + buy_fees
             decision["action_taken"] = action_taken
 
             _snap = {

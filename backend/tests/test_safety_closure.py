@@ -331,6 +331,191 @@ def test_reconcile_pages_stop_when_the_cursor_remains():
     assert incomplete["reason"] == "pagination incomplete"
 
 
+def _open_position(factory, *, side="YES", quantity=2, entry_price=0.40, fees=0.02, status="open", exit_reason=None):
+    from src.database.models import Position
+
+    db = factory()
+    db.add(
+        Position(
+            id="pos-1",
+            market_id="KXTEST-1",
+            market_title="Test",
+            side=side,
+            quantity=quantity,
+            entry_price=entry_price,
+            entry_cost=entry_price * quantity,
+            current_price=entry_price,
+            fees_paid=fees,
+            status=status,
+            exit_reason=exit_reason,
+            trade_mode="live",
+        )
+    )
+    db.commit()
+    db.close()
+
+
+def _sell_order(cid, *, filled, remaining, status, fees="0.0300", side="yes"):
+    return {
+        "order_id": "ord-sell",
+        "client_order_id": cid,
+        "status": status,
+        "side": side,
+        "fill_count_fp": filled,
+        "remaining_count_fp": remaining,
+        "no_price_dollars": "0.3000" if str(side).upper() == "NO" else None,
+        "yes_price_dollars": "0.3000",
+        "taker_fees_dollars": fees,
+    }
+
+
+def test_production_reconcile_sell_closes_and_does_not_sell_twice(tmp_path: Path):
+    from src.bot.order_reconcile import reconcile_open_intents
+    from src.database.models import ActivityEvent, Position
+
+    factory = _factory(tmp_path)
+    _open_position(factory, side="yes", quantity=2, fees=0.02)
+    cid = _seed_old_intent(factory, quantity=2)
+    db = factory()
+    row = db.query(ActivityEvent).filter(ActivityEvent.client_order_id == cid).one()
+    row.action = "sell"
+    row.side = "YES"
+    db.commit()
+    db.close()
+    order = _sell_order(cid, filled="2.00", remaining="0.00", status="executed", side="YES")
+    exchange = _FakeExchange(_sources(orders=[order]))
+    now = datetime.now(timezone.utc)
+    first = asyncio.run(reconcile_open_intents(exchange, factory, now=now))
+    second = asyncio.run(reconcile_open_intents(exchange, factory, now=now))
+    assert first[0]["verdict"] == "found" and first[0]["terminal"] is True
+    assert second == []
+    db = factory()
+    positions = db.query(Position).all()
+    assert len(positions) == 1
+    assert positions[0].status == "closed"
+    assert positions[0].exit_reason == "reconcile"
+    assert abs(float(positions[0].fees_paid) - 0.05) < 1e-9
+    sells = db.query(ActivityEvent).filter(ActivityEvent.action == "sell", ActivityEvent.event_type == "fill").all()
+    assert len(sells) == 1
+    assert sells[0].quantity == 2
+    db.close()
+    assert fresh_unresolved_order_hold("KXTEST-1", "sell", session_factory=_factory(tmp_path)) is None
+
+
+def test_production_reconcile_partial_sell_reduces_and_keeps_exit_reason(tmp_path: Path):
+    from src.bot.order_reconcile import reconcile_open_intents
+    from src.database.models import ActivityEvent, Position
+
+    factory = _factory(tmp_path)
+    _open_position(factory, quantity=4, entry_price=0.40, fees=0.04, exit_reason="stop_loss")
+    cid = _seed_old_intent(factory, quantity=1)
+    db = factory()
+    row = db.query(ActivityEvent).filter(ActivityEvent.client_order_id == cid).one()
+    row.action = "sell"
+    row.side = "YES"
+    db.commit()
+    db.close()
+    order = _sell_order(cid, filled="1.00", remaining="0.00", status="executed", fees="0.0100")
+    asyncio.run(
+        reconcile_open_intents(
+            _FakeExchange(_sources(orders=[order])),
+            factory,
+            now=datetime.now(timezone.utc),
+        )
+    )
+    db = factory()
+    pos = db.query(Position).one()
+    assert pos.status == "open"
+    assert pos.quantity == 3
+    assert pos.exit_reason == "stop_loss"
+    assert abs(float(pos.entry_cost) - 1.20) < 1e-9
+    assert abs(float(pos.fees_paid) - 0.05) < 1e-9
+    db.close()
+
+
+def test_production_reconcile_growing_buy_books_only_the_delta_and_the_fee(tmp_path: Path):
+    from src.bot.order_reconcile import reconcile_open_intents
+    from src.database.models import ActivityEvent, Position
+
+    factory = _factory(tmp_path)
+    cid = _seed_old_intent(factory, quantity=2)
+    first_order = {
+        "order_id": "ord-1",
+        "client_order_id": cid,
+        "status": "resting",
+        "side": "yes",
+        "fill_count_fp": "1.00",
+        "remaining_count_fp": "1.00",
+        "yes_price_dollars": "0.4000",
+        "taker_fees_dollars": "0.0200",
+    }
+    now = datetime.now(timezone.utc)
+    exchange = _FakeExchange(_sources(orders=[first_order]))
+    asyncio.run(reconcile_open_intents(exchange, factory, now=now))
+    asyncio.run(reconcile_open_intents(exchange, factory, now=now))
+    grown = dict(first_order, fill_count_fp="2.00", remaining_count_fp="0.00", status="executed", taker_fees_dollars="0.0500")
+    asyncio.run(reconcile_open_intents(_FakeExchange(_sources(orders=[grown])), factory, now=now))
+    asyncio.run(reconcile_open_intents(_FakeExchange(_sources(orders=[grown])), factory, now=now))
+    db = factory()
+    pos = db.query(Position).one()
+    assert pos.status == "open" or pos.quantity == 2
+    assert pos.quantity == 2
+    assert abs(float(pos.fees_paid) - 0.05) < 1e-9
+    assert abs(float(pos.entry_cost) - 0.80) < 1e-9
+    fills = db.query(ActivityEvent).filter(ActivityEvent.event_type == "fill").all()
+    assert sorted(row.quantity for row in fills) == [1, 1]
+    assert abs(sum(float(row.fees_dollars or 0) for row in fills) - 0.05) < 1e-9
+    db.close()
+
+
+def test_production_reconcile_sell_does_not_invent_a_position(tmp_path: Path):
+    from src.bot.order_reconcile import reconcile_open_intents
+    from src.database.models import Position
+
+    factory = _factory(tmp_path)
+    cid = _seed_old_intent(factory, quantity=1)
+    db = factory()
+    from src.database.models import ActivityEvent
+
+    row = db.query(ActivityEvent).filter(ActivityEvent.client_order_id == cid).one()
+    row.action = "sell"
+    row.side = "no"
+    db.commit()
+    db.close()
+    order = _sell_order(cid, filled="1.00", remaining="0.00", status="executed", side="NO")
+    result = asyncio.run(
+        reconcile_open_intents(_FakeExchange(_sources(orders=[order])), factory, now=datetime.now(timezone.utc))
+    )
+    assert result[0]["verdict"] == "unknown"
+    assert fresh_unresolved_order_hold("KXTEST-1", "sell", session_factory=factory)
+    db = factory()
+    assert db.query(Position).count() == 0
+    db.close()
+
+    (tmp_path / "closed").mkdir()
+    closed = _factory(tmp_path / "closed")
+    _open_position(closed, side="YES", status="closed", exit_reason="stop_loss")
+    cid2 = _seed_old_intent(closed, quantity=1)
+    db = closed()
+    row = db.query(ActivityEvent).filter(ActivityEvent.client_order_id == cid2).one()
+    row.action = "sell"
+    row.side = "yes"
+    db.commit()
+    db.close()
+    again = asyncio.run(
+        reconcile_open_intents(
+            _FakeExchange(_sources(orders=[_sell_order(cid2, filled="1.00", remaining="0.00", status="executed", side="yes")])),
+            closed,
+            now=datetime.now(timezone.utc),
+        )
+    )
+    assert again[0]["verdict"] == "unknown"
+    db = closed()
+    rows = db.query(Position).all()
+    assert len(rows) == 1 and rows[0].status == "closed" and rows[0].exit_reason == "stop_loss"
+    db.close()
+
+
 def test_monitor_and_buy_path_call_the_production_reconcile():
     text = Path("/tmp/vibe-integrate/backend/src/bot/loop.py").read_text(encoding="utf-8")
     assert text.count("await reconcile_open_intents(") >= 3
