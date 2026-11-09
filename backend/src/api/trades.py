@@ -2,6 +2,9 @@
 
 import math
 import uuid
+from datetime import timezone
+from zoneinfo import ZoneInfo
+
 from src.util.datetimes import utc_iso_z, utc_now
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +19,16 @@ from src.logger import logger
 from src.reconcile.open_positions import get_open_position, normalize_market_id
 
 router = APIRouter(tags=["trades"])
+DENVER = ZoneInfo("America/Denver")
+
+
+def denver_close_date(ts):
+    """Calendar date in America/Denver. Naive timestamps are treated as UTC."""
+    if ts is None:
+        return None
+    if getattr(ts, "tzinfo", None) is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(DENVER).date()
 
 
 @router.post("/trade")
@@ -251,26 +264,29 @@ async def get_performance_stats(db: Session = Depends(get_db)):
         win_rate = (wins / closed_n * 100) if closed_n > 0 else 0.0
         total_invested = sum(t.total_cost for t in buys)
 
-        # Cumulative realized P&L by calendar day (UTC), aligned with closed Position rows.
+        # Incremental realized P&L by America/Denver calendar day.
+        # A close at 5:33pm MST on Nov 8 is still Nov 8 in Denver, not the next UTC date.
         by_day: dict = {}
         for p in closed_positions:
-            ts = p.closed_at
-            if ts is None:
-                continue
             try:
-                day_key = ts.date() if hasattr(ts, "date") else ts
+                day_key = denver_close_date(p.closed_at)
             except Exception:
+                day_key = None
+            if day_key is None:
                 continue
             by_day[day_key] = by_day.get(day_key, 0.0) + _rp(p)
 
         cum = 0.0
         daily_pnl: list = []
         for day_key in sorted(by_day.keys()):
-            cum += by_day[day_key]
+            day_pnl = by_day[day_key]
+            cum += day_pnl
             daily_pnl.append(
                 {
                     "date": day_key.strftime("%b %d, %Y") if hasattr(day_key, "strftime") else str(day_key),
-                    "pnl": round(cum, 2),
+                    "pnl": round(day_pnl, 2),
+                    "cumulative": round(cum, 2),
+                    "timezone": "America/Denver",
                 }
             )
         if not daily_pnl and closed_n > 0:

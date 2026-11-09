@@ -1778,10 +1778,14 @@ class KalshiClient:
 
                 fee_total = float(avg_fee) * float(filled_fp) if (avg_fee > 0 and filled_fp > 0) else 0.0
 
+                resting = "open"
+                if tif == "immediate_or_cancel" and filled_fp <= 0:
+                    # An IOC that did not trade is canceled. Remaining size is not a live order.
+                    resting = "canceled"
                 out: Dict[str, Any] = {
                     "order_id": data.get("order_id"),
                     "client_order_id": cid,
-                    "status": "executed" if filled_fp > 0 else "open",
+                    "status": "executed" if filled_fp > 0 else resting,
                     "action": act_lo,
                     "side": str(side_yesno).lower(),
                     "fill_count_fp": data.get("fill_count"),

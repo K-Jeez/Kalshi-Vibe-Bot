@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from src.clients.kalshi_client import executable_buy_best_ask_dollars
 from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side, max_whole_contracts_for_cash
 
 # Upper/lower bounds applied after user min edge / min AI (Settings + .env).
@@ -78,6 +79,21 @@ def kelly_contract_cap_for_bankroll(bankroll: float, per_contract_premium: float
     if pct_cap < 1:
         return 0
     return min(pct_cap, cash_cap)
+
+
+def either_side_can_buy_one_capped_contract(market: dict, bankroll: float) -> bool:
+    """True when YES or NO can buy one contract under the existing 5% cash cap.
+
+    Uses the native ask only. A missing ask is not replaced with the mid price.
+    Model probability is not used. The 5% figure is the existing cap, not a new one.
+    """
+    for side in ("YES", "NO"):
+        ask = executable_buy_best_ask_dollars(market, side)
+        if ask is None:
+            continue
+        if kelly_contract_cap_for_bankroll(float(bankroll), float(ask)) >= 1:
+            return True
+    return False
 
 
 def autonomous_buy_gate_failure(

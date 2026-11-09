@@ -162,6 +162,10 @@ export interface XAIAnalysis {
 export type AnalysisActionTaken =
   | { status: 'skipped'; summary?: string; reason?: string }
   | { status: 'no_trade'; summary?: string; reason?: string; signal?: string }
+  | { status: 'rejected'; summary?: string; signal?: string; error_class?: string }
+  | { status: 'zero_fill'; summary?: string; signal?: string; filled_fp?: number }
+  | { status: 'fractional_fill'; summary?: string; signal?: string; filled_fp?: number }
+  | { status: 'partial'; side?: string; summary?: string; signal?: string }
   | { status: 'executed'; side: string; quantity: number; price: number; cost: number; at: string }
 
 export interface DecisionAnalysis {

@@ -53,6 +53,7 @@ from src.decision_engine.strategy_gates import (
     effective_min_edge_for_market,
     effective_scan_min_volume,
     exit_grace_minutes_for_market,
+    either_side_can_buy_one_capped_contract,
     kelly_contract_cap_for_bankroll,
 )
 from src.decision_engine.strategy_math import (
@@ -62,6 +63,9 @@ from src.decision_engine.strategy_math import (
     kelly_contracts_for_order,
     kelly_order_skip_summary,
 )
+from src.bot.order_outcome import buy_fill_status, classify_routing_error
+from src.bot.routing_cooldown import note_untradeable, untradeable_reason
+from src.bot.supervision import market_execution_lock, run_parallel_cycles
 from src.bot.event_batch_partition import (
     LINE_LADDER_MAX_LEGS_FOR_XAI,
     group_markets_by_event_batch_partition,
@@ -789,12 +793,13 @@ async def monitor_positions(
                     "detail": f"auto-exit {exit_reason}",
                 }
             )
-            sell_result = await kalshi_client.place_sell_market(
-                pos.market_id,
-                pos.side,
-                sell_n,
-                before_submit=sell_gate,
-            )
+            async with market_execution_lock(str(pos.market_id or "")):
+                sell_result = await kalshi_client.place_sell_market(
+                    pos.market_id,
+                    pos.side,
+                    sell_n,
+                    before_submit=sell_gate,
+                )
             record_order_ack(
                 sell_result,
                 {
@@ -1379,6 +1384,23 @@ async def scan_and_trade(
             decision: Dict[str, Any]
 
             if unit_kind == "batch" and et_key:
+                if not any(either_side_can_buy_one_capped_contract(m, balance) for m in members):
+                    logger.info(
+                        "Skip model for event %s — neither side of any listed leg can buy "
+                        "one contract under the existing cash cap",
+                        et_key,
+                    )
+                    for xm in members:
+                        batch_completed_this_sweep.add(str(xm.get("id") or ""))
+                    continue
+                held_route = None
+                for m in members:
+                    held_route = untradeable_reason(str(m.get("id") or ""))
+                    if held_route:
+                        break
+                if held_route:
+                    logger.info("Skip model for event %s — recent routing rejection (%s)", et_key, held_route)
+                    continue
                 ev_display = ""
                 try:
                     ev_display = (await kalshi_client.get_event_title(et_key)) or ""
@@ -1480,6 +1502,16 @@ async def scan_and_trade(
                         ticker,
                         allowed_market_id_by_event.get(et_single),
                     )
+                    continue
+                if not either_side_can_buy_one_capped_contract(market, balance):
+                    logger.info(
+                        "Skip model %s — neither side can buy one contract under the existing cash cap",
+                        ticker,
+                    )
+                    continue
+                route_hold = untradeable_reason(str(ticker))
+                if route_hold:
+                    logger.info("Skip model %s — recent routing rejection (%s)", ticker, route_hold)
                     continue
 
                 try:
@@ -1819,13 +1851,14 @@ async def scan_and_trade(
                                                 "signal": signal,
                                             }
                                     if order_intent_id:
-                                        result = await kalshi_client.place_buy_ioc_limit(
-                                            ticker,
-                                            trade_side,
-                                            quantity,
-                                            ioc_limit_dollars,
-                                            client_order_id=order_intent_id,
-                                        )
+                                        async with market_execution_lock(ticker_clean):
+                                            result = await kalshi_client.place_buy_ioc_limit(
+                                                ticker,
+                                                trade_side,
+                                                quantity,
+                                                ioc_limit_dollars,
+                                                client_order_id=order_intent_id,
+                                            )
                                         record_order_ack(
                                             result,
                                             {
@@ -1855,15 +1888,46 @@ async def scan_and_trade(
                                             trade_side,
                                             result["error"],
                                         )
+                                        route_kind = classify_routing_error(
+                                            str(result.get("error") or ""),
+                                            result.get("status_code"),
+                                        )
+                                        if route_kind == "exchange_shard_user":
+                                            note_untradeable(ticker_clean, route_kind)
+                                            logger.error(
+                                                "Order rejected %s %s class=%s http=%s "
+                                                "exchange_index=omitted ticker_field=ticker detail=%s",
+                                                ticker,
+                                                trade_side,
+                                                route_kind,
+                                                result.get("status_code"),
+                                                result.get("error"),
+                                            )
                                         action_taken = {
-                                            "status": "no_trade",
+                                            "status": "rejected",
                                             "summary": f"Kalshi error: {result['error']}",
                                             "signal": signal,
+                                            "error_class": route_kind,
                                         }
                                     else:
                                         filled = kalshi_order_filled_contracts(result)
                                         qty_int = max(0, int(math.floor(float(filled) + 1e-9)))
                                         if qty_int < 1:
+                                            fill_state = buy_fill_status(
+                                                filled=filled,
+                                                requested=int(quantity),
+                                                time_in_force="immediate_or_cancel",
+                                            )
+                                            if fill_state == "fractional_fill":
+                                                summary = (
+                                                    f"Exchange fill {filled:.4f} is below one whole contract; "
+                                                    "no position recorded"
+                                                )
+                                            else:
+                                                summary = (
+                                                    "Exchange fill was zero. An immediate-or-cancel order "
+                                                    "does not leave a resting remainder"
+                                                )
                                             logger.warning(
                                                 "Live buy had no whole-contract fill — %s %s filled_fp=%.6f status=%s",
                                                 ticker,
@@ -1872,10 +1936,11 @@ async def scan_and_trade(
                                                 result.get("status"),
                                             )
                                             action_taken = {
-                                                "status": "no_trade",
-                                                "summary": "Fill was fractional or empty; no whole-contract position recorded",
+                                                "status": fill_state,
+                                                "summary": summary,
                                                 "signal": signal,
                                                 "kalshi_status": result.get("status"),
+                                                "filled_fp": filled,
                                             }
                                         else:
                                             if qty_int < quantity:
@@ -1972,7 +2037,7 @@ async def scan_and_trade(
                                                     )
 
                                             action_taken = {
-                                                "status": "executed",
+                                                "status": "partial" if qty_int < int(quantity) else "executed",
                                                 "side": trade_side,
                                                 "quantity": qty_int,
                                                 "price": avg_px,
@@ -2140,74 +2205,80 @@ async def run_bot_loop(
     broadcast_fn: Callable[[dict], Coroutine],
     settings,
 ):
-    """Long-running background coroutine that drives the autonomous trading bot."""
-    logger.info("Bot loop started (scan_interval=%ds)", settings.bot_scan_interval)
+    """Position checks and the market scan run as two tasks.
+
+    A slow scan no longer delays stop-loss monitoring. Stop still disables
+    automatic exits. Pause still allows them. New buys still require Play.
+    """
+    logger.info("Bot loop started (scan_interval=%ds, monitor separate)", settings.bot_scan_interval)
     from src.api.tuning import sync_runtime_from_db
 
-    while True:
+    stop = asyncio.Event()
+
+    async def _monitor_once() -> None:
+        db_tune = db_factory()
         try:
-            await asyncio.sleep(settings.bot_scan_interval)
+            sync_runtime_from_db(db_tune)
+        finally:
+            db_tune.close()
+        state = get_bot_state_str(db_factory)
+        logger.info(
+            "Position monitor — state=%s trade_mode=%s exits=%s",
+            state,
+            TRADE_MODE,
+            "on" if state != "stop" else "off",
+        )
+        await monitor_positions(
+            kalshi_client,
+            db_factory,
+            broadcast_fn,
+            settings,
+            allow_exits=(state != "stop"),
+            bot_state_label=state,
+        )
+        await _maybe_auto_refresh_closed_resolution(
+            kalshi_client,
+            db_factory,
+            broadcast_fn,
+            settings,
+        )
 
-            db_tune = db_factory()
-            try:
-                sync_runtime_from_db(db_tune)
-            finally:
-                db_tune.close()
-
-            state = get_bot_state_str(db_factory)
-            logger.info(
-                "Bot cycle — state=%s trade_mode=%s (next: positions then scan if play)",
-                state,
-                TRADE_MODE,
-            )
-
-            # Always refresh open positions. When stopped, do not auto-exit.
-            await monitor_positions(
-                kalshi_client,
-                db_factory,
-                broadcast_fn,
-                settings,
-                allow_exits=(state != "stop"),
-                bot_state_label=state,
-            )
-
-            await _maybe_auto_refresh_closed_resolution(
-                kalshi_client,
-                db_factory,
-                broadcast_fn,
-                settings,
-            )
-
-            if state == "stop":
-                continue
-
-            if state == "pause":
-                continue
-
-            # Play mode: full scan + trade
-            scan_timeout = int(getattr(settings, "bot_loop_scan_timeout_sec", 0) or 0)
+    async def _scan_once() -> None:
+        state = get_bot_state_str(db_factory)
+        if state != "play":
+            return
+        scan_timeout = int(getattr(settings, "bot_loop_scan_timeout_sec", 0) or 0)
+        try:
             if scan_timeout > 0:
-                try:
-                    await asyncio.wait_for(
-                        scan_and_trade(
-                            kalshi_client, decision_engine, db_factory, broadcast_fn, settings
-                        ),
-                        timeout=float(scan_timeout),
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(
-                        "scan_and_trade exceeded bot_loop_scan_timeout_sec=%ss — aborting this sweep; "
-                        "next cycle will retry. Raise timeout or reduce scan universe if this repeats.",
-                        scan_timeout,
-                    )
+                await asyncio.wait_for(
+                    scan_and_trade(
+                        kalshi_client, decision_engine, db_factory, broadcast_fn, settings
+                    ),
+                    timeout=float(scan_timeout),
+                )
             else:
                 await scan_and_trade(
                     kalshi_client, decision_engine, db_factory, broadcast_fn, settings
                 )
-
+        except asyncio.TimeoutError:
+            logger.error(
+                "scan_and_trade exceeded bot_loop_scan_timeout_sec=%ss — this sweep stopped; "
+                "position monitoring continues",
+                scan_timeout,
+            )
         except asyncio.CancelledError:
-            logger.info("Bot loop cancelled")
-            break
+            raise
         except Exception as e:
-            logger.error("Unhandled error in bot loop: %s", e)
-            await asyncio.sleep(10)
+            logger.error("Unhandled error in scan task: %s", e)
+
+    try:
+        await run_parallel_cycles(
+            _monitor_once,
+            _scan_once,
+            stop,
+            float(settings.bot_scan_interval),
+        )
+    except asyncio.CancelledError:
+        stop.set()
+        logger.info("Bot loop cancelled")
+        raise

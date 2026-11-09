@@ -61,15 +61,28 @@ export function formatDecisionBadge(d: DecisionAnalysis['decision']): string {
  */
 export function effectiveAnalysisBadgeDecision(a: DecisionAnalysis): DecisionAnalysis['decision'] {
   const at = a.action_taken
-  if (at?.status === 'executed') {
+  if (at?.status === 'executed' || at?.status === 'partial') {
     const side = String(at.side || '').toUpperCase()
     if (side === 'YES') return 'BUY_YES'
     if (side === 'NO') return 'BUY_NO'
   }
-  if (at?.status === 'skipped' || at?.status === 'no_trade') {
+  if (at?.status === 'skipped') {
     return 'SKIP'
   }
   return a.decision
+}
+
+/** Execution result shown beside the model decision. A rejected buy is not a model SKIP. */
+export function executionResultLabel(a: DecisionAnalysis): string {
+  const status = a.action_taken?.status
+  if (status === 'rejected') return 'Order rejected'
+  if (status === 'zero_fill') return 'Zero fill'
+  if (status === 'fractional_fill') return 'Below 1 contract'
+  if (status === 'partial') return 'Partial fill'
+  if (status === 'executed') return 'Filled'
+  if (status === 'no_trade') return 'Not sent'
+  if (status === 'skipped' || a.decision === 'SKIP') return 'Model skip'
+  return ''
 }
 
 export function formatVolumeContracts(v: number | undefined): string {
@@ -209,6 +222,7 @@ export const AnalysisDetailBody: React.FC<{
 }> = ({ a }) => {
   const [ctxOpen, setCtxOpen] = React.useState(false)
   const badgeDecision = effectiveAnalysisBadgeDecision(a)
+  const executionLabel = executionResultLabel(a)
   const badgeYes = badgeDecision === 'BUY_YES'
   const badgeNo = badgeDecision === 'BUY_NO'
 
@@ -241,12 +255,20 @@ export const AnalysisDetailBody: React.FC<{
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-white leading-snug">{a.market_title}</p>
+          {a.market_id ? (
+            <p className="text-[10px] text-white/55 font-mono truncate">{a.market_id}</p>
+          ) : null}
           <AnalysisMarketSnapshot a={a} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {analysisProvider ? <AiProviderLogo className="h-9 w-9" /> : null}
-          <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
-            {formatDecisionBadge(badgeDecision)}
+          <span className="flex flex-col items-end gap-0.5">
+            <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
+              {formatDecisionBadge(badgeDecision)}
+            </span>
+            {executionLabel ? (
+              <span className="text-[10px] text-white/70">{executionLabel}</span>
+            ) : null}
           </span>
         </div>
       </div>

@@ -268,7 +268,9 @@ async def _close_open_position_from_settlement_realized(
 
     pos.status = "closed"
     pos.closed_at = utc_now()
-    pos.exit_reason = "settlement"
+    # A stop or manual sale already recorded why the position closed.
+    if not str(getattr(pos, "exit_reason", "") or "").strip():
+        pos.exit_reason = "settlement"
     pos.realized_pnl = rp
     try:
         from src.activity_log import record_activity
