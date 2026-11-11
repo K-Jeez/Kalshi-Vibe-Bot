@@ -216,38 +216,52 @@ async def finalize_live_closed_positions_from_kalshi(
             db.add(pos)
 
         mid = normalize_market_id(pos.market_id).upper()
-        for s in settlement_rows or []:
-            tkr = normalize_market_id((s.get("ticker") or "")).strip().upper()
-            if tkr != mid:
-                continue
-            if not position_matches_settlement_row(pos, s, relax_quantity=True):
-                continue
-            auth = authoritative_realized_pnl_from_settlement_row(pos, s)
-            if auth is None:
-                auth = estimate_realized_pnl_from_settlement_row(pos, s)
-            if auth is None:
-                continue
-            pos.realized_pnl = float(auth)
-            pos.kalshi_flat_reconcile_pending = False
-            pos.kalshi_closure_finalized = True
-            ex = _find_exit_trade_for_position(db, pos)
-            if ex:
-                ex.realized_pnl = float(auth)
-                db.add(ex)
-            finalized = True
-            n += 1
-            logger.info(
-                "Closed position finalized from Kalshi settlement row %s %s realized=%.4f",
-                pos.market_id,
-                pos.side,
-                float(auth),
-            )
-            break
+        from src.reconcile.realized_cashflow import closed_by_our_sell
+
+        sold_already = closed_by_our_sell(
+            pos.exit_reason,
+            _find_exit_trade_for_position(db, pos) is not None,
+        )
+        if sold_already:
+            # A stop or other sell is the cash flow. Do not rebook it as a
+            # hold-to-settlement, which drops the sale and can flip the sign.
+            pass
+        else:
+            for s in settlement_rows or []:
+                tkr = normalize_market_id((s.get("ticker") or "")).strip().upper()
+                if tkr != mid:
+                    continue
+                if not position_matches_settlement_row(pos, s, relax_quantity=True):
+                    continue
+                auth = authoritative_realized_pnl_from_settlement_row(pos, s)
+                if auth is None:
+                    auth = estimate_realized_pnl_from_settlement_row(pos, s)
+                if auth is None:
+                    continue
+                pos.realized_pnl = float(auth)
+                pos.kalshi_flat_reconcile_pending = False
+                pos.kalshi_closure_finalized = True
+                ex = _find_exit_trade_for_position(db, pos)
+                if ex:
+                    ex.realized_pnl = float(auth)
+                    db.add(ex)
+                finalized = True
+                n += 1
+                logger.info(
+                    "Closed position finalized from Kalshi settlement row %s %s realized=%.4f",
+                    pos.market_id,
+                    pos.side,
+                    float(auth),
+                )
+                break
 
         if finalized:
             continue
 
-        s_latest = settlements_latest_by_ticker(settlement_rows or []).get(mid)
+        if sold_already:
+            s_latest = None
+        else:
+            s_latest = settlements_latest_by_ticker(settlement_rows or []).get(mid)
         if s_latest is not None:
             est = estimate_realized_pnl_from_settlement_row(pos, s_latest)
             if est is not None:

@@ -16,6 +16,9 @@ from urllib.parse import unquote, urlparse
 
 POLICY_ID = "approved_bundle_2026_11_09_v2"
 GATES_POLICY_ID = "approved_gates_2026_11_09_v1"
+DEFAULTS_POLICY_ID = "operator_defaults_2026_11_11_v1"
+OPERATOR_MIN_EDGE = 4
+OPERATOR_MIN_AI_WIN_PROB = 55
 OLD_MAX_OPEN = 30
 NEW_MAX_OPEN = 12
 APPROVED_MIN_EDGE = 5
@@ -198,6 +201,31 @@ def migrate_sqlite_file(path: Path, *, backup: bool = True) -> dict:
         if not already_gates:
             gates = _apply_approved_gates(conn)
             conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (GATES_POLICY_ID,))
+        already_defaults = conn.execute(
+            "SELECT 1 FROM _bot_patches WHERE id = ?",
+            (DEFAULTS_POLICY_ID,),
+        ).fetchone()
+        defaults_updated = 0
+        if not already_defaults:
+            try:
+                defaults_updated = conn.execute(
+                    """
+                    UPDATE tuning_state
+                       SET min_edge_to_buy_pct = ?,
+                           min_ai_win_prob_buy_side_pct = ?
+                     WHERE min_edge_to_buy_pct = ?
+                       AND min_ai_win_prob_buy_side_pct = ?
+                    """,
+                    (
+                        OPERATOR_MIN_EDGE,
+                        OPERATOR_MIN_AI_WIN_PROB,
+                        APPROVED_MIN_EDGE,
+                        APPROVED_MIN_AI_WIN_PROB,
+                    ),
+                ).rowcount
+            except sqlite3.OperationalError:
+                defaults_updated = 0
+            conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (DEFAULTS_POLICY_ID,))
         conn.commit()
         return {
             "ok": True,
@@ -222,6 +250,8 @@ def migrate_sqlite_file(path: Path, *, backup: bool = True) -> dict:
             "original_pre_bundle_backup_preserved": original_backup.is_file(),
             "policy_id": POLICY_ID,
             "gates_policy_id": GATES_POLICY_ID,
+            "defaults_policy_id": DEFAULTS_POLICY_ID,
+            "defaults_rows_updated": int(defaults_updated or 0),
         }
     finally:
         conn.close()

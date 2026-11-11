@@ -247,8 +247,9 @@ export const Performance: React.FC = () => {
         <div>
           <h2 className="text-base font-semibold text-white">Closed positions</h2>
           <p className="text-xs text-white mt-0.5">
-            Kalshi-style: Entry / Exit are avg $/contract from fills. Invested $ = open notional + buy fees + sell
-            fees. Net realized = (qty × exit) − invested. % vs invested; hover for vs $1/contract par.
+            Entry / Exit are the average fill price per contract. Invested $ is cash spent
+            (entry premium plus buy fees plus sell fees), not the current mark and not a settlement payout.
+            Net realized = (qty × exit) − that cash spent.
           </p>
         </div>
         <ClosedPositionsTable

@@ -284,12 +284,30 @@ def _norm_name(text: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _strip_market_suffix(side: str) -> str:
+    """Drop a spread or total glued onto a team name. The team text itself stays exact."""
+    text = side.split(":")[0]
+    text = re.split(r"\s+[-–]\s*\d", text, maxsplit=1)[0]
+    text = re.sub(
+        r"\s+\b(?:over|under|o/u|total|spread|games|points|sets|goals|runs|corners)\b.*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s+[+-]?\d+(?:\.\d+)?\s*$", "", text)
+    return text.strip()
+
+
 def _split_kalshi_matchup(title: str) -> Optional[tuple[str, str]]:
-    """Split on Kalshi's ``vs`` separator only. ``at`` can be part of a school name."""
+    """Split on Kalshi's ``vs`` separator only. ``at`` can be part of a school name.
+
+    Spread and total wording after the names is removed. What remains must still
+    equal a team exactly. An empty side fails closed.
+    """
     parts = re.split(r"\s+vs\.?\s+", title.strip(), maxsplit=1, flags=re.IGNORECASE)
     if len(parts) != 2:
         return None
-    left, right = _norm_name(parts[0]), _norm_name(parts[1])
+    left, right = _norm_name(_strip_market_suffix(parts[0])), _norm_name(_strip_market_suffix(parts[1]))
     if not left or not right or left == right:
         return None
     return left, right

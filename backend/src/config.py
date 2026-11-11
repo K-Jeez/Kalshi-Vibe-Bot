@@ -13,8 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Single source for tuning fallbacks (SQLite NULL / missing ORM attr); keep in sync with ``Settings`` field defaults below.
-DEFAULT_MIN_EDGE_TO_BUY_PCT = 5
-DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
+DEFAULT_MIN_EDGE_TO_BUY_PCT = 4
+DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 55
 DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.80
 APPROVED_MAX_OPEN_POSITIONS = 12
 DEFAULT_MAX_OPEN_POSITIONS = APPROVED_MAX_OPEN_POSITIONS

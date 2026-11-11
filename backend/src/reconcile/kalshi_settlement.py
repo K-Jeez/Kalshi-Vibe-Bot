@@ -268,7 +268,29 @@ async def _close_open_position_from_settlement_realized(
             or settlement_row.get("fees_paid_dollars")
             or settlement_row.get("fees_paid")
         )
-    pos.fees_paid = float(getattr(pos, "fees_paid", 0) or 0) + extra_fees
+    from src.reconcile.realized_cashflow import closed_by_our_sell, fees_without_double_count
+
+    has_sell = (
+        db.query(Trade)
+        .filter(Trade.market_id == pos.market_id, Trade.action == "sell", Trade.trade_mode == trade_mode)
+        .first()
+        is not None
+    )
+    if closed_by_our_sell(getattr(pos, "exit_reason", None), has_sell):
+        stamp_kalshi_resolution_from_settlement_row(pos, settlement_row)
+        pos.kalshi_flat_reconcile_pending = False
+        pos.kalshi_closure_finalized = True
+        if (pos.status or "") == "open":
+            pos.status = "closed"
+            if getattr(pos, "closed_at", None) is None:
+                pos.closed_at = utc_now()
+        try:
+            db.commit()
+        except OperationalError:
+            db.rollback()
+            raise
+        return
+    pos.fees_paid = fees_without_double_count(float(getattr(pos, "fees_paid", 0) or 0), extra_fees)
 
     stamp_kalshi_resolution_from_settlement_row(pos, settlement_row)
 

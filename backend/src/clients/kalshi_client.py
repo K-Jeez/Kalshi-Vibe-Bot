@@ -1881,18 +1881,30 @@ class KalshiClient:
         time_in_force: str = "immediate_or_cancel",
         client_order_id: Optional[str] = None,
         exchange_index: Optional[int] = None,
+        count_fp: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create order using Kalshi recommended V2 endpoint (quantity + price + TIF).
 
         Uses ``POST /trade-api/v2/portfolio/events/orders``. Returns a dict shaped like the legacy
         ``order`` object for downstream helpers (fill_count_fp, remaining_count_fp, average_fill_price*).
         """
-        from src.fixed_point import FixedPointCountError, require_whole_submit_count
+        from src.fixed_point import FixedPointCountError, format_count_fp, parse_fixed_point_count, require_whole_submit_count
 
-        try:
-            q = require_whole_submit_count(quantity)
-        except FixedPointCountError as exc:
-            return {"error": str(exc)}
+        if count_fp is not None:
+            try:
+                parsed = parse_fixed_point_count(str(count_fp))
+            except FixedPointCountError as exc:
+                return {"error": str(exc)}
+            if parsed <= 0:
+                return {"error": "count must be positive"}
+            q = parsed
+            count_text = format_count_fp(parsed)
+        else:
+            try:
+                q = require_whole_submit_count(quantity)
+            except FixedPointCountError as exc:
+                return {"error": str(exc)}
+            count_text = _count_fp_str(q)
 
         book_side, yes_px_raw = _v2_book_side_and_yes_price(action, side_yesno, float(limit_price_dollars))
         # Quantize to 1¢ increments (Kalshi binary tick) to avoid server "precision" rejections.
@@ -1917,7 +1929,7 @@ class KalshiClient:
                 "ticker": t_eff,
                 "client_order_id": cid,
                 "side": book_side,  # bid/ask (YES leg)
-                "count": _count_fp_str(q),
+                "count": count_text,
                 "price": _fp_dollars_str(yes_px, places=4),
                 "time_in_force": tif,
                 "self_trade_prevention_type": "taker_at_cross",
@@ -2177,13 +2189,11 @@ class KalshiClient:
         client_order_id: Optional[str] = None,
         exchange_index: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Aggressive **limit** buy with ``immediate_or_cancel`` (IOC).
+        """Whole-contract **fill-or-kill** limit buy.
 
-        Fills **up to** ``quantity`` whole contracts at or better than the limit; unfilled size is
-        canceled (no resting remainder). Partial fills are recorded via ``fill_count`` / helpers.
-
-        Kalshi ``count`` is a **positive integer** (whole contracts). This bot does not request
-        fractional contract counts on fractional-enabled markets.
+        The order fills the full count or none of it. A fractional resting offer cannot
+        leave a 0.01 contract behind the way immediate-or-cancel can. Kalshi ``count``
+        is a positive integer. This bot does not request a fractional count.
         """
         q = int(quantity)
         if q < 1:
@@ -2195,13 +2205,37 @@ class KalshiClient:
             quantity=q,
             limit_price_dollars=float(limit_price_dollars),
             reduce_only=False,
-            time_in_force="immediate_or_cancel",
+            time_in_force="fill_or_kill",
             client_order_id=client_order_id,
             exchange_index=exchange_index,
         )
         if not out.get("error") and kalshi_order_filled_contracts(out) > 0:
             self.invalidate_market_detail_cache(market_id)
             self.invalidate_portfolio_balance_cache()
+        return out
+
+    async def sell_fractional_residue(
+        self,
+        market_id: str,
+        side: str,
+        count_fp: str,
+    ) -> Dict[str, Any]:
+        """Sell a sub-contract fill immediately so it is not left untracked.
+
+        The count is the exchange fill string, such as ``0.01``. This is the
+        only order path that sends a fractional count, and only to flatten a
+        residue the bot did not ask for.
+        """
+        out = await self._post_create_order_v2(
+            ticker=market_id,
+            action="sell",
+            side_yesno=side,
+            quantity=0,
+            limit_price_dollars=0.01,
+            reduce_only=True,
+            time_in_force="immediate_or_cancel",
+            count_fp=str(count_fp),
+        )
         return out
 
     async def sell_position(self, ticker: str, side: str, quantity: int) -> Dict[str, Any]:

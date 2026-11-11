@@ -122,17 +122,17 @@ class TestScanEligibility(unittest.TestCase):
     def test_min_deployable_constant(self):
         self.assertEqual(MIN_DEPLOYABLE_USD_FOR_ORDER_SEARCH, 1.0)
 
-    def test_open_position_limit_blocks_at_cap(self):
+    def test_open_position_count_does_not_block_scanning(self):
         settings = type("S", (), {"bot_max_open_positions": 3})()
         active, label = compute_order_search_scan_labels(
             "play",
             settings,
             100.0,
             total_portfolio_value_usd=500.0,
-            open_position_count=3,
+            open_position_count=30,
         )
-        self.assertFalse(active)
-        self.assertEqual(label, "At open position limit (3/3)")
+        self.assertTrue(active)
+        self.assertIn("searching for new positions", label)
 
     def test_open_position_limit_allows_below_cap(self):
         settings = type("S", (), {"bot_max_open_positions": 30})()

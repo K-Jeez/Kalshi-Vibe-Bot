@@ -885,7 +885,11 @@ def attach_model_usage(result: dict, data: dict, *, started: float) -> None:
     from src.model_usage import estimate_usd, prompt_fingerprint, usage_from_response
 
     usage = usage_from_response(data if isinstance(data, dict) else {})
-    usage["estimated_usd"] = estimate_usd(usage.get("input_tokens"), usage.get("output_tokens"))
+    usage["estimated_usd"] = estimate_usd(
+        usage.get("input_tokens"),
+        usage.get("output_tokens"),
+        usage.get("cached_input_tokens"),
+    )
     usage["duration_sec"] = round(max(0.0, time.perf_counter() - float(started)), 3)
     usage["estimate_is_not_a_bill"] = usage.get("actual_usd") is None
     usage["cost_label"] = "provider_reported" if usage.get("actual_usd") is not None else "list_price_estimate"

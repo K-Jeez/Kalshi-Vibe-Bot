@@ -76,11 +76,10 @@ Trading is **live Kalshi only** (no paper mode). The **Settings** UI persists **
 | `AI_TEMPERATURE` | `0.1` | Sampling temperature for Grok |
 | `XAI_TEAM_ID` | _(empty)_ | Optional: prepaid balance tile (with Management key) |
 | `XAI_MANAGEMENT_API_KEY` | _(empty)_ | Optional: xAI Management API key |
-| `MIN_EDGE_TO_BUY_PCT` | `5` | Min edge (pts) to execute a buy |
-| `MIN_AI_WIN_PROB_BUY_SIDE_PCT` | `60` | Min AI win % on the purchased side (clamped **51–99** in code) |
+| `MIN_EDGE_TO_BUY_PCT` | `4` | Min edge (pts) to execute a buy |
+| `MIN_AI_WIN_PROB_BUY_SIDE_PCT` | `55` | Min AI win % on the purchased side (clamped **51–99** in code) |
 | `STOP_LOSS_DRAWDOWN_PCT` | `0.80` | Stop-loss drawdown vs entry price (Est. Value) |
 | `STOP_LOSS_SELLING_ENABLED` | `false` | Auto stop-loss exits when `true` |
-| `BOT_MAX_OPEN_POSITIONS` | `12` | Approved ceiling. Restore defaults will not raise a stored cap above 12 |
 | `CLOSED_RESOLUTION_REFRESH_INTERVAL_SEC` | `450` | Poll closed rows for official outcome (`0` = off) |
 | `CLOSED_RESOLUTION_REFRESH_BATCH` | `25` | Max closed rows per outcome poll |
 | `EXIT_GRACE_MINUTES` | `10` | Minutes after entry before stop-loss applies |
@@ -190,7 +189,7 @@ pytest backend\tests -q
 
 ## Strategy knobs
 
-SQLite **`tuning_state`** stores **`min_edge_to_buy_pct`**, **`min_ai_win_prob_buy_side_pct`**, **`max_open_positions`**, **`stop_loss_drawdown_pct`**, and **`stop_loss_selling_enabled`**. The **Settings** page edits these; **`POST /tuning/strategy-knobs`**, **`POST /tuning/stop-loss-selling`**, **`POST /tuning/reset-to-config-defaults`** persist and broadcast **`tuning_update`**. **Restore configuration defaults** reloads from **`config.py`** / your **`.env`** (including **`MIN_EDGE_TO_BUY_PCT`**, **`MIN_AI_WIN_PROB_BUY_SIDE_PCT`**, **`BOT_MAX_OPEN_POSITIONS`**, etc.).
+SQLite **`tuning_state`** stores **`min_edge_to_buy_pct`**, **`min_ai_win_prob_buy_side_pct`**, **`stop_loss_drawdown_pct`**, and **`stop_loss_selling_enabled`**. Available cash is the position limit. The **Settings** page edits these; **`POST /tuning/strategy-knobs`**, **`POST /tuning/stop-loss-selling`**, **`POST /tuning/reset-to-config-defaults`** persist and broadcast **`tuning_update`**. **Restore configuration defaults** reloads from **`config.py`** / your **`.env`** (including **`MIN_EDGE_TO_BUY_PCT`** and **`MIN_AI_WIN_PROB_BUY_SIDE_PCT`**).
 
 **Tuning endpoints** (see **`/docs`**): `GET /tuning/state`, `POST /tuning/strategy-knobs`, `POST /tuning/stop-loss-selling`, `POST /tuning/reset-to-config-defaults`.
 

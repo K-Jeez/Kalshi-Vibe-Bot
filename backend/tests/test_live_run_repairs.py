@@ -252,7 +252,7 @@ def test_migration_lowers_any_cap_above_12_and_leaves_the_stop(tmp_path: Path):
     ).fetchall()
     conn.close()
     assert report["rows_updated"] == 1
-    assert rows == [(12, 5, 60, 0.8), (12, 5, 60, 0.8)]
+    assert rows == [(12, 4, 55, 0.8), (12, 4, 55, 0.8)]
 
 
 def test_installed_db_gates_are_corrected_once_after_the_cap_patch(tmp_path: Path):
@@ -296,7 +296,7 @@ def test_installed_db_gates_are_corrected_once_after_the_cap_patch(tmp_path: Pat
     assert first["gates_policy_id"] == GATES_POLICY_ID
     assert first["previous_gates"]["min_edge_to_buy_pct"] == [4]
     assert first["previous_gates"]["min_ai_win_prob_buy_side_pct"] == [55]
-    assert row == (12, 5, 60, 0.8, 1)
+    assert row == (12, 4, 55, 0.8, 1)
     assert "stop_loss_selling_enabled" in first["gates_left_untouched"]
     assert second["gates_already_applied"] is True
     assert edited == 7

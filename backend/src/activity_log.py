@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -18,7 +17,7 @@ from typing import Any, Callable, Dict, Optional
 
 from src.config import settings
 from src.json_safe import dumps_payload
-from src.database.models import ActivityEvent, get_session_local
+from src.database.models import ActivityEvent, Position, get_session_local
 from src.logger import setup_logging
 from src.reconcile.open_positions import normalize_market_id
 from src.util.datetimes import utc_iso_z, utc_now
@@ -26,11 +25,11 @@ from src.version import APP_VERSION
 
 logger = setup_logging("activity_log")
 
-# One attempt waits up to 5s inside SQLite. Two more tries add about 1.5s of backoff.
-# This stays off the order path's critical section: a failed write returns False and does not raise.
-ACTIVITY_BUSY_TIMEOUT_MS = 5000
-_LOCK_ATTEMPTS = 3
-_LOCK_WAITS = (0.5, 1.0)
+# A short busy wait only. The scan commits its own row before this write, so
+# the activity connection is not waiting on the same thread's lock. No sleep.
+ACTIVITY_BUSY_TIMEOUT_MS = 250
+_LOCK_ATTEMPTS = 2
+_LOCK_WAITS = (0.0,)
 
 # Keep the table from growing without bound on a long-running local bot.
 _MAX_ROWS = 4000
@@ -334,7 +333,6 @@ def record_activity(payload: Dict[str, Any], *, session_factory: Optional[Callab
                     _LOCK_ATTEMPTS,
                     exc,
                 )
-                time.sleep(_LOCK_WAITS[attempt])
                 continue
             logger.error("activity log write failed (%s): %s", type(exc).__name__, exc)
             logger.debug("activity log write failed", exc_info=exc)
@@ -613,6 +611,16 @@ def intent_status_summary(*, session_factory: Optional[Callable] = None) -> Opti
             .all()
         )
         selected = select_intent_lifecycle(rows)
+        open_ids = {
+            str(mid or "").strip().upper()
+            for (mid,) in db.query(Position.market_id).filter(Position.status == "open").all()
+        }
+        if open_ids:
+            selected["current"] = [
+                row
+                for row in selected["current"]
+                if str(getattr(row, "market_id", "") or "").strip().upper() not in open_ids
+            ]
         return {
             "current_unresolved_intent_count": len(selected["current"]),
             "historical_pending_row_count": selected["historical_pending_rows"],

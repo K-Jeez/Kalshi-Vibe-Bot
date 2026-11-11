@@ -8,7 +8,6 @@ export const Settings: React.FC = () => {
   const [minEdgeDraft, setMinEdgeDraft] = useState('')
   const [stopLossDraft, setStopLossDraft] = useState('')
   const [minAiWinDraft, setMinAiWinDraft] = useState('')
-  const [maxOpenPositionsDraft, setMaxOpenPositionsDraft] = useState('')
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [resettingConfigDefaults, setResettingConfigDefaults] = useState(false)
   const [toggleSavingStopLoss, setToggleSavingStopLoss] = useState(false)
@@ -37,8 +36,7 @@ export const Settings: React.FC = () => {
     if (!cur) return
     setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 5))))
     setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
-    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 60))))
-    setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 12))))
+    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 55))))
   }, [cur])
 
   useEffect(() => {
@@ -56,16 +54,10 @@ export const Settings: React.FC = () => {
     const me = Number(minEdgeDraft)
     const sl = Number(stopLossDraft)
     const ma = Number(minAiWinDraft)
-    const mx = Number(maxOpenPositionsDraft)
-    if (!Number.isFinite(me) || !Number.isFinite(sl) || !Number.isFinite(ma) || !Number.isFinite(mx)) {
+    if (!Number.isFinite(me) || !Number.isFinite(sl) || !Number.isFinite(ma)) {
       alert(
-        'Enter whole numbers for minimum edge, stop-loss drawdown, min AI win % on the buy side, and max open positions.',
+        'Enter whole numbers for minimum edge, stop-loss drawdown, and min AI win % on the buy side.',
       )
-      return
-    }
-    const mxI = Math.round(mx)
-    if (mxI < 1 || mxI > 12) {
-      alert('Max open positions must be between 1 and 12.')
       return
     }
     setSavingStrategy(true)
@@ -74,7 +66,6 @@ export const Settings: React.FC = () => {
         min_edge_to_buy_pct: Math.round(me),
         stop_loss_drawdown_pct: sl / 100,
         min_ai_win_prob_buy_side_pct: Math.round(ma),
-        max_open_positions: mxI,
       })
       setCur(next)
     } catch (e: unknown) {
@@ -287,18 +278,6 @@ export const Settings: React.FC = () => {
                     className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
                   />
                 </label>
-                <label className="flex min-h-0 flex-col gap-1">
-                  <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Max open positions (1–12)
-                  </span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={maxOpenPositionsDraft}
-                    onChange={(e) => setMaxOpenPositionsDraft(e.target.value)}
-                    className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                  />
-                </label>
               </div>
               <button
                 type="button"
@@ -310,7 +289,7 @@ export const Settings: React.FC = () => {
                 {savingStrategy ? 'Saving…' : 'Save strategy settings'}
               </button>
               <p className="text-[11px] text-white/70">
-                Saved values apply immediately to the running bot. Restore configuration defaults reloads edge, the 60% win floor, and the stop from <code className="text-cyan-200/90">backend/.env</code>. The open-position cap stays at 12 or lower even if that file still says 30. Editing the file alone does not overwrite the database.
+                Saved values apply immediately to the running bot. Available cash is the position limit. Restore configuration defaults reloads edge, the 55% win floor, and the stop from <code className="text-cyan-200/90">backend/.env</code>. Editing the file alone does not overwrite the database.
               </p>
 
               <div className="pt-3 border-t border-brand-muted/25 flex flex-wrap items-center justify-between gap-3">

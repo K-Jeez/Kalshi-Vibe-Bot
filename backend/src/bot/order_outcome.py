@@ -44,7 +44,7 @@ def buy_fill_status(*, filled: float, requested: int, time_in_force: str) -> str
 
 def ioc_zero_fill_is_not_resting(time_in_force: str, filled: float) -> bool:
     tif = (time_in_force or "").strip().lower()
-    return tif == "immediate_or_cancel" and float(filled) <= 0
+    return tif in {"immediate_or_cancel", "fill_or_kill"} and float(filled) <= 0
 
 
 def order_status_after_submit(time_in_force: str, filled: float) -> str:

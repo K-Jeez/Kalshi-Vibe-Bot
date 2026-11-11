@@ -220,6 +220,37 @@ def _tradeable_scan_queue(tradeable: List[dict]) -> List[Tuple[str, Optional[str
     return out
 
 
+def _promote_fast_close_markets(
+    scan_queue: List[Tuple[str, Optional[str], List[dict]]],
+) -> List[Tuple[str, Optional[str], List[dict]]]:
+    """Markets closing inside an hour are single units at the front of the queue.
+
+    Their order is placed as soon as that analysis returns, ahead of slower batches.
+    """
+    now = datetime.now(timezone.utc)
+    fast: List[Tuple[float, Tuple[str, Optional[str], List[dict]]]] = []
+    rest: List[Tuple[str, Optional[str], List[dict]]] = []
+    for kind, et, members in scan_queue:
+        fast_members = []
+        slow_members = []
+        for market in members:
+            seconds, _reason = _seconds_until_buy_horizon(market, now=now)
+            if seconds is not None and 0 < seconds < 3600:
+                fast_members.append((seconds, market))
+            else:
+                slow_members.append(market)
+        for seconds, market in fast_members:
+            fast.append((seconds, ("single", et, [market])))
+        if len(slow_members) > 1 and kind == "batch":
+            rest.append(("batch", et, slow_members))
+        elif len(slow_members) == 1:
+            rest.append(("single", et, slow_members))
+        elif len(slow_members) > 1:
+            rest.append((kind, et, slow_members))
+    fast.sort(key=lambda item: item[0])
+    return [unit for _seconds, unit in fast] + rest
+
+
 def _cooldown_market_ids_from_event_batch_xai_jsons(
     xai_analysis_texts: List[Optional[str]],
 ) -> Tuple[Set[str], Set[str]]:
@@ -863,6 +894,12 @@ async def monitor_positions(
                 )
                 continue
 
+            from src.bot.exit_backoff import exit_is_backed_off
+
+            if exit_is_backed_off(str(pos.market_id or "")):
+                logger.info("Skip auto-exit %s — empty-book backoff", pos.market_id)
+                continue
+
             logger.info(
                 "Exiting %s (%s x%d) — reason=%s  P&L=%.2f",
                 pos.market_id, pos.side, pos.quantity, exit_reason,
@@ -984,6 +1021,9 @@ async def monitor_positions(
                     )
                 continue
             if kalshi_order_filled_contracts(sell_result) <= 0:
+                from src.bot.exit_backoff import note_empty_exit
+
+                empty_tries = note_empty_exit(str(pos.market_id or ""))
                 # Native bid only — parity-inferred bids can show liquidity IOC cannot hit.
                 exe_bid = (
                     live_best_bid_dollars(
@@ -1000,7 +1040,7 @@ async def monitor_positions(
                     sell_result.get("status"),
                     bid_txt,
                 )
-                if not sell_result.get("error") and (exe_bid is None or exe_bid <= 0):
+                if empty_tries >= 3 or (not sell_result.get("error") and (exe_bid is None or exe_bid <= 0)):
                     pos.awaiting_settlement = True
                     pos.dead_market = True
                     logger.info(
@@ -1320,6 +1360,13 @@ async def scan_and_trade(
             for p in positions_open
             if (normalize_market_id(p.market_id) or "").strip()
         }
+        from src.bot.match_exposure import match_exposure_key
+
+        held_match_keys = {
+            match_exposure_key(p.market_id)
+            for p in positions_open
+            if (p.market_id or "").strip()
+        }
 
         # Tiered re-analysis cooldown:
         # - Markets that escalated to the AI provider: long debounce (API cost + stale signal window).
@@ -1361,6 +1408,17 @@ async def scan_and_trade(
             .all()
         }
         recently_analyzed = recent_xai | recent_local_only | xai_batch_sibling_cooldown
+        from src.bot.reanalysis import should_skip_unchanged_quote
+
+        previous_quotes: Dict[str, Tuple[float, float]] = {}
+        for mid, yes_px, no_px in (
+            db.query(DecisionLog.market_id, DecisionLog.snapshot_yes_price, DecisionLog.snapshot_no_price)
+            .filter(DecisionLog.timestamp >= xai_cutoff)
+            .all()
+        ):
+            key = normalize_market_id(str(mid or "")).upper()
+            if key and yes_px is not None and no_px is not None and key not in previous_quotes:
+                previous_quotes[key] = (float(yes_px), float(no_px))
 
         logger.debug(
             "Scan cooldown: ai_escalation_window=%d local_only_window=%d batch_event_sibling=%d (local_debounce=%ds)",
@@ -1393,7 +1451,7 @@ async def scan_and_trade(
             )
 
         batch_completed_this_sweep: Set[str] = set()
-        scan_queue = _tradeable_scan_queue(tradeable)
+        scan_queue = _promote_fast_close_markets(_tradeable_scan_queue(tradeable))
         full_sq = len(scan_queue)
         cap_u = int(getattr(settings, "bot_max_scan_queue_units_per_sweep", 0) or 0)
         if cap_u > 0:
@@ -1474,7 +1532,19 @@ async def scan_and_trade(
                 for m in members:
                     tid = m.get("id", "")
                     nt = normalize_market_id(str(tid)).upper()
-                    if nt in held_tickers or nt in recently_analyzed or tid in batch_completed_this_sweep:
+                    prev_quote = previous_quotes.get(nt)
+                    if (
+                        nt in held_tickers
+                        or tid in batch_completed_this_sweep
+                        or match_exposure_key(str(tid)) in held_match_keys
+                        or should_skip_unchanged_quote(
+                            analyzed_recently=nt in recently_analyzed,
+                            previous_yes=None if prev_quote is None else prev_quote[0],
+                            previous_no=None if prev_quote is None else prev_quote[1],
+                            yes_price=float(m.get("yes_price") or 0),
+                            no_price=float(m.get("no_price") or 0),
+                        )
+                    ):
                         continue
                     if reentry_cd_min > 0 and nt in loss_exit_cooldown_tickers:
                         continue
@@ -1660,7 +1730,19 @@ async def scan_and_trade(
                 market = members[0]
                 ticker = market.get("id", "")
                 nt0 = normalize_market_id(str(ticker)).upper()
-                if nt0 in held_tickers or nt0 in recently_analyzed or ticker in batch_completed_this_sweep:
+                prev_quote = previous_quotes.get(nt0)
+                if (
+                    nt0 in held_tickers
+                    or ticker in batch_completed_this_sweep
+                    or match_exposure_key(str(ticker)) in held_match_keys
+                    or should_skip_unchanged_quote(
+                        analyzed_recently=nt0 in recently_analyzed,
+                        previous_yes=None if prev_quote is None else prev_quote[0],
+                        previous_no=None if prev_quote is None else prev_quote[1],
+                        yes_price=float(market.get("yes_price") or 0),
+                        no_price=float(market.get("no_price") or 0),
+                    )
+                ):
                     continue
                 if reentry_cd_min > 0 and nt0 in loss_exit_cooldown_tickers:
                     logger.info(
@@ -2146,7 +2228,7 @@ async def scan_and_trade(
                                                             }
                                                         else:
                                                             from src.bot.exposure_reserve import unconfirmed_buy_exposure
-                                                            from src.config import APPROVED_MAX_OPEN_POSITIONS
+                                                            from src.bot.match_exposure import match_exposure_key
                                                             from src.database.models import ActivityEvent
 
                                                             try:
@@ -2182,10 +2264,6 @@ async def scan_and_trade(
                                                                 fee_type=_fee.get("fee_type"),
                                                                 fee_multiplier=_fee.get("fee_multiplier"),
                                                             )
-                                                            open_cap = min(
-                                                                APPROVED_MAX_OPEN_POSITIONS,
-                                                                int(getattr(settings, "bot_max_open_positions", APPROVED_MAX_OPEN_POSITIONS) or APPROVED_MAX_OPEN_POSITIONS),
-                                                            )
                                                             if exposure.get("reason"):
                                                                 result = {
                                                                     "error": "order not sent",
@@ -2196,7 +2274,7 @@ async def scan_and_trade(
                                                                     "summary": f"Skipped — {exposure['reason']}",
                                                                     "signal": signal,
                                                                 }
-                                                            elif num_open + int(exposure.get("extra_orders") or 0) >= open_cap:
+                                                            elif match_exposure_key(ticker_clean) in held_match_keys:
                                                                 result = {
                                                                     "error": "order not sent",
                                                                     "order_not_sent": True,
@@ -2204,8 +2282,7 @@ async def scan_and_trade(
                                                                 action_taken = {
                                                                     "status": "no_trade",
                                                                     "summary": (
-                                                                        f"Skipped — open position limit "
-                                                                        f"({num_open} open + {int(exposure.get('extra_orders') or 0)} unconfirmed)/{open_cap}"
+                                                                        "Skipped — one open position already covers this match"
                                                                     ),
                                                                     "signal": signal,
                                                                 }
@@ -2342,52 +2419,95 @@ async def scan_and_trade(
                                                 "signal": signal,
                                             }
                                         if filled is not None and not is_whole_count(filled):
+                                            residue = format_count_fp(filled)
+                                            cleanup = await kalshi_client.sell_fractional_residue(
+                                                ticker, trade_side, residue
+                                            )
+                                            sold_residue = (
+                                                not cleanup.get("error")
+                                                and float(kalshi_order_filled_contracts(cleanup) or 0) > 0
+                                            )
                                             action_taken = {
                                                 "status": "fractional_fill",
                                                 "summary": (
-                                                    f"Exchange reported fill_count_fp={format_count_fp(filled)}. "
-                                                    "The fractional count was kept and was not relabeled as a whole contract. "
-                                                    "No position recorded."
+                                                    f"Exchange filled {residue} on a whole-contract order. "
+                                                    + (
+                                                        "That residue was sold immediately."
+                                                        if sold_residue
+                                                        else "The residue sell did not fill. It is logged and was not booked as a position."
+                                                    )
                                                 ),
                                                 "signal": signal,
-                                                "filled_fp": format_count_fp(filled),
+                                                "filled_fp": residue,
+                                                "residue_sold": sold_residue,
                                             }
+                                            record_activity(
+                                                {
+                                                    "event_type": "fill",
+                                                    "market_id": ticker_clean,
+                                                    "side": trade_side,
+                                                    "action": "sell" if sold_residue else "buy",
+                                                    "order_status": "fractional_fill",
+                                                    "fill_count_fp": residue,
+                                                    "detail": action_taken["summary"],
+                                                }
+                                            )
                                             qty_int = 0
                                         elif filled is not None:
                                             qty_int = int(filled)
                                         else:
                                             qty_int = 0
                                         if filled is not None and qty_int < 1 and is_whole_count(filled):
-                                            fill_state = buy_fill_status(
-                                                filled=filled,
-                                                requested=int(quantity),
-                                                time_in_force="immediate_or_cancel",
+                                            from src.bot.buy_retry import retry_buy_once
+
+                                            retry_result, gap = await retry_buy_once(
+                                                kalshi_client,
+                                                market_id=ticker_clean,
+                                                side=trade_side,
+                                                quantity=int(quantity),
+                                                original_ask=float(ioc_limit_dollars),
+                                                ai_yes_pct=int(decision.get("ai_probability_yes_pct") or 0),
+                                                min_edge=float(getattr(settings, "min_edge_to_buy_pct", 4) or 4),
+                                                min_ai=int(getattr(settings, "min_ai_win_prob_buy_side_pct", 55) or 55),
+                                                fee_multiplier=_fee.get("fee_multiplier"),
+                                                fee_type=_fee.get("fee_type"),
+                                                exchange_index=shard_index,
                                             )
-                                            if fill_state == "fractional_fill":
+                                            if isinstance(retry_result, dict) and not retry_result.get("error"):
+                                                try:
+                                                    retry_filled = kalshi_order_filled_contracts(retry_result)
+                                                except FixedPointCountError:
+                                                    retry_filled = None
+                                                if (
+                                                    retry_filled is not None
+                                                    and is_whole_count(retry_filled)
+                                                    and int(retry_filled) >= 1
+                                                ):
+                                                    result = retry_result
+                                                    filled = retry_filled
+                                                    qty_int = int(retry_filled)
+                                            if qty_int < 1:
                                                 summary = (
-                                                    f"Exchange fill {filled:.4f} is below one whole contract; "
-                                                    "no position recorded"
+                                                    "Missed buy. Price gap "
+                                                    f"{gap:+.2f} after one reprice. "
+                                                    "The market is on the short watch list."
                                                 )
-                                            else:
-                                                summary = (
-                                                    "Exchange fill was zero. An immediate-or-cancel order "
-                                                    "does not leave a resting remainder"
+                                                logger.warning(
+                                                    "Live buy had no whole-contract fill — %s %s gap=%+.4f status=%s",
+                                                    ticker,
+                                                    trade_side,
+                                                    gap,
+                                                    result.get("status"),
                                                 )
-                                            logger.warning(
-                                                "Live buy had no whole-contract fill — %s %s filled_fp=%.6f status=%s",
-                                                ticker,
-                                                trade_side,
-                                                filled,
-                                                result.get("status"),
-                                            )
-                                            action_taken = {
-                                                "status": fill_state,
-                                                "summary": summary,
-                                                "signal": signal,
-                                                "kalshi_status": result.get("status"),
-                                                "filled_fp": filled,
-                                            }
-                                        else:
+                                                action_taken = {
+                                                    "status": "missed_fill",
+                                                    "summary": summary,
+                                                    "signal": signal,
+                                                    "kalshi_status": result.get("status"),
+                                                    "filled_fp": filled,
+                                                    "price_gap": gap,
+                                                }
+                                        if qty_int >= 1:
                                             if qty_int < quantity:
                                                 logger.info(
                                                     "Live IOC buy partial fill %s %s filled=%d requested=%d",
@@ -2488,6 +2608,7 @@ async def scan_and_trade(
             xa_blob = decision.get("xai_analysis")
             if isinstance(xa_blob, dict):
                 xa_model = str(xa_blob.get("model") or "")
+            db.commit()
             record_activity(
                 {
                     "event_type": "decision",
@@ -2507,7 +2628,6 @@ async def scan_and_trade(
                     **quote_snapshot(market),
                 }
             )
-            db.commit()
 
             decision["trade_mode"] = TRADE_MODE
             decision["market_id"] = ticker_clean
@@ -2522,6 +2642,7 @@ async def scan_and_trade(
 
             if executed_trade:
                 held_tickers.add((ticker_clean or "").strip().upper())
+                held_match_keys.add(match_exposure_key(ticker_clean))
                 balance -= trade_cost
                 num_open += 1
 

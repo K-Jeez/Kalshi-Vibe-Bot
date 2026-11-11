@@ -851,8 +851,26 @@ def sync_recent_closed_from_flat_portfolio_rows(
             for p in pendings_prefetch[1:]:
                 p.kalshi_flat_reconcile_pending = False
 
+        from src.reconcile.realized_cashflow import closed_by_our_sell, fees_without_double_count
+
+        has_sell = (
+            db.query(Trade)
+            .filter(
+                Trade.market_id == newest.market_id,
+                Trade.action == "sell",
+                Trade.trade_mode == trade_mode,
+            )
+            .first()
+            is not None
+        )
+        if closed_by_our_sell(newest.exit_reason, has_sell):
+            # The sell already stored proceeds minus cost and fees. Kalshi's
+            # realized_pnl_dollars excludes fees and must not be added again.
+            newest.kalshi_flat_reconcile_pending = False
+            n += 1
+            continue
         newest.realized_pnl = float(newest.realized_pnl or 0.0) + dR
-        newest.fees_paid = float(getattr(newest, "fees_paid", 0) or 0.0) + dF
+        newest.fees_paid = fees_without_double_count(float(getattr(newest, "fees_paid", 0) or 0.0), F)
         newest.kalshi_flat_reconcile_pending = False
         n += 1
 

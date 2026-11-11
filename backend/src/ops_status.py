@@ -9,6 +9,7 @@ _last_monitor_at: float = 0.0
 _rejections: List[float] = []
 _last_api_error: str = ""
 _unresolved_alert: str = ""
+_low_balance_alert: str = ""
 
 
 def stamp_monitor(now: Optional[float] = None) -> None:
@@ -24,6 +25,21 @@ def note_rejection(now: Optional[float] = None) -> None:
 def note_unresolved(message: str) -> None:
     global _unresolved_alert
     _unresolved_alert = (message or "")[:180]
+
+
+def note_low_balance(cash: Optional[float]) -> None:
+    """Dashboard and health warning when cash cannot fund another contract."""
+    global _low_balance_alert
+    try:
+        amount = float(cash) if cash is not None else None
+    except (TypeError, ValueError):
+        amount = None
+    if amount is None or amount >= 5.0:
+        _low_balance_alert = ""
+        return
+    _low_balance_alert = (
+        f"Low balance: ${amount:.2f} available. Not enough cash to open another contract."
+    )
 
 
 def note_api_error(message: str) -> None:
@@ -55,12 +71,15 @@ def alerts(*, now: Optional[float] = None, monitor_stale_after: float = 90.0) ->
         out.append(f"Last API error: {_last_api_error}")
     if _unresolved_alert:
         out.append(_unresolved_alert)
+    if _low_balance_alert:
+        out.append(_low_balance_alert)
     return out
 
 
 def reset_for_tests() -> None:
-    global _last_monitor_at, _last_api_error, _unresolved_alert
+    global _last_monitor_at, _last_api_error, _unresolved_alert, _low_balance_alert
     _last_monitor_at = 0.0
     _last_api_error = ""
     _unresolved_alert = ""
+    _low_balance_alert = ""
     _rejections.clear()

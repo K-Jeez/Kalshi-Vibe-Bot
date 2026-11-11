@@ -170,6 +170,9 @@ def test_espn_match_rejects_near_name_collisions_and_keeps_university_at():
     assert match_espn_event([miami_only, miami_ohio], "Miami vs Miami (OH)") is miami_ohio
     assert match_espn_event([albany, wrong_albany], "University at Albany vs Binghamton") is albany
     assert match_espn_event([wrong_albany], "University at Albany vs Binghamton") is None
+    assert match_espn_event([georgia], "Georgia vs Kentucky -3.5") is georgia
+    assert match_espn_event([georgia], "Georgia vs Kentucky: Over 22.5 games") is georgia
+    assert match_espn_event([georgia_tech], "Georgia vs Kentucky: Over 22.5") is None
 
 
 def test_btc_ladder_keeps_each_legs_strike(monkeypatch):

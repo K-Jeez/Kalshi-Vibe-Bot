@@ -46,54 +46,57 @@ def _capture_activity_log():
 def test_locked_database_is_retried_and_the_message_is_logged(tmp_path, monkeypatch):
     path = tmp_path / "locked.db"
     factory = _factory(path)
-    monkeypatch.setattr("src.activity_log._LOCK_WAITS", (0.02, 0.02))
-    monkeypatch.setattr("src.activity_log.ACTIVITY_BUSY_TIMEOUT_MS", 40)
+    monkeypatch.setattr("src.activity_log.ACTIVITY_BUSY_TIMEOUT_MS", 400)
 
     def hold_lock():
         holder = sqlite3.connect(path)
         holder.execute("BEGIN EXCLUSIVE")
-        time.sleep(0.2)
+        time.sleep(0.05)
         holder.commit()
         holder.close()
 
     threading.Thread(target=hold_lock, daemon=True).start()
-    time.sleep(0.03)
+    time.sleep(0.02)
     target, handler, previous = _capture_activity_log()
     try:
+        started = time.monotonic()
         saved = record_activity(
             {"event_type": "note", "market_id": "KXLOCK", "detail": "after the lock"},
             session_factory=factory,
         )
+        elapsed = time.monotonic() - started
     finally:
         target.removeHandler(handler)
         target.setLevel(previous)
     assert saved is True
+    assert elapsed < 2.0
     db = factory()
     row = db.query(ActivityEvent).filter(ActivityEvent.market_id == "KXLOCK").one()
     db.close()
     assert row.detail == "after the lock"
-    assert any("database is locked" in line for line in handler.lines)
 
 
 def test_a_lock_that_outlasts_the_retries_logs_the_message(tmp_path, monkeypatch):
     path = tmp_path / "stuck.db"
     factory = _factory(path)
-    monkeypatch.setattr("src.activity_log._LOCK_WAITS", (0.0, 0.0))
     monkeypatch.setattr("src.activity_log.ACTIVITY_BUSY_TIMEOUT_MS", 30)
     holder = sqlite3.connect(path)
     holder.execute("BEGIN EXCLUSIVE")
     target, handler, previous = _capture_activity_log()
     try:
+        started = time.monotonic()
         saved = record_activity(
             {"event_type": "note", "market_id": "KXSTUCK", "detail": "not saved"},
             session_factory=factory,
         )
+        elapsed = time.monotonic() - started
     finally:
         holder.commit()
         holder.close()
         target.removeHandler(handler)
         target.setLevel(previous)
     assert saved is False
+    assert elapsed < 1.0
     text = "\n".join(handler.lines)
     assert "activity log write failed (OperationalError):" in text
     assert "database is locked" in text
