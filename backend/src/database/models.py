@@ -140,6 +140,25 @@ class DecisionLog(Base):
     trade_mode          = Column(String, default="live")  # historical column; app is live-only
 
 
+class ShadowBuy(Base):
+    """A BUY the bot did not fill, kept so the outcome can be scored later."""
+
+    __tablename__ = "shadow_buys"
+
+    id = Column(String, primary_key=True)
+    market_id = Column(String, nullable=False)
+    side = Column(String, nullable=False)
+    reason = Column(String, nullable=True)
+    edge_pct = Column(Float, default=0.0)
+    ai_yes_pct = Column(Integer, nullable=True)
+    ask = Column(Float, nullable=False)
+    blended_side_pct = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    resolved_result = Column(String, nullable=True)
+    hypothetical_pnl = Column(Float, nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class EventSeriesLock(Base):
     """Once a market inside an event series is chosen for entry, lock the series to prevent contradictory sibling trades."""
 

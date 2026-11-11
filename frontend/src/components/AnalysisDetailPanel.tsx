@@ -365,6 +365,16 @@ export const AnalysisDetailBody: React.FC<{
                     : `Recommended: ${recSide}`
                   : 'SKIP'}
               </p>
+              {a.blended_side_pct != null ? (
+                <p
+                  className="text-[10px] text-amber-200/90 mt-1"
+                  title="Used for expected value and quarter Kelly. The fee-free mid is (YES bid + YES ask) / 2. Gates still use the raw model."
+                >
+                  Blended P(side) {Number(a.blended_side_pct).toFixed(1)}%
+                  {a.blend_weight != null ? ` · w=${Number(a.blend_weight).toFixed(2)}` : ''}
+                  {a.blend_market ? ` · ${a.blend_market}` : ''}
+                </p>
+              ) : null}
             </div>
             <div>
               <p className="text-[10px] uppercase tracking-wide text-white/65">Edge</p>

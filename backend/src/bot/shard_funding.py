@@ -55,8 +55,10 @@ def reset_shard_funding_memory() -> None:
     _last_portfolio = None
 
 
-def _cap_cents(bankroll: float) -> int:
-    return max(0, _cents_down(float(bankroll) * float(MAX_KELLY_BANKROLL_PCT)))
+def _cap_cents(bankroll: float, cap_fraction: Optional[float] = None) -> int:
+    fraction = MAX_KELLY_BANKROLL_PCT if cap_fraction is None else float(cap_fraction)
+    fraction = max(0.0, min(0.05, fraction))
+    return max(0, _cents_down(float(bankroll) * fraction))
 
 
 def transfer_client_id(*, client_order_id: str, source_shard: int, destination_shard: int, amount_cents: int) -> str:
@@ -72,6 +74,7 @@ def plan_shard_funding(
     order_all_in: float,
     total_cash: float,
     bankroll: float,
+    cap_fraction: Optional[float] = None,
 ) -> dict:
     """Exact transfers for one buy, or a reason to skip without moving cash.
 
@@ -80,7 +83,7 @@ def plan_shard_funding(
     the order.
     """
     target = int(target_shard)
-    cap_cents = _cap_cents(bankroll)
+    cap_cents = _cap_cents(bankroll, cap_fraction)
     order_cents = _cents_up(float(order_all_in))
     if order_cents > cap_cents:
         return {
@@ -305,6 +308,7 @@ async def fund_buy_shard(
     ticker: str,
     client_order_id: str = "",
     session_factory=None,
+    cap_fraction: Optional[float] = None,
 ) -> dict:
     """Fund one known shard just enough for this buy.
 
@@ -342,6 +346,7 @@ async def fund_buy_shard(
         order_all_in=float(order_all_in),
         total_cash=float(portfolio.get("cash") or 0.0),
         bankroll=float(bankroll),
+        cap_fraction=cap_fraction,
     )
     if not plan.get("ok"):
         return plan

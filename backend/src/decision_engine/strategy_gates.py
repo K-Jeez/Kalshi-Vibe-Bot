@@ -178,11 +178,12 @@ def kelly_contract_cap_for_bankroll(
     per_contract_premium: float,
     fee_multiplier: Optional[float] = None,
     fee_type: Optional[str] = None,
+    bankroll_fraction: Optional[float] = None,
 ) -> int:
-    """Largest whole-contract count whose estimated all-in cost fits in 2.5% of cash.
+    """Largest whole-contract count whose estimated all-in cost fits the cash cap.
 
-    Returns 0 when the series fee schedule is unknown. That is not a claim that
-    one contract fits the cap.
+    ``bankroll_fraction`` defaults to 2.5%. The order path passes the edge-bucket
+    cap. Returns 0 when the series fee schedule is unknown.
     """
     br = float(bankroll)
     px = float(per_contract_premium)
@@ -193,7 +194,8 @@ def kelly_contract_cap_for_bankroll(
     cash_cap = max_whole_contracts_for_cash(br, px)
     if cash_cap < 1:
         return 0
-    budget = br * float(MAX_KELLY_BANKROLL_PCT)
+    fraction = MAX_KELLY_BANKROLL_PCT if bankroll_fraction is None else float(bankroll_fraction)
+    budget = br * max(0.0, min(0.05, fraction))
     if all_in_entry_dollars(1, px, fee_multiplier=fee_multiplier, fee_type=fee_type) > budget + 1e-9:
         return 0
     lo, hi = 1, cash_cap

@@ -126,6 +126,14 @@ async def _maybe_auto_refresh_closed_resolution(
             limit=batch,
             only_missing_result=True,
         )
+        try:
+            from src.shadow_buys import resolve_shadow_markets
+
+            scored = await resolve_shadow_markets(db, kalshi_client, limit=10)
+            if scored:
+                logger.info("Shadow buys scored: %s", scored)
+        except Exception as shadow_exc:
+            logger.debug("Shadow resolution skipped: %s", shadow_exc)
         if int(out.get("updated", 0) or 0) > 0:
             logger.info(
                 "Closed resolution auto-refresh: examined=%s updated=%s fetch_failed=%s",
@@ -1367,6 +1375,9 @@ async def scan_and_trade(
             for p in positions_open
             if (p.market_id or "").strip()
         }
+        from src.decision_engine.bucket_caps import load_bucket_caps
+
+        bucket_caps = load_bucket_caps(db)
 
         # Tiered re-analysis cooldown:
         # - Markets that escalated to the AI provider: long debounce (API cost + stale signal window).
@@ -1875,6 +1886,7 @@ async def scan_and_trade(
             stop_scan_after = False
             kelly_sizing_tag = ""
             trade_side = ""
+            entry_cap = 0.025
             trade_quantity = 0
             trade_price = 0.0
             trade_cost = 0.0
@@ -1971,6 +1983,18 @@ async def scan_and_trade(
                             min_ai_win_prob_base=min_ai_base,
                         )
                         ai_buy = ai_win_prob_pct_on_buy_side(trade_side, ai_yes)
+                        from src.decision_engine.blend import blend_snapshot, stamp_blend
+                        from src.decision_engine.bucket_caps import cap_for_edge
+
+                        blend = blend_snapshot(
+                            side=trade_side,
+                            model_yes_pct=ai_yes,
+                            yes_bid=market.get("yes_bid"),
+                            yes_ask=y_ask_f,
+                            yes_price=float(yes_price),
+                        )
+                        stamp_blend(decision, blend)
+                        entry_cap = cap_for_edge(bucket_caps, edge_now)
                         risk_note = " (contrarian tier)" if risk_tier else ""
                         gate_fail = autonomous_buy_gate_failure(
                             side=trade_side,
@@ -2009,6 +2033,7 @@ async def scan_and_trade(
                                 float(trade_price),
                                 fee_multiplier=_fee.get("fee_multiplier"),
                                 fee_type=_fee.get("fee_type"),
+                                bankroll_fraction=entry_cap,
                             )
                             if not _fee.get("known"):
                                 action_taken = {
@@ -2030,11 +2055,12 @@ async def scan_and_trade(
                                 float(no_price),
                                 per_contract_premium=float(trade_price),
                                 max_kelly_contracts=kelly_cap,
+                                win_probability=float(blend["win_probability"]),
                             )
                             action_taken = {}
                             if quantity >= 1:
                                 ev_dollars = fee_inclusive_ev_dollars(
-                                    ai_buy / 100.0,
+                                    float(blend["win_probability"]),
                                     float(trade_price),
                                     int(quantity),
                                     fee_multiplier=_fee.get("fee_multiplier"),
@@ -2054,8 +2080,9 @@ async def scan_and_trade(
                                     action_taken = {
                                         "status": "no_trade",
                                         "summary": (
-                                            f"Skipped — estimated fee-inclusive expected value "
-                                            f"${ev_dollars:.4f} is not positive. "
+                                            f"Skipped — blended fee-inclusive expected value "
+                                            f"${ev_dollars:.4f} is not positive "
+                                            f"(w={blend['weight']:.2f}, {blend['market_source']}). "
                                             "That fee is the 0.07 schedule estimate, not the exchange fill fee."
                                         ),
                                         "signal": signal,
@@ -2075,6 +2102,7 @@ async def scan_and_trade(
                                     float(no_price),
                                     per_contract_premium=float(trade_price),
                                     max_kelly_contracts=kelly_cap,
+                                    win_probability=float(blend["win_probability"]),
                                 )
                                 action_taken = {
                                     "status": "no_trade",
@@ -2321,6 +2349,7 @@ async def scan_and_trade(
                                                                         bankroll=float(balance),
                                                                         ticker=ticker_clean,
                                                                         client_order_id=str(order_intent_id or ""),
+                                                                        cap_fraction=entry_cap,
                                                                     )
                                                                 if not funding.get("ok"):
                                                                     result = {
@@ -2566,6 +2595,26 @@ async def scan_and_trade(
                                                 trade_price = avg_px
                                                 trade_cost = fill_notional + buy_fees
             decision["action_taken"] = action_taken
+            if str(decision.get("decision") or "").startswith("BUY"):
+                taken = str((action_taken or {}).get("status") or "")
+                if taken not in ("executed", "partial"):
+                    from src.shadow_buys import record_shadow_buy
+
+                    try:
+                        held = str(trade_side or "").upper()
+                        blob = decision.get("xai_analysis")
+                        record_shadow_buy(
+                            db,
+                            market_id=ticker_clean,
+                            side=held,
+                            reason=str((action_taken or {}).get("summary") or taken or "skipped"),
+                            edge_pct=float(decision.get("edge_pct") or 0.0),
+                            ai_yes_pct=int(decision.get("ai_probability_yes_pct") or 0),
+                            ask=float(yes_price if held == "YES" else no_price or 0.0),
+                            blended_side_pct=blob.get("blended_side_pct") if isinstance(blob, dict) else None,
+                        )
+                    except Exception:
+                        logger.debug("Shadow buy was not recorded", exc_info=True)
 
             _snap = {
                 "yes_price": float(yes_price),

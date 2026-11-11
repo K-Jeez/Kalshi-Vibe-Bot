@@ -69,8 +69,15 @@ def gates_still_pass_at_ask(
     win = ai_win_prob_pct_on_buy_side(side, int(ai_yes_pct))
     if win < int(min_ai):
         return False
+    from src.decision_engine.blend import blend_yes_probability
+
+    # The retry still has to clear the raw edge and win-prob gates. Expected
+    # value uses the same blend as the original order: weight on the model,
+    # the rest on this ask when a fresh mid is not in hand.
+    blended = blend_yes_probability(int(ai_yes_pct), float(ask) if str(side).upper() == "YES" else 1.0 - float(ask))
+    side_p = blended if str(side).upper() == "YES" else 1.0 - blended
     ev = fee_inclusive_ev_dollars(
-        win / 100.0,
+        side_p,
         float(ask),
         1,
         fee_multiplier=fee_multiplier,

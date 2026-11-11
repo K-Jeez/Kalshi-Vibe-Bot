@@ -67,6 +67,20 @@ def _parse_ai_yes_pct(xai_result: Dict[str, Any], current_prices: Optional[dict]
     return max(0, min(100, v))
 
 
+def _copy_blend(blob: dict, strat: dict) -> None:
+    if not isinstance(blob, dict):
+        return
+    for key in (
+        "blended_probability_yes_pct",
+        "blended_side_pct",
+        "blend_weight",
+        "blend_market",
+        "market_mid_yes_pct",
+    ):
+        if key in strat:
+            blob[key] = strat[key]
+
+
 def _enrich_strategy_fields(
     *,
     direction: str,
@@ -94,6 +108,15 @@ def _enrich_strategy_fields(
 
     edge = edge_pct_for_side(direction, ai_yes_pct, yes_ask_f, no_ask_f, yes_mid, no_mid)
     mkt = market_implied_pct_for_side(direction, yes_ask_f, no_ask_f, yes_mid, no_mid)
+    from src.decision_engine.blend import blend_snapshot
+
+    blend = blend_snapshot(
+        side=direction,
+        model_yes_pct=ai_yes_pct,
+        yes_bid=current_prices.get("yes_bid"),
+        yes_ask=yes_ask_f,
+        yes_price=yes_mid,
+    )
     kf = full_kelly_fraction_for_side(direction, ai_yes_pct, yes_ask_f, no_ask_f, yes_mid, no_mid)
     if str(direction).upper() == "YES":
         premium = float(yes_ask_f) if yes_ask_f is not None else yes_mid
@@ -117,6 +140,7 @@ def _enrich_strategy_fields(
         no_mid,
         per_contract_premium=premium,
         max_kelly_contracts=kcap,
+        win_probability=float(blend["win_probability"]),
     )
     return {
         "ai_probability_yes_pct": ai_yes_pct,
@@ -124,6 +148,11 @@ def _enrich_strategy_fields(
         "edge_pct": float(edge),
         "kelly_fraction": float(kf),
         "kelly_contracts": int(kc),
+        "blended_probability_yes_pct": blend["blended_yes_pct"],
+        "blended_side_pct": blend["blended_side_pct"],
+        "blend_weight": blend["weight"],
+        "blend_market": blend["market_source"],
+        "market_mid_yes_pct": blend["market_yes_pct"],
     }
 
 
@@ -239,6 +268,7 @@ class DecisionEngine:
             f"AI P(YES)={ai_yes}% · {implied_label} · "
             f"edge {strat['edge_pct']:.1f} pts · Kelly {strat['kelly_contracts']} contracts"
         )
+        _copy_blend(ai_result, strat)
 
         return {
             **base,
@@ -409,6 +439,7 @@ class DecisionEngine:
         if batch_post_gate:
             xai_analysis["batch_post_gate"] = batch_post_gate
         xai_analysis["reasoning"] = reasoning_out
+        _copy_blend(xai_analysis, strat)
 
         return {
             **base,

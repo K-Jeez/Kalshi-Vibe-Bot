@@ -10,6 +10,28 @@ from src.version import APP_VERSION
 router = APIRouter(tags=["health"])
 
 
+def _entry_caps() -> list:
+    try:
+        from src.database.models import get_session_local
+        from src.decision_engine.bucket_caps import load_bucket_caps
+
+        db = get_session_local()()
+        try:
+            return load_bucket_caps(db)
+        finally:
+            db.close()
+    except Exception:
+        from src.decision_engine.bucket_caps import caps_from_closed
+
+        return caps_from_closed([])
+
+
+def _blend_weight() -> float:
+    from src.decision_engine.blend import model_blend_weight
+
+    return model_blend_weight()
+
+
 def public_health_body() -> dict:
     notes = list(alerts())
     summary = intent_status_summary()
@@ -53,6 +75,8 @@ def public_health_body() -> dict:
         "config_source": "database",
         "approved_max_open_positions": APPROVED_MAX_OPEN_POSITIONS,
         "fee_estimate_note": FEE_ESTIMATE_NOTE,
+        "entry_caps": _entry_caps(),
+        "model_blend_weight": _blend_weight(),
     }
 
 

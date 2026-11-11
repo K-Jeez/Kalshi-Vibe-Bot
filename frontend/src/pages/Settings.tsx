@@ -291,6 +291,14 @@ export const Settings: React.FC = () => {
               <p className="text-[11px] text-white/70">
                 Saved values apply immediately to the running bot. Available cash is the position limit. Restore configuration defaults reloads edge, the 55% win floor, and the stop from <code className="text-cyan-200/90">backend/.env</code>. Editing the file alone does not overwrite the database.
               </p>
+              {health?.entry_caps && health.entry_caps.length > 0 ? (
+                <p className="text-[11px] text-white/70">
+                  Per-bet cash cap by raw edge, from closed results (starts at 2.5%, floor 1%, ceiling 5% after 8 closes):{' '}
+                  {health.entry_caps
+                    .map((row) => `${row.bucket} ${row.cap_pct.toFixed(2)}% (n=${row.n})`)
+                    .join(' · ')}
+                </p>
+              ) : null}
 
               <div className="pt-3 border-t border-brand-muted/25 flex flex-wrap items-center justify-between gap-3">
                 <div>

@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     min_edge_to_buy_pct: int = DEFAULT_MIN_EDGE_TO_BUY_PCT
     # Minimum AI win probability (0–100) on the **purchased** side before a buy (clamped 51–99).
     min_ai_win_prob_buy_side_pct: int = DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
+    # Share of the raw model in sizing: p = w*model + (1-w)*fee-free mid. Gates stay on the raw model.
+    vibe_model_blend_weight: float = 0.25
 
     # ── Bot scan configuration ───────────────────────────────────────────────────
     bot_scan_interval: int = 10              # seconds between full market scans
@@ -149,6 +151,7 @@ class Settings(BaseSettings):
         self.local_min_residual_payoff = max(0.0, min(0.50, float(self.local_min_residual_payoff)))
         self.min_edge_to_buy_pct = max(0, min(95, int(self.min_edge_to_buy_pct)))
         self.min_ai_win_prob_buy_side_pct = max(51, min(99, int(self.min_ai_win_prob_buy_side_pct)))
+        self.vibe_model_blend_weight = max(0.0, min(1.0, float(self.vibe_model_blend_weight)))
         self.bot_max_open_positions = max(1, min(APPROVED_MAX_OPEN_POSITIONS, int(self.bot_max_open_positions)))
         self.exit_grace_minutes = max(0.0, min(1440.0, float(self.exit_grace_minutes)))
         self.stop_loss_drawdown_pct = max(0.01, min(0.90, float(self.stop_loss_drawdown_pct)))

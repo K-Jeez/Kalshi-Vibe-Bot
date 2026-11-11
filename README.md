@@ -78,6 +78,7 @@ Trading is **live Kalshi only** (no paper mode). The **Settings** UI persists **
 | `XAI_MANAGEMENT_API_KEY` | _(empty)_ | Optional: xAI Management API key |
 | `MIN_EDGE_TO_BUY_PCT` | `4` | Min edge (pts) to execute a buy |
 | `MIN_AI_WIN_PROB_BUY_SIDE_PCT` | `55` | Min AI win % on the purchased side (clamped **51–99** in code) |
+| `VIBE_MODEL_BLEND_WEIGHT` | `0.25` | Sizing only. Share of the raw model; the rest is the fee-free mid. Gates stay on the raw model |
 | `STOP_LOSS_DRAWDOWN_PCT` | `0.80` | Stop-loss drawdown vs entry price (Est. Value) |
 | `STOP_LOSS_SELLING_ENABLED` | `false` | Auto stop-loss exits when `true` |
 | `CLOSED_RESOLUTION_REFRESH_INTERVAL_SEC` | `450` | Poll closed rows for official outcome (`0` = off) |
