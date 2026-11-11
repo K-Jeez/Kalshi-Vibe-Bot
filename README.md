@@ -92,6 +92,9 @@ Trading is **live Kalshi only** (no paper mode). The **Settings** UI persists **
 | `BOT_MIN_TOP_SIZE` | `1.0` | Min top-of-book ask size (contracts) |
 | `REENTRY_COOLDOWN_MINUTES` | `120` | Cooldown after stop-loss on same ticker (`0` = off) |
 | `LOCAL_MIN_RESIDUAL_PAYOFF` | `0.12` | Min gross upside `1 − ask` on buy leg (`0` = off) |
+| `VIBE_LIVE_FACTS_ENABLED` | `true` | Fetch a public spot, NWS temp, or ESPN score before the model |
+| `VIBE_PREFILTER_SERIES_PREFIXES` | `KXESOCCER,KXCS2,...` | Series skipped before the model because no live feed exists |
+| `VIBE_NUMERIC_PREFILTER_SERIES_PREFIXES` | `KXSILVER,KXGOLD,KXINX,...` | Numeric series with no free price proxy |
 | `PORT` | `8000` | API port |
 | `HOST` | `127.0.0.1` | Bind address. `0.0.0.0` listens on the network; trading actions from other machines still need `LOCAL_API_TOKEN` |
 | `ENABLE_DEBUG_RAW_KALSHI` | `false` | Enables `GET /debug/raw` when `true` |

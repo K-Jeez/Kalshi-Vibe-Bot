@@ -8,6 +8,7 @@ trading rollback cannot erase the intent row.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -238,6 +239,8 @@ def _public_model_usage(payload: Dict[str, Any]) -> Optional[dict]:
 
 def _append_durable_event(row, model_usage: Optional[dict] = None) -> None:
     """Append one scrubbed line outside the pruned activity table. Failures are ignored."""
+    if os.environ.get("VIBE_UNDER_TEST") == "1":
+        return
     try:
         day = (row.ts_utc or utc_now()).strftime("%Y%m%d")
         directory = Path(__file__).resolve().parents[1] / "logs" / "events"

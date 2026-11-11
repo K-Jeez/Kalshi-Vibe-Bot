@@ -2,6 +2,8 @@
 Configuration management — loads all settings from the .env file.
 """
 
+import os
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -29,7 +31,8 @@ class Settings(BaseSettings):
     """Application settings sourced from backend/.env."""
 
     model_config = SettingsConfigDict(
-        env_file=str(BASE_DIR / ".env"),
+        # Pytest must not read the operator's backend/.env (keys, database path, hours).
+        env_file=None if ("pytest" in sys.modules or os.environ.get("VIBE_UNDER_TEST") == "1") else str(BASE_DIR / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         # Ignore unknown keys (e.g. removed TRADING_MODE / GEMINI_* / hybrid-era vars).
@@ -80,6 +83,12 @@ class Settings(BaseSettings):
     # Min gross upside (1 − native ask) on the purchased leg: scan filter + pre-buy gate (0 disables gate).
     # When > 0, scan requires at least one leg to be liquid and meet this floor (avoids LLM calls on skewed books).
     local_min_residual_payoff: float = 0.12
+    # Series with no usable live feed are skipped before the model. Comma-separated prefixes.
+    vibe_live_facts_enabled: bool = True
+    vibe_prefilter_series_prefixes: str = (
+        "KXESOCCER,KXCS2,KXCSGO,KXDOTA,KXVALORANT,KXLOL,KXITF,KXCHALLENGER"
+    )
+    vibe_numeric_prefilter_series_prefixes: str = "KXSILVER,KXGOLD,KXINX,KXNDX,KXSPX"
 
     # ── Exit hygiene ──────────────────────────────────────────────────────────────
     # No stop-loss or counter-trend exits until the position is this old (minutes).

@@ -249,6 +249,14 @@ export const AnalysisDetailBody: React.FC<{
   const recSide = a.decision === 'BUY_YES' ? 'YES' : a.decision === 'BUY_NO' ? 'NO' : null
   const aiForSide = recSide === 'YES' ? aiYes : recSide === 'NO' ? aiNo : null
   const mImpl = a.market_implied_probability_pct
+  const yesFromBook = finiteNum(a.yes_price)
+  const impliedShown =
+    mImpl != null && mImpl > 0
+      ? mImpl
+      : yesFromBook != null && yesFromBook > 0
+        ? Math.round(yesFromBook * 100)
+        : null
+  const impliedLabel = a.decision === 'SKIP' ? 'Market implied (YES ask)' : 'Market implied (buy side)'
   const edgePts = a.edge_pct ?? a.edge
   const kelly = a.kelly_contracts ?? 0
   const batchLegId = (a.xai_analysis?.event_batch && String(a.market_id || '').trim()) || ''
@@ -315,12 +323,12 @@ export const AnalysisDetailBody: React.FC<{
             <div>
               <p
                 className="text-[10px] uppercase tracking-wide text-white/65"
-                title="Executable ask on the side we would buy, as an implied win probability (0–100%)."
+                title="Executable YES ask, or the buy-side ask when a side was chosen."
               >
-                Market implied (buy side)
+                {impliedLabel}
               </p>
               <p className="text-lg font-bold text-white tabular-nums">
-                {mImpl != null && mImpl > 0 ? `${mImpl}%` : '—'}
+                {impliedShown != null ? `${impliedShown}%` : '—'}
               </p>
             </div>
             <div>

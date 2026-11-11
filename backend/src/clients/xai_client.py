@@ -28,7 +28,7 @@ from src.reconcile.open_positions import normalize_market_id
 
 _logger = setup_logging("xai_client")
 
-PROMPT_VERSION = "decision-2026-11-09"
+PROMPT_VERSION = "decision-2026-11-11"
 _UNCERTAINTY_LEVELS = {"low", "medium", "high", "abstain"}
 
 XAI_BASE_URL = "https://api.x.ai/v1"
@@ -235,7 +235,7 @@ Do not choose a side mainly because it looks cheap/rich. Never recommend the sid
 
 The server computes edge and quarter-Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks (whole contracts, cash-capped; may use exactly **one** contract when quarter Kelly is below one contract but edge at the ask remains). Keep that field calibrated and honest.
 
-Prompt version decision-2026-11-09. Use the contract's exact settlement rule. Name the source and as-of time for any fact you use. If the score, injury, or clock you need is missing or stale for this horizon, output direction SKIP and uncertainty.level abstain. P(YES) and P(NO) must sum to 100. Put that in the uncertainty object, not only in reasoning. Do not change ai_probability_yes_pct to look better calibrated. Do not invent a fee or a size; the server does that."""
+Prompt version decision-2026-11-11. Always output a calibrated ai_probability_yes_pct. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable for this strategy and is never by itself a reason to SKIP. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
 
 USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this contract. Recommend **YES** or **NO** only when that matches your genuine outcome view—not because either side looks under/overpriced.
 
@@ -296,7 +296,7 @@ Output strict JSON only:
     }}
 }}
 
-uncertainty is required. If level is abstain, direction must be SKIP. Do not change ai_probability_yes_pct to look better calibrated."""
+uncertainty is required. Use abstain only when the contract is unparseable or already expired; then direction is SKIP. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon."""
 
 # Line-ladder batches: switch to a sibling leg when its P(YES) beats the model pick by at least this much.
 _LADDER_LIKELIHOOD_OVERRIDE_MIN_GAP_PCT = 5
@@ -317,7 +317,7 @@ Rules: best_market_id must be one from the list (if SKIP, use the first). direct
 
 The server computes edge and quarter-Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks (whole contracts, cash-capped; may use exactly **one** contract when quarter Kelly is below one contract but edge at the ask remains).
 
-Prompt version decision-2026-11-09. Use each leg's settlement rule. Name sources and as-of times. If evidence for this horizon is missing or stale, direction SKIP and uncertainty.level abstain. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not change ai_probability_yes_pct to look better calibrated. Do not invent fees or size."""
+Prompt version decision-2026-11-11. Always output a calibrated ai_probability_yes_pct for the chosen contract. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to SKIP. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
 
 EVENT_BATCH_USER_TEMPLATE = """EVENT (shared): {event_title}
 EVENT_TICKER: {event_ticker}
@@ -358,7 +358,7 @@ OUTPUT JSON ONLY:
   }}
 }}
 
-uncertainty is required. If level is abstain, direction must be SKIP. Do not change ai_probability_yes_pct to look better calibrated.
+uncertainty is required. Use abstain only when the chosen contract is unparseable or already expired; then direction is SKIP. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon.
 
 Include **outcome_probability_pct_by_market_id** when the legs are **mutually exclusive on YES** (only one can settle YES — e.g. home / away / **draw**). Keys must be **exact** ``market_id`` strings from the list; values are your P(YES) for each; they must **sum to 99–101** across **all listed legs** in that case. Omit this field (or use null) only when legs are clearly **not** such a partition (e.g. unrelated props)."""
 
@@ -789,7 +789,8 @@ def _parse_event_batch_json(
     if market_id_rejected:
         direction = "SKIP"
 
-    ai_yes = _extract_ai_probability_yes_pct(result)
+    raw_probability = result.get("ai_probability_yes_pct", result.get("confidence_pct"))
+    ai_yes = None if raw_probability is None else _extract_ai_probability_yes_pct(result)
 
     omap = _normalize_outcome_probability_pct_by_market_id(
         result.get("outcome_probability_pct_by_market_id"),
@@ -910,8 +911,10 @@ def _parse_json(content: str) -> dict:
         else:
             direction = "SKIP"
 
-    ai_yes = _extract_ai_probability_yes_pct(result)
+    raw_probability = result.get("ai_probability_yes_pct", result.get("confidence_pct"))
+    ai_yes = None if raw_probability is None else _extract_ai_probability_yes_pct(result)
     uncertainty = uncertainty_from_result(result)
+    # Abstain means the contract cannot be analysed. It does not replace a stated probability with 50.
     if uncertainty.get("level") == "abstain":
         direction = "SKIP"
 

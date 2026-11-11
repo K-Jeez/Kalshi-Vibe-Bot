@@ -1605,6 +1605,19 @@ async def scan_and_trade(
                             "vetting_horizon_time": m.get("vetting_horizon_time"),
                         }
                     )
+                from src.live_facts import live_fact_for_market, note_live_fact_skip, series_of
+
+                fact = await live_fact_for_market(members[0])
+                if fact["skip"]:
+                    note_live_fact_skip(series_of(members[0]), fact["reason"])
+                    for xm in members:
+                        batch_completed_this_sweep.add(str(xm.get("id") or ""))
+                    continue
+                if fact["context"]:
+                    for leg in legs:
+                        leg["market_description"] = (
+                            str(leg.get("market_description") or "") + "\n\n" + fact["context"]
+                        ).strip()
                 try:
                     decision = await decision_engine.analyze_event_batch(
                         event_ticker=et_key,
@@ -1692,6 +1705,14 @@ async def scan_and_trade(
                     description = enrich_ai_market_description(
                         (subtitle or contract_title).strip(), market
                     )
+                    from src.live_facts import live_fact_for_market, note_live_fact_skip, series_of
+
+                    fact = await live_fact_for_market(market)
+                    if fact["skip"]:
+                        note_live_fact_skip(series_of(market), fact["reason"])
+                        continue
+                    if fact["context"]:
+                        description = (description + "\n\n" + fact["context"]).strip()
                     yes_bid = market.get("yes_bid")
                     yes_ask = market.get("yes_ask")
                     no_bid = market.get("no_bid")

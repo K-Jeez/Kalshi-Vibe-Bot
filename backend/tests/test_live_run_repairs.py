@@ -522,7 +522,7 @@ def test_uncertainty_is_structured_and_does_not_invent_a_probability():
     assert out["usage"]["cost_label"] == "provider_reported"
     assert out["usage"]["input_tokens"] == 1000
     assert out["usage"]["duration_sec"] >= 0
-    assert out["prompt_version"] == "decision-2026-11-09"
+    assert out["prompt_version"] == "decision-2026-11-11"
     assert "choices" not in out["usage"]
     estimate = {}
     attach_model_usage(
