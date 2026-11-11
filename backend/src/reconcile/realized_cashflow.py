@@ -49,8 +49,8 @@ def sale_split(
     sold on the NO side of the book. A YES position's remainder is
     ``yes_count - no_count``. NO positions mirror that. Selling 2 of 4 is
     reported as 4/2, so the net is 2 and the close is partial. Net 0, including
-    a 0/0 row after a full sell, is a full exit. Net equal to the buy with no
-    sell is a hold to settlement, not a partial sale.
+    a 0/0 row after a full sell, is a full exit. A sold-side count near 0 is a
+    hold to settlement even when the local close wrote a full-qty sell.
     """
     sold = max(0, int(sold_qty))
     stored = max(0, int(position_qty))
@@ -68,7 +68,7 @@ def sale_split(
         book_sold = no_n if held == "YES" else yes_n
         if remaining <= 0:
             kind = "full"
-        elif sold <= 0 and book_sold <= 0.01:
+        elif book_sold <= 0.01:
             kind = "held"
         else:
             kind = "partial"

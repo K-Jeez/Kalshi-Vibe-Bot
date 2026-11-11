@@ -366,6 +366,108 @@ def test_unfinalized_held_settlement_is_not_added_twice():
     assert abs(float(pos.realized_pnl) - (2 * once)) > 1.0
 
 
+def test_all_held_unfinalized_rows_replace_instead_of_adding():
+    """Settlement close writes a full-qty sell. Kalshi 7/0 and 0/7 stay held."""
+    import asyncio
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from src.database.models import Base, Position, Trade
+    from src.reconcile.kalshi_closed_position_finalize import finalize_live_closed_positions_from_kalshi
+    from src.reconcile.realized_cashflow import sale_split
+    from src.util.datetimes import utc_now
+
+    class _Noop:
+        async def get_order(self, _oid):
+            return {}
+
+    once = 7.0 - 4.55 - 0.11
+    cases = (
+        (
+            "YES",
+            "HELDYES",
+            {
+                "ticker": "HELDYES",
+                "market_result": "yes",
+                "yes_count_fp": "7.00",
+                "no_count_fp": "0.00",
+                "yes_total_cost_dollars": "4.5500",
+                "revenue": 700,
+                "fee_cost": "0.1100",
+            },
+        ),
+        (
+            "NO",
+            "HELDNO",
+            {
+                "ticker": "HELDNO",
+                "market_result": "no",
+                "yes_count_fp": "0.00",
+                "no_count_fp": "7.00",
+                "no_total_cost_dollars": "4.5500",
+                "revenue": 700,
+                "fee_cost": "0.1100",
+            },
+        ),
+    )
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = utc_now()
+    for side, ticker, settlement in cases:
+        split = sale_split(position_qty=7, sold_qty=7, settlement=settlement, side=side)
+        assert split["kind"] == "held"
+        assert split["remaining"] == 7
+        db.add(
+            Position(
+                id=ticker,
+                market_id=ticker,
+                market_title="t",
+                side=side,
+                quantity=7,
+                entry_price=0.65,
+                entry_cost=4.55,
+                current_price=1.0,
+                status="closed",
+                trade_mode="live",
+                closed_at=now,
+                exit_reason="settlement",
+                realized_pnl=once,
+                fees_paid=0.11,
+                kalshi_closure_finalized=False,
+            )
+        )
+        db.add(
+            Trade(
+                id=f"sell-{ticker}",
+                market_id=ticker,
+                market_title="t",
+                action="sell",
+                side=side,
+                quantity=7,
+                price=1.0,
+                total_cost=7.0,
+                realized_pnl=once,
+                trade_mode="live",
+                timestamp=now,
+            )
+        )
+    db.commit()
+    asyncio.run(
+        finalize_live_closed_positions_from_kalshi(
+            db,
+            trade_mode="live",
+            kalshi_client=_Noop(),
+            settlement_rows=[case[2] for case in cases],
+        )
+    )
+    db.commit()
+    for pos in db.query(Position).all():
+        assert abs(float(pos.realized_pnl) - once) < 1e-6
+        assert abs(float(pos.realized_pnl) - (2 * once)) > 1.0
+
+
 def test_void_settlement_uses_revenue_instead_of_zero():
     cash = fills_to_cashflows(
         [{"action": "buy", "side": "yes", "count_fp": "2", "yes_price": "0.40", "fee": "0"}],
