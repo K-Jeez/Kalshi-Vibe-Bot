@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     bot_min_volume: float = 1500.0           # minimum 24h contract volume (tradeability scan; sports uses higher floor in code)
     # Vetting: BUY window prefers ``expected_expiration_time`` (event end); if missing or past, falls back to
     # the soonest future instant among ``vetting_horizon_time`` and contractual ``close_time`` (``BOT_MAX_HOURS``).
-    bot_max_hours: int = 6
+    bot_max_hours: int = 4
     # Kalshi ``GET /markets`` ``max_close_ts`` (contractual close); widen so listings return before vetting.
     bot_markets_fetch_max_close_hours: int = 720
     bot_max_spread: float = 0.15             # max bid/ask spread for YES or NO leg when buying (0.15 = 15¢)

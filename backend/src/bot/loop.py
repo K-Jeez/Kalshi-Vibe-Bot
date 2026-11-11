@@ -407,7 +407,7 @@ def _seconds_until_buy_horizon(market: dict, *, now: datetime) -> Tuple[Optional
 
 def is_tradeable_market(
     market: dict,
-    max_hours: int = 6,
+    max_hours: int = 4,
     min_volume: float = 1.0,
     max_spread: float = 0.15,
     min_top_size: float = 1.0,

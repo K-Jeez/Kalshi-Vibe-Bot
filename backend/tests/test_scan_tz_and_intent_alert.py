@@ -107,7 +107,7 @@ def test_scan_reaches_the_sweep_when_sqlite_closed_at_is_naive(tmp_path, monkeyp
             return []
 
     settings = SimpleNamespace(
-        bot_max_hours=6,
+        bot_max_hours=4,
         bot_markets_fetch_max_close_hours=6,
         bot_min_volume=1.0,
         bot_max_spread=0.15,

@@ -226,7 +226,7 @@ def test_scan_stays_up_when_the_series_fee_read_fails(tmp_path, monkeypatch, cap
             return {"decision": "SKIP"}
 
     settings = SimpleNamespace(
-        bot_max_hours=6,
+        bot_max_hours=4,
         bot_markets_fetch_max_close_hours=6,
         bot_min_volume=1.0,
         bot_max_spread=0.15,

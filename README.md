@@ -86,7 +86,7 @@ Trading is **live Kalshi only** (no paper mode). The **Settings** UI persists **
 | `EXIT_GRACE_MINUTES` | `10` | Minutes after entry before stop-loss applies |
 | `BOT_SCAN_INTERVAL` | `10` | Seconds between full scans |
 | `BOT_MIN_VOLUME` | `1500.0` | Min 24h volume (contracts); sports use a higher floor in code |
-| `BOT_MAX_HOURS` | `6` | Buy vetting window (hours to event end) |
+| `BOT_MAX_HOURS` | `4` | Buy vetting window (hours to event end). Read from `.env` only; `tuning_state` does not store it |
 | `BOT_MARKETS_FETCH_MAX_CLOSE_HOURS` | `720` | Kalshi list fetch horizon (contractual close) |
 | `BOT_MAX_SPREAD` | `0.15` | Max spread on purchased leg (decimal $) |
 | `BOT_MIN_TOP_SIZE` | `1.0` | Min top-of-book ask size (contracts) |

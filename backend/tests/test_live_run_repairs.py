@@ -533,3 +533,13 @@ def test_uncertainty_is_structured_and_does_not_invent_a_probability():
     assert estimate["usage"]["actual_usd"] is None
     assert estimate["usage"]["cost_label"] == "list_price_estimate"
     assert estimate["usage"]["estimated_usd"] is not None
+
+
+def test_buy_window_default_is_four_hours_and_is_not_in_the_database(monkeypatch):
+    from src.config import Settings
+    from src.database.models import TuningState
+
+    monkeypatch.delenv("BOT_MAX_HOURS", raising=False)
+    fresh = Settings(_env_file=None)
+    assert fresh.bot_max_hours == 4
+    assert "bot_max_hours" not in TuningState.__table__.columns
