@@ -2200,14 +2200,20 @@ async def scan_and_trade(
                                                                 }
                                                             else:
                                                                 from src.bot.shard_funding import fund_buy_shard
+                                                                from src.clients.kalshi_client import known_exchange_index
 
-                                                                funding = await fund_buy_shard(
-                                                                    kalshi_client,
-                                                                    exchange_index=int(market.get("exchange_index") or 0),
-                                                                    order_all_in=float(added),
-                                                                    bankroll=float(balance),
-                                                                    ticker=ticker_clean,
-                                                                )
+                                                                shard_index = known_exchange_index(market.get("exchange_index"))
+                                                                if shard_index is None:
+                                                                    funding = {"ok": True}
+                                                                else:
+                                                                    funding = await fund_buy_shard(
+                                                                        kalshi_client,
+                                                                        exchange_index=shard_index,
+                                                                        order_all_in=float(added),
+                                                                        bankroll=float(balance),
+                                                                        ticker=ticker_clean,
+                                                                        client_order_id=str(order_intent_id or ""),
+                                                                    )
                                                                 if not funding.get("ok"):
                                                                     result = {
                                                                         "error": "order not sent",
@@ -2216,7 +2222,7 @@ async def scan_and_trade(
                                                                     action_taken = {
                                                                         "status": "no_trade",
                                                                         "summary": funding.get("reason")
-                                                                        or f"shard {int(market.get('exchange_index') or 0)} funding failed",
+                                                                        or f"shard {shard_index} funding failed",
                                                                         "signal": signal,
                                                                     }
                                                                     note_untradeable(
@@ -2236,7 +2242,7 @@ async def scan_and_trade(
                                                                         quantity,
                                                                         ioc_limit_dollars,
                                                                         client_order_id=order_intent_id,
-                                                                        exchange_index=int(market.get("exchange_index") or 0),
+                                                                        exchange_index=shard_index,
                                                                     )
                                                 record_order_ack(
                                                     result,
@@ -2283,7 +2289,7 @@ async def scan_and_trade(
                                                 trade_side,
                                                 route_kind,
                                                 result.get("status_code"),
-                                                int(market.get("exchange_index") or 0),
+                                                market.get("exchange_index") if market.get("exchange_index") is not None else "omitted",
                                                 result.get("error"),
                                             )
                                         action_taken = {

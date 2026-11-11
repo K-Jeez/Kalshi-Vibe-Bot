@@ -23,16 +23,20 @@ logger = setup_logging("kalshi_client")
 SERIES_FEE_CACHE_TTL_SEC = 3600.0
 
 
-def _exchange_index_or_zero(value: object) -> int:
-    """Market ``exchange_index``. Missing or unusable values stay on shard 0."""
+def known_exchange_index(value: object) -> Optional[int]:
+    """Shard from ``GET /markets``. Missing or unusable stays unknown.
+
+    Unknown is not shard 0. Create Order V2 auto-routes when ``exchange_index``
+    is omitted and ``ticker`` is set. Explicit 0 is the catch-all shard.
+    """
     if value is None or value == "":
-        return 0
+        return None
     try:
         index = int(value)
     except (TypeError, ValueError):
-        return 0
+        return None
     if index < 0:
-        return 0
+        return None
     return index
 
 
@@ -1079,8 +1083,8 @@ class KalshiClient:
             "title":           raw.get("title", ""),
             "event_ticker":    _first_event_ticker(raw),
             "series_ticker":   raw.get("series_ticker") or "",
-            # GET /markets exchange_index is the shard. Absent means the catch-all shard.
-            "exchange_index":  _exchange_index_or_zero(raw.get("exchange_index")),
+            # None when the payload omitted it. Only an explicit index is funded and sent.
+            "exchange_index":  known_exchange_index(raw.get("exchange_index")),
             "subtitle":        raw.get("subtitle") or raw.get("yes_sub_title", ""),
             "category":        raw.get("category", ""),
             "yes_price":       yes_price,
@@ -1604,6 +1608,7 @@ class KalshiClient:
                                 continue
                             response.raise_for_status()
                             out = self._parse_portfolio_balance_payload(response.json() or {})
+                            out["balance_authoritative"] = True
                             self._portfolio_balance_cache = (time.monotonic(), dict(out))
                             return out
                         except httpx.HTTPStatusError as e:
@@ -1633,9 +1638,16 @@ class KalshiClient:
                             last_err,
                             self._PORTFOLIO_BALANCE_STALE_OK_SEC,
                         )
+                        stale["balance_authoritative"] = False
                         return stale
                     logger.error("Error fetching portfolio: %s", last_err)
-                    return {"cash": 0.0, "positions_value": 0.0, "portfolio_value": 0.0}
+                    return {
+                        "cash": 0.0,
+                        "positions_value": 0.0,
+                        "portfolio_value": 0.0,
+                        "shard_cash": {},
+                        "balance_authoritative": False,
+                    }
 
                 async def _drive() -> None:
                     try:
@@ -1657,9 +1669,16 @@ class KalshiClient:
             stale = self._cached_portfolio_balance(max_age_sec=self._PORTFOLIO_BALANCE_STALE_OK_SEC)
             if stale is not None:
                 logger.warning("Portfolio balance wait failed (%s); serving cached balance", e)
+                stale["balance_authoritative"] = False
                 return stale
             logger.error("Error fetching portfolio: %s", e)
-            return {"cash": 0.0, "positions_value": 0.0, "portfolio_value": 0.0}
+            return {
+                "cash": 0.0,
+                "positions_value": 0.0,
+                "portfolio_value": 0.0,
+                "shard_cash": {},
+                "balance_authoritative": False,
+            }
 
     async def get_positions(
         self,
@@ -1905,9 +1924,10 @@ class KalshiClient:
             }
             if reduce_only:
                 body["reduce_only"] = True
-            # Create Order V2: ticker auto-routes when exchange_index is omitted.
-            # A known market shard is sent so the order does not default to shard 0.
-            if exchange_index is not None:
+            # Omit exchange_index when the market did not say which shard.
+            # Create Order V2 then auto-routes on ticker. -1 is the other auto-route
+            # signal; we omit the field instead of guessing shard 0.
+            if exchange_index is not None and int(exchange_index) >= 0:
                 body["exchange_index"] = int(exchange_index)
 
             log_label = f"V2 {tif} {action} {side_yesno} {t_eff} x{q} @ {body['price']} ({book_side})"

@@ -7,13 +7,22 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.bot.order_outcome import classify_routing_error
-from src.bot.shard_funding import fund_buy_shard, plan_shard_funding
+from src.bot.shard_funding import fund_buy_shard, plan_shard_funding, reset_shard_funding_memory, transfer_client_id
 from src.clients.kalshi_client import KalshiClient
 from src.database.models import Base
+
+
+@pytest.fixture(autouse=True)
+def _isolated_shard_funding(monkeypatch):
+    reset_shard_funding_memory()
+    monkeypatch.setattr("src.bot.shard_funding.BALANCE_READ_MIN_INTERVAL_SEC", 0.0)
+    yield
+    reset_shard_funding_memory()
 
 
 def _factory(tmp_path: Path):
@@ -48,7 +57,7 @@ def test_normalize_market_keeps_exchange_index_and_defaults_to_zero():
     sports = client._normalize_market({"ticker": "KXGAME", "exchange_index": 3, "status": "active"})
     plain = client._normalize_market({"ticker": "KXOTHER", "status": "active"})
     assert sports["exchange_index"] == 3
-    assert plain["exchange_index"] == 0
+    assert plain["exchange_index"] is None
 
 
 def test_balance_breakdown_sums_dollar_strings_into_total_cash():
@@ -246,6 +255,20 @@ def test_buy_posts_ticker_and_exchange_index():
     assert captured["body"]["exchange_index"] == 3
     assert "market_ticker" not in captured["body"]
 
+    async def omitted():
+        return await client.place_buy_ioc_limit(
+            "KXOTHER",
+            "YES",
+            1,
+            0.40,
+            client_order_id="cid-2",
+            exchange_index=None,
+        )
+
+    asyncio.run(omitted())
+    assert captured["body"]["ticker"] == "KXOTHER"
+    assert "exchange_index" not in captured["body"]
+
 
 def test_transfer_request_uses_centicents():
     client = KalshiClient.__new__(KalshiClient)
@@ -281,6 +304,89 @@ def test_transfer_request_uses_centicents():
         "destination_exchange_shard": 3,
         "client_transfer_id": "11111111-1111-1111-1111-111111111111",
     }
+
+
+def test_stale_breakdown_does_not_transfer_twice_to_the_same_shard(tmp_path):
+    class Stale(_Client):
+        async def transfer_event_contract_shards(self, **kwargs):
+            self.transfers.append(kwargs)
+            return {"ok": True, "ambiguous": False, "transfer_id": "tr-1", "status_code": 200}
+
+    client = Stale({"cash": 20.0, "shard_cash": {0: 20.0, 3: 0.0}, "balance_authoritative": True})
+
+    async def run():
+        first = await fund_buy_shard(
+            client,
+            exchange_index=3,
+            order_all_in=1.00,
+            bankroll=100.0,
+            ticker="KXFIRST",
+            client_order_id="order-a",
+            session_factory=_factory(tmp_path),
+        )
+        second = await fund_buy_shard(
+            client,
+            exchange_index=3,
+            order_all_in=1.00,
+            bankroll=100.0,
+            ticker="KXSECOND",
+            client_order_id="order-b",
+            session_factory=_factory(tmp_path),
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert len(client.transfers) == 1
+    assert first["ok"] is False
+    assert second["ok"] is False
+    assert "unconfirmed" in second["reason"] or "has not updated" in first["reason"]
+
+
+def test_transfer_id_repeats_for_the_same_intent_and_amount():
+    first = transfer_client_id(client_order_id="order-a", source_shard=0, destination_shard=3, amount_cents=147)
+    again = transfer_client_id(client_order_id="order-a", source_shard=0, destination_shard=3, amount_cents=147)
+    other = transfer_client_id(client_order_id="order-b", source_shard=0, destination_shard=3, amount_cents=147)
+    assert first == again
+    assert first != other
+
+
+def test_stale_balance_cache_does_not_authorize_a_transfer(tmp_path):
+    client = _Client({"cash": 0.0, "shard_cash": {}, "balance_authoritative": False})
+
+    async def run():
+        return await fund_buy_shard(
+            client,
+            exchange_index=3,
+            order_all_in=1.00,
+            bankroll=100.0,
+            ticker="KX",
+            session_factory=_factory(tmp_path),
+        )
+
+    result = asyncio.run(run())
+    assert result["ok"] is False
+    assert client.transfers == []
+    assert "not authoritative" in result["reason"]
+
+
+def test_buffer_does_not_push_the_transfer_past_the_cap(tmp_path):
+    client = _Client({"cash": 100.0, "shard_cash": {0: 100.0, 3: 0.0}})
+
+    async def run():
+        return await fund_buy_shard(
+            client,
+            exchange_index=3,
+            order_all_in=2.49,
+            bankroll=100.0,
+            ticker="KXCAP",
+            client_order_id="order-cap",
+            session_factory=_factory(tmp_path),
+        )
+
+    result = asyncio.run(run())
+    assert result["ok"] is True
+    assert client.transfers[0]["amount_dollars"] == 2.50
+    assert client.transfers[0]["amount_dollars"] <= 2.50
 
 
 def test_shard_balance_404_is_still_classified():
