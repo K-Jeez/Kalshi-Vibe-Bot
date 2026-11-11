@@ -82,6 +82,33 @@ def blend_snapshot(
     }
 
 
+def quantity_after_blend(
+    *,
+    blend_ev_gate: bool,
+    kelly_quantity: int,
+    blended_ev: Optional[float],
+    cap_contracts: int,
+    one_contract_fits_cash: bool,
+) -> tuple[int, str]:
+    """Size after the raw gates have already passed.
+
+    The blend gate, when on, requires positive blended EV. When off, quarter
+    Kelly still uses the blend, and a non-positive Kelly becomes one contract
+    if the cap and cash allow it.
+    """
+    kelly = max(0, int(kelly_quantity))
+    cap = max(0, int(cap_contracts))
+    if blend_ev_gate:
+        if blended_ev is None or blended_ev <= 0 or kelly < 1:
+            return 0, "blend_ev"
+        return min(kelly, cap), "quarter_kelly"
+    if kelly >= 1:
+        return min(kelly, cap), "quarter_kelly"
+    if cap >= 1 and one_contract_fits_cash:
+        return 1, "blend_floor"
+    return 0, "none"
+
+
 def stamp_blend(decision: dict, snap: dict) -> None:
     """Keep the raw model fields and add the blend beside them."""
     decision["blend_weight"] = snap["weight"]

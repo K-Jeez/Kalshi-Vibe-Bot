@@ -79,6 +79,7 @@ Trading is **live Kalshi only** (no paper mode). The **Settings** UI persists **
 | `MIN_EDGE_TO_BUY_PCT` | `4` | Min edge (pts) to execute a buy |
 | `MIN_AI_WIN_PROB_BUY_SIDE_PCT` | `55` | Min AI win % on the purchased side (clamped **51–99** in code) |
 | `VIBE_MODEL_BLEND_WEIGHT` | `0.25` | Sizing only. Share of the raw model; the rest is the fee-free mid. Gates stay on the raw model |
+| `VIBE_BLEND_EV_GATE` | `false` | When false, raw edge and win-prob gates decide the buy. Blended Kelly sizes it, with a one-contract floor inside the cap and cash |
 | `STOP_LOSS_DRAWDOWN_PCT` | `0.80` | Stop-loss drawdown vs entry price (Est. Value) |
 | `STOP_LOSS_SELLING_ENABLED` | `false` | Auto stop-loss exits when `true` |
 | `CLOSED_RESOLUTION_REFRESH_INTERVAL_SEC` | `450` | Poll closed rows for official outcome (`0` = off) |

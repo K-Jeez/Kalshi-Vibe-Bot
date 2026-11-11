@@ -28,7 +28,7 @@ def test_tuning_state_payload_has_strategy_fields():
     assert p["min_edge_to_buy_pct"] == 1
     assert p["stop_loss_selling_enabled"] is True
     assert p["min_ai_win_prob_buy_side_pct"] == 51
-    assert p["max_open_positions"] == 12
+    assert "max_open_positions" not in p
 
 
 def test_tuning_state_payload_coalesces_null_strategy_ints():
@@ -44,7 +44,7 @@ def test_tuning_state_payload_coalesces_null_strategy_ints():
     p = tuning_state_payload(row)
     assert p["min_edge_to_buy_pct"] == DEFAULT_MIN_EDGE_TO_BUY_PCT
     assert p["min_ai_win_prob_buy_side_pct"] == DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
-    assert p["max_open_positions"] == DEFAULT_MAX_OPEN_POSITIONS
+    assert "max_open_positions" not in p
     assert p["ai_provider"] == DEFAULT_AI_PROVIDER
 
 

@@ -859,6 +859,10 @@ async def monitor_positions(
             # or an official resolved intrinsic (winning YES legs often have **no bids** while ``finalized``).
             # ``live_best_bid_dollars`` may still read ``yes_price`` composite and wrongly clear dead-market
             # state while the dashboard bid column shows 0¢.
+            if mark_last > 0:
+                from src.bot.exit_backoff import clear_exit_backoff
+
+                clear_exit_backoff(str(pos.market_id or ""))
             if mark_last > 0 or intrinsic_resolved_mark is not None:
                 had_flag = bool(getattr(pos, "awaiting_settlement", False)) or bool(
                     getattr(pos, "dead_market", False)
@@ -1153,6 +1157,9 @@ async def monitor_positions(
                     pos.realized_pnl = realized
                     pos.current_price = sold_px
                     mark_position_kalshi_flat_reconcile_pending(pos)
+                    from src.bot.exit_backoff import clear_exit_backoff
+
+                    clear_exit_backoff(str(pos.market_id or ""))
                 else:
                     logger.info(
                         "Partial exit IOC filled: %s %s filled_fp=%.4f proceeds=%.2f remaining=%d (Kalshi sync)",
@@ -1378,6 +1385,13 @@ async def scan_and_trade(
         from src.decision_engine.bucket_caps import load_bucket_caps
 
         bucket_caps = load_bucket_caps(db)
+        try:
+            from src.activity_log import list_unresolved_intents
+
+            for intent in list_unresolved_intents(action="buy") or []:
+                held_match_keys.add(match_exposure_key(str(intent.get("market_id") or "")))
+        except Exception:
+            logger.debug("Unconfirmed buys were not added to the match cap", exc_info=True)
 
         # Tiered re-analysis cooldown:
         # - Markets that escalated to the AI provider: long debounce (API cost + stale signal window).
@@ -1424,7 +1438,9 @@ async def scan_and_trade(
         previous_quotes: Dict[str, Tuple[float, float]] = {}
         for mid, yes_px, no_px in (
             db.query(DecisionLog.market_id, DecisionLog.snapshot_yes_price, DecisionLog.snapshot_no_price)
-            .filter(DecisionLog.timestamp >= xai_cutoff)
+            .filter(DecisionLog.snapshot_yes_price.isnot(None))
+            .order_by(DecisionLog.timestamp.desc())
+            .limit(2000)
             .all()
         ):
             key = normalize_market_id(str(mid or "")).upper()
@@ -1543,17 +1559,22 @@ async def scan_and_trade(
                 for m in members:
                     tid = m.get("id", "")
                     nt = normalize_market_id(str(tid)).upper()
+                    from src.bot.buy_retry import miss_is_watched
+
                     prev_quote = previous_quotes.get(nt)
                     if (
                         nt in held_tickers
                         or tid in batch_completed_this_sweep
                         or match_exposure_key(str(tid)) in held_match_keys
-                        or should_skip_unchanged_quote(
-                            analyzed_recently=nt in recently_analyzed,
-                            previous_yes=None if prev_quote is None else prev_quote[0],
-                            previous_no=None if prev_quote is None else prev_quote[1],
-                            yes_price=float(m.get("yes_price") or 0),
-                            no_price=float(m.get("no_price") or 0),
+                        or (
+                            not miss_is_watched(str(tid))
+                            and should_skip_unchanged_quote(
+                                analyzed_recently=nt in recently_analyzed,
+                                previous_yes=None if prev_quote is None else prev_quote[0],
+                                previous_no=None if prev_quote is None else prev_quote[1],
+                                yes_price=float(m.get("yes_price") or 0),
+                                no_price=float(m.get("no_price") or 0),
+                            )
                         )
                     ):
                         continue
@@ -1741,17 +1762,22 @@ async def scan_and_trade(
                 market = members[0]
                 ticker = market.get("id", "")
                 nt0 = normalize_market_id(str(ticker)).upper()
+                from src.bot.buy_retry import miss_is_watched
+
                 prev_quote = previous_quotes.get(nt0)
                 if (
                     nt0 in held_tickers
                     or ticker in batch_completed_this_sweep
                     or match_exposure_key(str(ticker)) in held_match_keys
-                    or should_skip_unchanged_quote(
-                        analyzed_recently=nt0 in recently_analyzed,
-                        previous_yes=None if prev_quote is None else prev_quote[0],
-                        previous_no=None if prev_quote is None else prev_quote[1],
-                        yes_price=float(market.get("yes_price") or 0),
-                        no_price=float(market.get("no_price") or 0),
+                    or (
+                        not miss_is_watched(str(ticker))
+                        and should_skip_unchanged_quote(
+                            analyzed_recently=nt0 in recently_analyzed,
+                            previous_yes=None if prev_quote is None else prev_quote[0],
+                            previous_no=None if prev_quote is None else prev_quote[1],
+                            yes_price=float(market.get("yes_price") or 0),
+                            no_price=float(market.get("no_price") or 0),
+                        )
                     )
                 ):
                     continue
@@ -2058,36 +2084,50 @@ async def scan_and_trade(
                                 win_probability=float(blend["win_probability"]),
                             )
                             action_taken = {}
-                            if quantity >= 1:
+                            blend_ev_gate = bool(getattr(settings, "vibe_blend_ev_gate", False))
+                            ev_dollars = None
+                            if _fee.get("known"):
                                 ev_dollars = fee_inclusive_ev_dollars(
                                     float(blend["win_probability"]),
                                     float(trade_price),
-                                    int(quantity),
+                                    max(int(quantity), 1),
                                     fee_multiplier=_fee.get("fee_multiplier"),
                                     fee_type=_fee.get("fee_type"),
                                 )
-                                if ev_dollars is None:
-                                    action_taken = {
-                                        "status": "no_trade",
-                                        "summary": (
-                                            "Skipped — series fee schedule is unknown, so "
-                                            "expected value is not proven positive"
-                                        ),
-                                        "signal": signal,
-                                    }
-                                    quantity = 0
-                                elif ev_dollars <= 0:
-                                    action_taken = {
-                                        "status": "no_trade",
-                                        "summary": (
-                                            f"Skipped — blended fee-inclusive expected value "
-                                            f"${ev_dollars:.4f} is not positive "
-                                            f"(w={blend['weight']:.2f}, {blend['market_source']}). "
-                                            "That fee is the 0.07 schedule estimate, not the exchange fill fee."
-                                        ),
-                                        "signal": signal,
-                                    }
-                                    quantity = 0
+                            from src.decision_engine.blend import quantity_after_blend
+                            from src.decision_engine.strategy_gates import all_in_entry_dollars
+
+                            one_cost = (
+                                all_in_entry_dollars(
+                                    1,
+                                    float(trade_price),
+                                    fee_multiplier=_fee.get("fee_multiplier"),
+                                    fee_type=_fee.get("fee_type"),
+                                )
+                                if _fee.get("known")
+                                else None
+                            )
+                            sized, size_tag = quantity_after_blend(
+                                blend_ev_gate=blend_ev_gate,
+                                kelly_quantity=int(quantity),
+                                blended_ev=ev_dollars,
+                                cap_contracts=int(kelly_cap),
+                                one_contract_fits_cash=one_cost is not None and one_cost <= float(balance) + 1e-9,
+                            )
+                            quantity = sized
+                            if size_tag == "blend_floor":
+                                kelly_sizing_tag = size_tag
+                            if quantity < 1 and blend_ev_gate:
+                                action_taken = {
+                                    "status": "no_trade",
+                                    "summary": (
+                                        "Skipped — blended fee-inclusive expected value is not positive "
+                                        f"(w={blend['weight']:.2f}, {blend['market_source']}). "
+                                        "VIBE_BLEND_EV_GATE is on. "
+                                        "That fee is the 0.07 schedule estimate, not the exchange fill fee."
+                                    ),
+                                    "signal": signal,
+                                }
                             if quantity < 1 and not (
                                 isinstance(action_taken, dict)
                                 and "expected value" in str(action_taken.get("summary") or "")
@@ -2448,40 +2488,47 @@ async def scan_and_trade(
                                                 "signal": signal,
                                             }
                                         if filled is not None and not is_whole_count(filled):
-                                            residue = format_count_fp(filled)
-                                            cleanup = await kalshi_client.sell_fractional_residue(
-                                                ticker, trade_side, residue
-                                            )
-                                            sold_residue = (
-                                                not cleanup.get("error")
-                                                and float(kalshi_order_filled_contracts(cleanup) or 0) > 0
-                                            )
-                                            action_taken = {
-                                                "status": "fractional_fill",
-                                                "summary": (
-                                                    f"Exchange filled {residue} on a whole-contract order. "
-                                                    + (
-                                                        "That residue was sold immediately."
-                                                        if sold_residue
-                                                        else "The residue sell did not fill. It is logged and was not booked as a position."
-                                                    )
-                                                ),
-                                                "signal": signal,
-                                                "filled_fp": residue,
-                                                "residue_sold": sold_residue,
-                                            }
-                                            record_activity(
-                                                {
-                                                    "event_type": "fill",
-                                                    "market_id": ticker_clean,
-                                                    "side": trade_side,
-                                                    "action": "sell" if sold_residue else "buy",
-                                                    "order_status": "fractional_fill",
-                                                    "fill_count_fp": residue,
-                                                    "detail": action_taken["summary"],
+                                            from decimal import ROUND_DOWN
+
+                                            whole = int(filled.to_integral_value(rounding=ROUND_DOWN))
+                                            frac = filled - type(filled)(whole)
+                                            residue = format_count_fp(frac) if frac > 0 else ""
+                                            sold_residue = False
+                                            if residue:
+                                                cleanup = await kalshi_client.sell_fractional_residue(
+                                                    ticker, trade_side, residue
+                                                )
+                                                sold_residue = (
+                                                    not cleanup.get("error")
+                                                    and float(kalshi_order_filled_contracts(cleanup) or 0) > 0
+                                                )
+                                                record_activity(
+                                                    {
+                                                        "event_type": "fill",
+                                                        "market_id": ticker_clean,
+                                                        "side": trade_side,
+                                                        "action": "sell" if sold_residue else "buy",
+                                                        "order_status": "fractional_fill",
+                                                        "fill_count_fp": residue,
+                                                        "detail": f"Sold fractional residue {residue}; kept {whole} whole contracts",
+                                                    }
+                                                )
+                                            qty_int = whole
+                                            if whole < 1:
+                                                action_taken = {
+                                                    "status": "fractional_fill",
+                                                    "summary": (
+                                                        f"Exchange filled {format_count_fp(filled)}. "
+                                                        + (
+                                                            f"The {residue} residue was sold."
+                                                            if sold_residue
+                                                            else "The fractional residue was not sold and was not booked."
+                                                        )
+                                                    ),
+                                                    "signal": signal,
+                                                    "filled_fp": format_count_fp(filled),
+                                                    "residue_sold": sold_residue,
                                                 }
-                                            )
-                                            qty_int = 0
                                         elif filled is not None:
                                             qty_int = int(filled)
                                         else:
@@ -2501,6 +2548,45 @@ async def scan_and_trade(
                                                 fee_multiplier=_fee.get("fee_multiplier"),
                                                 fee_type=_fee.get("fee_type"),
                                                 exchange_index=shard_index,
+                                                balance=float(balance),
+                                                cap_fraction=entry_cap,
+                                                blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
+                                                persist_intent=lambda limit, qty: persist_order_intent(
+                                                    {
+                                                        "market_id": ticker_clean,
+                                                        "event_ticker": _pos_et_val,
+                                                        "side": trade_side,
+                                                        "action": "buy",
+                                                        "quantity": int(qty),
+                                                        "limit_price": float(limit),
+                                                        "detail": "retry buy intent",
+                                                        **quote_snapshot(market),
+                                                    }
+                                                ),
+                                                fund=(
+                                                    None
+                                                    if shard_index is None
+                                                    else (
+                                                        lambda cost: fund_buy_shard(
+                                                            kalshi_client,
+                                                            exchange_index=shard_index,
+                                                            order_all_in=float(cost),
+                                                            bankroll=float(balance),
+                                                            ticker=ticker_clean,
+                                                            cap_fraction=entry_cap,
+                                                        )
+                                                    )
+                                                ),
+                                                acknowledge=lambda res, oid: record_order_ack(
+                                                    res,
+                                                    {
+                                                        "market_id": ticker_clean,
+                                                        "side": trade_side,
+                                                        "action": "buy",
+                                                        "client_order_id": oid,
+                                                        "detail": "retry buy",
+                                                    },
+                                                ),
                                             )
                                             if isinstance(retry_result, dict) and not retry_result.get("error"):
                                                 try:

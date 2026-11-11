@@ -33,8 +33,12 @@ def _blend_weight() -> float:
 
 
 def public_health_body() -> dict:
-    notes = list(alerts())
     summary = intent_status_summary()
+    if summary is not None and int(summary["current_unresolved_intent_count"]) == 0:
+        from src.ops_status import clear_unresolved
+
+        clear_unresolved()
+    notes = list(alerts())
     current_count = None
     historical_pending = None
     legacy_count = None

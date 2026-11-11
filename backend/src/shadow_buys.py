@@ -114,20 +114,38 @@ def resolve_known_results(db) -> int:
     return n
 
 
+_shadow_cursor = ""
+
+
+def rotate_ids(ids: list[str], cursor: str, limit: int) -> tuple[list[str], str]:
+    """Oldest-first slice that wraps, so a stuck ticker does not hide the rest."""
+    ordered = [str(item) for item in ids if item]
+    if not ordered:
+        return [], cursor
+    start = ordered.index(cursor) + 1 if cursor in ordered else 0
+    cycle = ordered[start:] + ordered[:start]
+    batch = cycle[: max(1, int(limit))]
+    return batch, (batch[-1] if batch else cursor)
+
+
 async def resolve_shadow_markets(db, kalshi_client, *, limit: int = 10) -> int:
-    """Fetch a few unresolved tickers. Failures are skipped."""
+    """Fetch a few unresolved tickers, oldest first, rotating each pass."""
+    from sqlalchemy import func
+
     from src.database.models import ShadowBuy
 
+    global _shadow_cursor
     resolve_known_results(db)
-    pending = (
-        db.query(ShadowBuy.market_id)
+    rows = (
+        db.query(ShadowBuy.market_id, func.min(ShadowBuy.created_at))
         .filter(ShadowBuy.resolved_result.is_(None))
-        .distinct()
-        .limit(max(1, int(limit)))
+        .group_by(ShadowBuy.market_id)
+        .order_by(func.min(ShadowBuy.created_at).asc(), ShadowBuy.market_id.asc())
         .all()
     )
+    batch, _shadow_cursor = rotate_ids([row[0] for row in rows], _shadow_cursor, limit)
     n = 0
-    for (ticker,) in pending:
+    for ticker in batch:
         try:
             market = await kalshi_client.get_market(ticker)
         except Exception:

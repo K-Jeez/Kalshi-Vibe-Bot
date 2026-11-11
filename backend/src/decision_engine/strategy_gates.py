@@ -269,6 +269,18 @@ def premodel_entry_block(market: dict, bankroll: float) -> Optional[dict]:
             "message": f"fee schedule unknown for series {series} — skipping",
         }
     sides = [_side_entry_quote(market, side, schedule) for side in ("YES", "NO")]
+    priced = [row for row in sides if row["all_in"] is not None]
+    if priced and all(float(row["all_in"]) > float(bankroll) + 1e-9 for row in priced):
+        return {
+            "kind": "cash_short",
+            "series": series,
+            "ticker": ticker,
+            "sides": sides,
+            "message": (
+                f"Skip model {ticker} — available cash ${float(bankroll):.2f} "
+                "cannot buy one contract at the ask including the estimated fee"
+            ),
+        }
     for row in sides:
         if row["ask"] is None:
             continue

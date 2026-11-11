@@ -596,7 +596,7 @@ def _ensure_tuning_row(db) -> None:
         stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
         min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
         min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
-        max_open_positions=int(settings.bot_max_open_positions),
+        max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),
         ai_provider=AI_PROVIDER,
     )
     db.add(row)
@@ -721,7 +721,7 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
             stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
             min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
             min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
-            max_open_positions=int(settings.bot_max_open_positions),
+            max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),
             ai_provider=AI_PROVIDER,
         )
         db.add(row)

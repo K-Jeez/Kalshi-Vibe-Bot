@@ -32,16 +32,29 @@ def _rows():
 
 def _fills_for(row: dict) -> tuple[list, dict]:
     qty = float(row["contracts"])
-    fills = [
-        {
-            "ticker": row["ticker"],
-            "action": "buy",
-            "side": row["side"].lower(),
-            "count_fp": qty,
-            "yes_price": float(row["entry_price"]),
-            "fee": float(row["entry_fees"]),
-        }
-    ]
+    side = row["side"].upper()
+    if side == "NO":
+        fills = [
+            {
+                "ticker": row["ticker"],
+                "action": "sell",
+                "side": "no",
+                "count_fp": qty,
+                "yes_price": 1.0 - float(row["entry_price"]),
+                "fee": float(row["entry_fees"]),
+            }
+        ]
+    else:
+        fills = [
+            {
+                "ticker": row["ticker"],
+                "action": "buy",
+                "side": "yes",
+                "count_fp": qty,
+                "yes_price": float(row["entry_price"]),
+                "fee": float(row["entry_fees"]),
+            }
+        ]
     settlement = {"ticker": row["ticker"], "market_result": row["market_result"], "side": row["side"]}
     if row["exit_type"] == "stop-loss sell":
         fills.append(
@@ -65,7 +78,7 @@ def test_lifetime_rows_match_the_snapshot_totals():
             continue
         closed += 1
         fills, settlement = _fills_for(row)
-        got = fills_to_cashflows(fills, settlement)
+        got = fills_to_cashflows(fills, settlement, held_side=row["side"])
         assert abs(got["realized_pnl"] - float(row["true_realized_pnl"])) < 0.02
         totals[row["round"]] += got["realized_pnl"]
     assert closed == 31
@@ -237,7 +250,10 @@ def test_match_key_groups_the_rune_legs_and_not_a_different_match():
     }
     assert keys == {"match:26NOV11:KECRUN"}
     assert match_exposure_key("KXNFLTD-26NOV08GBNE-NERSTEVENSON38-1") == "match:26NOV08:GBNE"
-    assert match_exposure_key("KXETH-26NOV1117-B2080") == "asset:ETH:26NOV1117"
+    assert match_exposure_key("KXETH-26NOV1117-B2080") == "asset:ETH:26NOV11"
+    assert match_exposure_key("KXETHD-26NOV11-B2000") == "asset:ETH:26NOV11"
+    assert match_exposure_key("KXBTC-26NOV11-B100") == match_exposure_key("KXBTCD-26NOV11-T100")
+    assert match_exposure_key("KXHIGHNY-26NOV11") != match_exposure_key("KXHIGHCHI-26NOV11")
 
 
 def test_retry_limit_is_two_cents_and_gates_can_refuse():

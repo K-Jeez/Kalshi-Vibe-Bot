@@ -218,10 +218,14 @@ async def finalize_live_closed_positions_from_kalshi(
         mid = normalize_market_id(pos.market_id).upper()
         from src.reconcile.realized_cashflow import closed_by_our_sell
 
-        sold_already = closed_by_our_sell(
-            pos.exit_reason,
-            _find_exit_trade_for_position(db, pos) is not None,
+        exit_trade = _find_exit_trade_for_position(db, pos)
+        sold_qty = int(getattr(exit_trade, "quantity", 0) or 0) if exit_trade is not None else 0
+        held_qty = int(pos.quantity or 0)
+        fully_sold = closed_by_our_sell(pos.exit_reason, exit_trade is not None) and (
+            held_qty <= 0 or sold_qty >= held_qty
         )
+        partial_sale = exit_trade is not None and held_qty > sold_qty > 0
+        sold_already = fully_sold or partial_sale
         if sold_already:
             # A stop or other sell is the cash flow. Do not rebook it as a
             # hold-to-settlement, which drops the sale and can flip the sign.
@@ -258,6 +262,23 @@ async def finalize_live_closed_positions_from_kalshi(
         if finalized:
             continue
 
+        if partial_sale and not finalized:
+            s_latest = settlements_latest_by_ticker(settlement_rows or []).get(mid)
+            if s_latest is not None:
+                result_name = str(s_latest.get("market_result") or "").strip().lower()
+                side_name = str(pos.side or "").strip().upper()
+                won = (side_name == "YES" and result_name == "yes") or (
+                    side_name == "NO" and result_name == "no"
+                )
+                remaining = held_qty - sold_qty
+                payout = float(remaining) if won else 0.0
+                cost = float(remaining) * float(pos.entry_price or 0.0)
+                pos.realized_pnl = float(pos.realized_pnl or 0.0) + payout - cost
+                pos.kalshi_flat_reconcile_pending = False
+                pos.kalshi_closure_finalized = True
+                finalized = True
+                n += 1
+                continue
         if sold_already:
             s_latest = None
         else:

@@ -15,15 +15,15 @@ def should_skip_unchanged_quote(
     yes_price: float,
     no_price: float,
 ) -> bool:
-    """True when this market was analyzed inside the TTL and the price is the same.
+    """Skip during the cooldown, and after it when the quote moved by half a cent or less.
 
-    A moved price is analyzed again. A recent analysis with no stored quote is
-    skipped, which is the previous cooldown.
+    ``analyzed_recently`` is the cooldown window. A missing stored quote still
+    skips inside that window. After the window, a missing quote is analyzed.
     """
-    if not analyzed_recently:
-        return False
-    if previous_yes is None or previous_no is None:
+    if analyzed_recently:
         return True
+    if previous_yes is None or previous_no is None:
+        return False
     return (
         abs(float(previous_yes) - float(yes_price)) <= UNCHANGED_PRICE_TOLERANCE
         and abs(float(previous_no) - float(no_price)) <= UNCHANGED_PRICE_TOLERANCE

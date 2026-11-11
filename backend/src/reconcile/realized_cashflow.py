@@ -49,50 +49,124 @@ def realized_from_cashflows(
     return {"realized_pnl": float(realized), "fees_paid": float(fees)}
 
 
-def fills_to_cashflows(fills: list, settlement: Optional[dict] = None) -> dict:
-    """Sum Kalshi fills for one ticker.
+def _first_number(row: dict, *keys: str) -> Optional[float]:
+    for key in keys:
+        raw = row.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
 
-    A stop-loss on this account is ``action=sell`` with ``side=no``. Its
-    ``yes_price`` is the YES exit price, so proceeds are count times that price.
+
+def fill_count(fill: dict) -> float:
+    return _first_number(fill, "count_fp", "count") or 0.0
+
+
+def fill_fee(fill: dict) -> float:
+    """Prefer ``fee_cost`` / ``fee``. Otherwise add taker and maker fee fields."""
+    direct = _first_number(fill, "fee_cost", "fee", "fees")
+    if direct is not None:
+        return direct
+    taker = _first_number(fill, "taker_fees_dollars") or 0.0
+    maker = _first_number(fill, "maker_fees_dollars") or 0.0
+    return taker + maker
+
+
+def fill_yes_price(fill: dict) -> float:
+    return _first_number(fill, "yes_price_dollars", "yes_price", "price") or 0.0
+
+
+def fill_no_price(fill: dict) -> float:
+    explicit = _first_number(fill, "no_price_dollars", "no_price")
+    if explicit is not None and explicit > 0:
+        return explicit
+    yes = fill_yes_price(fill)
+    if 0.0 < yes < 1.0:
+        return 1.0 - yes
+    return 0.0
+
+
+def fill_role(fill: dict, held_side: str) -> str:
+    """``entry`` or ``exit`` for the position side.
+
+    Buying NO is reported as ``action=sell``, ``side=no``. That is an entry
+    when the position is NO, and a stop-loss exit when the position is YES.
     """
+    action = str(fill.get("action") or "").strip().lower()
+    side = str(fill.get("side") or "").strip().lower()
+    held = str(held_side or "YES").strip().upper()
+    if held == "NO":
+        if action == "sell" and side == "no":
+            return "entry"
+        if action == "buy" and side == "no":
+            return "entry"
+        if action in ("buy", "sell"):
+            return "exit"
+        return "ignore"
+    if action == "buy" and side in ("yes", ""):
+        return "entry"
+    if action == "sell" or (action == "buy" and side == "no"):
+        return "exit"
+    return "ignore"
+
+
+def fills_to_cashflows(fills: list, settlement: Optional[dict] = None, held_side: str = "") -> dict:
+    """Sum Kalshi fills for one position side.
+
+    Accepts the shortened names used in local exports and the API names
+    ``yes_price_dollars``, ``no_price_dollars``, ``fee_cost``, and ``count_fp``.
+    A YES stop-loss exit is ``sell`` / ``no`` and its YES price is the exit price.
+    A NO entry is that same shape and is not an exit.
+    """
+    held = str(held_side or (settlement or {}).get("side") or "").strip().upper()
+    if held not in ("YES", "NO"):
+        actions = {str(row.get("action") or "").strip().lower() for row in fills or []}
+        sides = {str(row.get("side") or "").strip().lower() for row in fills or []}
+        held = "NO" if actions == {"sell"} and sides <= {"no"} else "YES"
     buy_notional = 0.0
     buy_fees = 0.0
     buy_count = 0.0
     sell_proceeds = 0.0
     sell_fees = 0.0
     sell_count = 0.0
-    side = ""
     for fill in fills or []:
-        count = float(fill.get("count_fp") or fill.get("count") or 0.0)
-        price = float(fill.get("yes_price") or fill.get("price") or 0.0)
-        fee = float(fill.get("fee") or fill.get("fees") or 0.0)
-        action = str(fill.get("action") or "").strip().lower()
-        if not side and action == "buy":
-            side = str(fill.get("side") or "").strip().upper()
-        if action == "sell":
-            sell_count += count
-            sell_proceeds += count * price
-            sell_fees += fee
-        elif action == "buy":
+        count = fill_count(fill)
+        fee = fill_fee(fill)
+        if count <= 0:
+            continue
+        role = fill_role(fill, held)
+        if role == "entry":
+            price = fill_no_price(fill) if held == "NO" else fill_yes_price(fill)
             buy_count += count
             buy_notional += count * price
             buy_fees += fee
-    closed = sell_count > 1e-9
+        elif role == "exit":
+            price = fill_yes_price(fill) if held == "YES" else fill_no_price(fill)
+            sell_count += count
+            sell_proceeds += count * price
+            sell_fees += fee
+    result = str((settlement or {}).get("market_result") or (settlement or {}).get("result") or "").strip().lower()
+    won = (held == "YES" and result == "yes") or (held == "NO" and result == "no")
+    remaining = max(0.0, buy_count - sell_count)
+    fully_exited = sell_count > 1e-9 and remaining <= 1e-6
     payout = 0.0
-    if not closed and settlement:
-        result = str(settlement.get("market_result") or "").strip().lower()
-        held = side or str(settlement.get("side") or "").strip().upper()
-        won = (held == "YES" and result == "yes") or (held == "NO" and result == "no")
-        if won:
-            payout = float(settlement.get("payout") or buy_count or 0.0)
+    if not fully_exited and won:
+        payout = remaining if sell_count > 1e-9 else buy_count
+        if settlement and settlement.get("payout") not in (None, "") and sell_count <= 1e-9:
+            payout = float(settlement.get("payout") or payout)
     out = realized_from_cashflows(
         buy_notional=buy_notional,
         buy_fees=buy_fees,
         sell_proceeds=sell_proceeds,
         sell_fees=sell_fees,
         settlement_payout=payout,
-        closed_by_sell=closed,
+        closed_by_sell=sell_count > 1e-9,
     )
-    out["closed_by_sell"] = closed
-    out["side"] = side
+    out["closed_by_sell"] = sell_count > 1e-9 and fully_exited
+    out["partial_exit"] = sell_count > 1e-9 and not fully_exited
+    out["side"] = held
+    out["remaining_qty"] = remaining
     return out

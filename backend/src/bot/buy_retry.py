@@ -58,6 +58,7 @@ def gates_still_pass_at_ask(
     min_ai: int,
     fee_multiplier,
     fee_type,
+    blend_ev_gate: bool = False,
 ) -> bool:
     """Fee-inclusive edge and EV at the fresh ask. False when any gate fails."""
     from src.decision_engine.strategy_gates import autonomous_buy_gate_failure, fee_inclusive_ev_dollars
@@ -83,7 +84,9 @@ def gates_still_pass_at_ask(
         fee_multiplier=fee_multiplier,
         fee_type=fee_type,
     )
-    if ev is None or ev <= 0:
+    if blend_ev_gate and (ev is None or ev <= 0):
+        return False
+    if ev is None:
         return False
     if autonomous_buy_gate_failure(
         side=side,
@@ -109,6 +112,12 @@ async def retry_buy_once(
     fee_type,
     client_order_id: Optional[str] = None,
     exchange_index: Optional[int] = None,
+    balance: Optional[float] = None,
+    cap_fraction: Optional[float] = None,
+    blend_ev_gate: bool = False,
+    persist_intent=None,
+    fund=None,
+    acknowledge=None,
 ) -> tuple[Optional[dict], float]:
     """Re-read the book and send one fill-or-kill if the gates still pass.
 
@@ -136,15 +145,50 @@ async def retry_buy_once(
         min_ai=min_ai,
         fee_multiplier=fee_multiplier,
         fee_type=fee_type,
+        blend_ev_gate=blend_ev_gate,
     ):
         remember_miss(market_id)
         return None, gap
+    send_qty = int(quantity)
+    if balance is not None:
+        from src.decision_engine.strategy_gates import all_in_entry_dollars, kelly_contract_cap_for_bankroll
+
+        allowed = kelly_contract_cap_for_bankroll(
+            float(balance),
+            float(limit),
+            fee_multiplier=fee_multiplier,
+            fee_type=fee_type,
+            bankroll_fraction=cap_fraction,
+        )
+        cost = all_in_entry_dollars(
+            1,
+            float(limit),
+            fee_multiplier=fee_multiplier,
+            fee_type=fee_type,
+        )
+        if allowed < 1 or cost is None or cost > float(balance) + 1e-9:
+            remember_miss(market_id)
+            return None, gap
+        send_qty = min(send_qty, allowed)
+        if fund is not None:
+            funded = await fund(float(all_in_entry_dollars(send_qty, float(limit), fee_multiplier=fee_multiplier, fee_type=fee_type) or cost))
+            if not funded or not funded.get("ok"):
+                remember_miss(market_id)
+                return None, gap
+    order_id = client_order_id
+    if persist_intent is not None:
+        order_id = persist_intent(float(limit), send_qty)
+        if not order_id:
+            remember_miss(market_id)
+            return None, gap
     result = await client.place_buy_ioc_limit(
         market_id,
         side,
-        int(quantity),
+        send_qty,
         float(limit),
-        client_order_id=client_order_id,
+        client_order_id=order_id,
         exchange_index=exchange_index,
     )
+    if acknowledge is not None:
+        acknowledge(result, order_id)
     return result, gap

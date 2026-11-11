@@ -380,12 +380,10 @@ def test_export_counts_real_trades_and_only_the_latest_unresolved_intent(tmp_pat
 def test_restore_source_cannot_load_an_old_open_cap_of_30(monkeypatch):
     monkeypatch.setenv("BOT_MAX_OPEN_POSITIONS", "30")
     from src.config import Settings
-    from src.api.tuning import effective_max_open_positions
 
     fresh = Settings()
-    assert fresh.bot_max_open_positions == 12
-    assert effective_max_open_positions(30) == 12
-    assert effective_max_open_positions(8) == 8
+    assert "bot_max_open_positions" not in Settings.model_fields
+    assert not hasattr(fresh, "bot_max_open_positions")
 
 
 def test_stale_database_cap_does_not_raise_the_runtime_limit():
@@ -395,7 +393,6 @@ def test_stale_database_cap_does_not_raise_the_runtime_limit():
     from src.config import settings as app_settings
 
     previous = (
-        app_settings.bot_max_open_positions,
         app_settings.min_edge_to_buy_pct,
         app_settings.min_ai_win_prob_buy_side_pct,
         app_settings.stop_loss_drawdown_pct,
@@ -410,13 +407,12 @@ def test_stale_database_cap_does_not_raise_the_runtime_limit():
     )
     try:
         _sync_runtime_from_row(row)
-        assert app_settings.bot_max_open_positions == 12
+        assert not hasattr(app_settings, "bot_max_open_positions")
         assert app_settings.min_edge_to_buy_pct == 5
         assert app_settings.min_ai_win_prob_buy_side_pct == 60
         assert abs(app_settings.stop_loss_drawdown_pct - 0.80) < 1e-9
     finally:
         (
-            app_settings.bot_max_open_positions,
             app_settings.min_edge_to_buy_pct,
             app_settings.min_ai_win_prob_buy_side_pct,
             app_settings.stop_loss_drawdown_pct,

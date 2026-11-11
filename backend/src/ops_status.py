@@ -27,6 +27,12 @@ def note_unresolved(message: str) -> None:
     _unresolved_alert = (message or "")[:180]
 
 
+def clear_unresolved() -> None:
+    """Drop the dashboard warning once no order is still unconfirmed."""
+    global _unresolved_alert
+    _unresolved_alert = ""
+
+
 def note_low_balance(cash: Optional[float]) -> None:
     """Dashboard and health warning when cash cannot fund another contract."""
     global _low_balance_alert

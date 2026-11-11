@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     min_ai_win_prob_buy_side_pct: int = DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
     # Share of the raw model in sizing: p = w*model + (1-w)*fee-free mid. Gates stay on the raw model.
     vibe_model_blend_weight: float = 0.25
+    # When false, raw edge and win-prob gates decide the buy. Blended probability only sizes it.
+    vibe_blend_ev_gate: bool = False
 
     # ── Bot scan configuration ───────────────────────────────────────────────────
     bot_scan_interval: int = 10              # seconds between full market scans
@@ -100,8 +102,6 @@ class Settings(BaseSettings):
     stop_loss_drawdown_pct: float = DEFAULT_STOP_LOSS_DRAWDOWN_PCT
     # When False, the bot never auto-exits for stop-loss (manual sells still allowed). Default off until enabled in Settings.
     stop_loss_selling_enabled: bool = False
-    # Max simultaneous open positions; at or over this, market scan + AI analysis for new entries pauses.
-    bot_max_open_positions: int = DEFAULT_MAX_OPEN_POSITIONS
     # Periodically ``GET /markets`` for recent closed rows missing ``kalshi_market_result`` (0 = disable).
     closed_resolution_refresh_interval_sec: int = 450
     # Max closed rows checked per refresh tick (missing-result filter only when automated).
@@ -152,7 +152,6 @@ class Settings(BaseSettings):
         self.min_edge_to_buy_pct = max(0, min(95, int(self.min_edge_to_buy_pct)))
         self.min_ai_win_prob_buy_side_pct = max(51, min(99, int(self.min_ai_win_prob_buy_side_pct)))
         self.vibe_model_blend_weight = max(0.0, min(1.0, float(self.vibe_model_blend_weight)))
-        self.bot_max_open_positions = max(1, min(APPROVED_MAX_OPEN_POSITIONS, int(self.bot_max_open_positions)))
         self.exit_grace_minutes = max(0.0, min(1440.0, float(self.exit_grace_minutes)))
         self.stop_loss_drawdown_pct = max(0.01, min(0.90, float(self.stop_loss_drawdown_pct)))
         self.kalshi_markets_page_delay_sec = max(0.0, min(0.5, float(self.kalshi_markets_page_delay_sec)))
