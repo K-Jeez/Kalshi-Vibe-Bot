@@ -70,9 +70,29 @@ def plan_repairs(positions: list[dict], fills: list, settlements: list) -> list[
         legs = grouped.get(ticker) or []
         if not legs:
             continue
-        settlement = dict(settled.get(ticker) or {})
-        settlement.setdefault("side", side)
-        cash = fills_to_cashflows(legs, settlement, held_side=side)
+        raw_settlement = settled.get(ticker)
+        settlement = dict(raw_settlement or {})
+        if settlement:
+            settlement.setdefault("side", side)
+        cash = fills_to_cashflows(legs, settlement or None, held_side=side)
+        if not cash.get("bookable"):
+            for pos in group:
+                plans.append(
+                    {
+                        "id": pos.get("id"),
+                        "ticker": ticker,
+                        "side": side,
+                        "old_realized_pnl": float(pos.get("realized_pnl") or 0.0),
+                        "new_realized_pnl": "",
+                        "old_fees_paid": float(pos.get("fees_paid") or 0.0),
+                        "new_fees_paid": "",
+                        "old_exit_reason": str(pos.get("exit_reason") or ""),
+                        "new_exit_reason": str(pos.get("exit_reason") or ""),
+                        "write": False,
+                        "note": "skipped: no full sell exit and no settlement row",
+                    }
+                )
+            continue
         weights = []
         for pos in group:
             try:
@@ -100,6 +120,8 @@ def plan_repairs(positions: list[dict], fills: list, settlements: list) -> list[
                     "new_fees_paid": float(cash["fees_paid"]) * share,
                     "old_exit_reason": old_reason,
                     "new_exit_reason": new_reason,
+                    "write": True,
+                    "note": "",
                 }
             )
     return plans
@@ -116,11 +138,23 @@ def write_audit(path: Path, plans: list[dict]) -> None:
         "new_fees_paid",
         "old_exit_reason",
         "new_exit_reason",
+        "write",
+        "note",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(plans)
+
+
+def repair_listen_port() -> int:
+    """Port the app binds. ``--apply`` refuses while this port is open."""
+    from src.config import settings
+
+    try:
+        return int(settings.port or 8000)
+    except (TypeError, ValueError):
+        return 8000
 
 
 def running_block_reason(database: Path, port: int = 8000) -> str | None:
@@ -157,6 +191,8 @@ def apply_plans(database: Path, plans: list[dict]) -> int:
         changed = 0
         by_side: dict[tuple[str, str], float] = defaultdict(float)
         for plan in plans:
+            if not plan.get("write", True):
+                continue
             changed += conn.execute(
                 """
                 UPDATE positions
@@ -170,7 +206,7 @@ def apply_plans(database: Path, plans: list[dict]) -> int:
                     plan["id"],
                 ),
             ).rowcount
-            by_side[(plan["ticker"], plan["side"])] += float(plan["new_realized_pnl"])
+            by_side[(plan["ticker"], plan["side"])] += float(plan["new_realized_pnl"] or 0.0)
         for (ticker, side), total in by_side.items():
             trades = conn.execute(
                 """
@@ -209,11 +245,15 @@ def load_closed_positions(database: Path) -> list[dict]:
 
 
 async def fetch_fills_and_settlements(client) -> tuple[list, list]:
-    """Read-only portfolio fills and settlements. Does not place an order."""
+    """Read-only portfolio fills and settlements. Does not place an order.
+
+    A failed or unfinished settlements read raises. An empty successful read is
+    a real empty account, not a hidden error.
+    """
     fills_page = await client._reconcile_pages("/trade-api/v2/portfolio/fills", "fills", {})
     if not isinstance(fills_page, dict) or fills_page.get("state") != "complete":
         raise RuntimeError(f"fills read was not complete: {fills_page!r}"[:300])
-    settlements = await client.get_settlements_paginated()
+    settlements = await client.get_settlements_complete()
     return list(fills_page.get("rows") or []), list(settlements or [])
 
 
@@ -242,20 +282,27 @@ def main(argv: list[str] | None = None) -> int:
 
         fills, settlements = asyncio.run(_pull())
     else:
-        if not args.fills:
-            print("Pass --fills or --fetch. Nothing was written.")
+        if not args.fills or not args.settlements:
+            print("Pass --fills and --settlements, or use --fetch. Nothing was written.")
             return 2
         fills = _load_json(Path(args.fills))
-        settlements = _load_json(Path(args.settlements)) if args.settlements else []
+        settlements = _load_json(Path(args.settlements))
     plans = plan_repairs(load_closed_positions(database), fills, settlements)
     audit = Path(args.audit) if args.audit else database.with_name("realized_pnl_audit.csv")
     write_audit(audit, plans)
-    new_total = sum(float(row["new_realized_pnl"]) for row in plans)
-    print(f"positions={len(plans)} new_realized_total={new_total:.4f} audit={audit}")
+    writable = [row for row in plans if row.get("write", True) and row.get("new_realized_pnl") != ""]
+    skipped = [row for row in plans if not row.get("write", True)]
+    new_total = sum(float(row["new_realized_pnl"]) for row in writable)
+    print(
+        f"positions={len(writable)} skipped={len(skipped)} "
+        f"new_realized_total={new_total:.4f} audit={audit}"
+    )
+    for row in skipped:
+        print(f"skip {row['ticker']} {row['side']}: {row['note']}")
     if args.dry_run or not args.apply:
         print("dry-run: database not modified")
         return 0
-    blocked = running_block_reason(database)
+    blocked = running_block_reason(database, port=repair_listen_port())
     if blocked:
         print(blocked)
         return 3

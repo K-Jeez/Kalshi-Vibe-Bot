@@ -106,10 +106,15 @@ def cumulative_exchange_fees(order: dict | None) -> tuple[float, str]:
 
 
 def _booked_totals(db, *, client_order_id: str, exchange_order_id: str, action: str) -> tuple[int, float]:
+    """Contracts already stored for this order.
+
+    The same Kalshi order can show up under a later client id after a retry.
+    Matching the exchange order id, or a fill trade id that starts with it,
+    keeps the second pass from adding the contracts again.
+    """
     rows = (
         db.query(ActivityEvent)
         .filter(
-            ActivityEvent.client_order_id == client_order_id,
             ActivityEvent.event_type == "fill",
             ActivityEvent.action == action,
         )
@@ -117,12 +122,30 @@ def _booked_totals(db, *, client_order_id: str, exchange_order_id: str, action: 
     )
     qty = 0
     fees = 0.0
+    seen = set()
     for row in rows:
         other = str(row.exchange_order_id or "").strip()
+        cid = str(row.client_order_id or "").strip()
+        same_client = bool(client_order_id) and cid == client_order_id
+        same_exchange = bool(exchange_order_id) and other == exchange_order_id
+        if not same_client and not same_exchange:
+            continue
         if exchange_order_id and other and other != exchange_order_id:
             continue
+        key = str(getattr(row, "id", "") or "")
+        if key in seen:
+            continue
+        seen.add(key)
         qty += int(row.quantity or 0)
         fees += float(row.fees_dollars or 0.0)
+    if exchange_order_id:
+        prefix = f"{exchange_order_id}:{action}:"
+        for trade in db.query(Trade).filter(Trade.id.like(prefix + "%")).all():
+            try:
+                booked = int(str(trade.id).rsplit(":", 1)[-1])
+            except ValueError:
+                booked = int(trade.quantity or 0)
+            qty = max(qty, booked)
     return qty, fees
 
 

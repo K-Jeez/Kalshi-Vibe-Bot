@@ -189,6 +189,8 @@ async def retry_buy_once(
         client_order_id=order_id,
         exchange_index=exchange_index,
     )
+    if isinstance(result, dict) and order_id and not result.get("client_order_id"):
+        result = {**result, "client_order_id": order_id}
     if acknowledge is not None:
         acknowledge(result, order_id)
     return result, gap

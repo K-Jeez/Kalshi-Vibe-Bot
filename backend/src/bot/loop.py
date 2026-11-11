@@ -2193,6 +2193,7 @@ async def scan_and_trade(
                                 else:
                                     buy_hold = fresh_unresolved_order_hold(ticker_clean, "buy")
                                     order_intent_id = None
+                                    fill_client_order_id = None
                                     if buy_hold:
                                         await reconcile_open_intents(
                                             kalshi_client,
@@ -2588,6 +2589,7 @@ async def scan_and_trade(
                                                     },
                                                 ),
                                             )
+                                            fill_client_order_id = order_intent_id
                                             if isinstance(retry_result, dict) and not retry_result.get("error"):
                                                 try:
                                                     retry_filled = kalshi_order_filled_contracts(retry_result)
@@ -2601,6 +2603,9 @@ async def scan_and_trade(
                                                     result = retry_result
                                                     filled = retry_filled
                                                     qty_int = int(retry_filled)
+                                                    fill_client_order_id = str(
+                                                        retry_result.get("client_order_id") or order_intent_id
+                                                    )
                                             if qty_int < 1:
                                                 summary = (
                                                     "Missed buy. Price gap "
@@ -2647,7 +2652,7 @@ async def scan_and_trade(
                                                 cumulative_qty=qty_int,
                                                 cumulative_fees=buy_fees,
                                                 price=float(avg_px),
-                                                client_order_id=str(order_intent_id or ""),
+                                                client_order_id=str(fill_client_order_id or order_intent_id or ""),
                                                 exchange_order_id=str(result.get("order_id") or ""),
                                                 event_ticker=_pos_et_val,
                                                 market_title=title,

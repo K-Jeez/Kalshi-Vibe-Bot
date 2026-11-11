@@ -18,6 +18,27 @@ def closed_by_our_sell(exit_reason: object, has_sell_trade: bool) -> bool:
     return str(exit_reason or "").strip().lower() in _SOLD_REASONS
 
 
+def remainder_settlement_pnl(
+    *,
+    remaining_qty: int,
+    entry_cost: float,
+    fees_paid: float,
+    sold_qty: int,
+    won: bool,
+) -> float:
+    """Payout on unsold contracts, minus their cost and their share of fees.
+
+    ``remaining_qty`` is the position quantity after a partial sell. It is not
+    the original size.
+    """
+    remaining = max(0, int(remaining_qty))
+    sold = max(0, int(sold_qty))
+    original = remaining + sold
+    fee_remaining = float(fees_paid or 0.0) * (remaining / original) if original else 0.0
+    payout = float(remaining) if won else 0.0
+    return payout - float(entry_cost or 0.0) - fee_remaining
+
+
 def fees_without_double_count(current_fees: float, reported_cumulative: float) -> float:
     """Keep the larger cumulative fee. Never add the report on top of itself."""
     current = max(0.0, float(current_fees or 0.0))
@@ -40,13 +61,11 @@ def realized_from_cashflows(
     proceeds = float(sell_proceeds or 0.0)
     sell_fee = max(0.0, float(sell_fees or 0.0))
     payout = float(settlement_payout or 0.0)
-    if closed_by_sell:
-        fees = buy_fee + sell_fee
-        realized = proceeds - notional - fees
-    else:
-        fees = buy_fee
-        realized = payout - notional - fees
-    return {"realized_pnl": float(realized), "fees_paid": float(fees)}
+    fees = buy_fee + sell_fee
+    # Sale proceeds and any settlement on the unsold contracts are both cash.
+    # A full exit has no settlement payout. A hold-to-settlement has no sale.
+    realized = proceeds + payout - notional - fees
+    return {"realized_pnl": float(realized), "fees_paid": float(fees), "closed_by_sell": bool(closed_by_sell)}
 
 
 def _first_number(row: dict, *keys: str) -> Optional[float]:
@@ -149,11 +168,12 @@ def fills_to_cashflows(fills: list, settlement: Optional[dict] = None, held_side
             sell_proceeds += count * price
             sell_fees += fee
     result = str((settlement or {}).get("market_result") or (settlement or {}).get("result") or "").strip().lower()
+    has_settlement = result in ("yes", "no", "scalar", "void")
     won = (held == "YES" and result == "yes") or (held == "NO" and result == "no")
     remaining = max(0.0, buy_count - sell_count)
     fully_exited = sell_count > 1e-9 and remaining <= 1e-6
     payout = 0.0
-    if not fully_exited and won:
+    if has_settlement and not fully_exited and won:
         payout = remaining if sell_count > 1e-9 else buy_count
         if settlement and settlement.get("payout") not in (None, "") and sell_count <= 1e-9:
             payout = float(settlement.get("payout") or payout)
@@ -167,6 +187,8 @@ def fills_to_cashflows(fills: list, settlement: Optional[dict] = None, held_side
     )
     out["closed_by_sell"] = sell_count > 1e-9 and fully_exited
     out["partial_exit"] = sell_count > 1e-9 and not fully_exited
+    out["has_settlement"] = has_settlement
+    out["bookable"] = bool(fully_exited or has_settlement)
     out["side"] = held
     out["remaining_qty"] = remaining
     return out

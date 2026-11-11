@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
@@ -20,46 +19,38 @@ from tools.repair_realized_pnl import plan_repairs, running_block_reason
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _closed_rows():
-    with (FIXTURES / "positions_lifetime.csv").open(encoding="utf-8") as handle:
-        return [row for row in csv.DictReader(handle) if row["app_status"] == "closed"]
+def _position(ticker, side, qty, reason="settlement"):
+    return {
+        "id": ticker,
+        "market_id": ticker,
+        "side": side,
+        "status": "closed",
+        "quantity": qty,
+        "realized_pnl": 0.0,
+        "fees_paid": 0.0,
+        "exit_reason": reason,
+    }
 
 
-def test_mapped_fills_match_the_snapshot_totals_and_run3():
-    fills = json.loads((FIXTURES / "fills_mapped.json").read_text(encoding="utf-8"))["fills"]
-    positions = []
-    for row in _closed_rows():
-        positions.append(
-            {
-                "id": row["ticker"],
-                "market_id": row["ticker"],
-                "side": row["side"],
-                "status": "closed",
-                "quantity": float(row["contracts"]),
-                "realized_pnl": float(row["app_realized_pnl"] or 0),
-                "fees_paid": float(row["app_fees_paid"] or 0),
-                "exit_reason": row["app_exit_reason"],
-            }
-        )
-    settlements = [
-        {"ticker": row["ticker"], "market_result": row["market_result"], "side": row["side"]}
-        for row in _closed_rows()
+def test_synthetic_fills_classify_yes_wins_no_entries_and_stops():
+    blob = json.loads((FIXTURES / "fills_mapped.json").read_text(encoding="utf-8"))
+    positions = [
+        _position("MKT-YES-WIN", "YES", 2),
+        _position("MKT-NO-LOSS", "NO", 2),
+        _position("MKT-YES-STOP", "YES", 2, "stop_loss"),
+        _position("MKT-PARTIAL", "YES", 4, "stop_loss"),
     ]
-    plans = plan_repairs(positions, fills, settlements)
+    plans = plan_repairs(positions, blob["fills"], blob["settlements"])
     by_ticker = {plan["ticker"]: plan for plan in plans}
-    run3 = by_ticker["KXATPGSPREAD-26NOV11KECRUN-RUN3"]
-    assert abs(run3["new_realized_pnl"] - (-1.4557)) < 0.01
-    lost = by_ticker["KXLALIGA1HTOTAL-26NOV08ATMBAR-2"]
-    assert lost["side"] == "NO"
-    assert abs(lost["new_realized_pnl"] - (-3.6925)) < 0.02
-    assert lost["new_exit_reason"] == "settlement"
-    totals = {"R1 Nov8": 0.0, "R2 Nov11": 0.0}
-    rounds = {row["ticker"]: row["round"] for row in _closed_rows()}
-    for plan in plans:
-        totals[rounds[plan["ticker"]]] += plan["new_realized_pnl"]
-    assert abs(totals["R1 Nov8"] - 1.77) < 0.05
-    assert abs(totals["R2 Nov11"] - (-6.24)) < 0.05
-    assert abs(sum(totals.values()) - (-4.48)) < 0.05
+    # 2 contracts bought at 0.40, fee 0.04, settle YES: 2 - 0.80 - 0.04
+    assert abs(by_ticker["MKT-YES-WIN"]["new_realized_pnl"] - 1.16) < 1e-9
+    # NO entry is sell/no at no price 0.60. Result YES is a loss. Not a stop.
+    assert by_ticker["MKT-NO-LOSS"]["new_exit_reason"] == "settlement"
+    assert by_ticker["MKT-NO-LOSS"]["new_realized_pnl"] < 0
+    # Full stop: sale 0.40 minus cost 1.00 minus fees 0.03
+    assert abs(by_ticker["MKT-YES-STOP"]["new_realized_pnl"] - (0.40 - 1.00 - 0.03)) < 1e-9
+    # Partial sale 0.50 plus $1 on each of the 2 left, minus the $2 cost.
+    assert abs(by_ticker["MKT-PARTIAL"]["new_realized_pnl"] - 0.50) < 1e-9
 
 
 def test_api_field_names_are_not_read_as_zero():
@@ -185,6 +176,87 @@ def test_fractional_residue_is_only_the_part_past_the_whole_contracts():
     whole = int(filled.to_integral_value(rounding=ROUND_DOWN))
     assert whole == 5
     assert filled - whole == Decimal("0.01")
+
+
+def test_missing_settlement_is_skipped_instead_of_booked_as_a_loss():
+    plans = plan_repairs(
+        [_position("MKT-OPEN", "YES", 2)],
+        [{"ticker": "MKT-OPEN", "action": "buy", "side": "yes", "count_fp": "2", "yes_price": "0.40", "fee": "0.04"}],
+        [],
+    )
+    assert plans[0]["write"] is False
+    assert plans[0]["new_realized_pnl"] == ""
+    assert "no settlement" in plans[0]["note"]
+
+
+def test_incomplete_settlement_read_fails_instead_of_an_empty_list():
+    import asyncio
+
+    from tools.repair_realized_pnl import fetch_fills_and_settlements
+
+    class Client:
+        async def _reconcile_pages(self, *_args, **_kwargs):
+            return {"state": "complete", "rows": []}
+
+        async def get_settlements_complete(self):
+            raise RuntimeError("settlements pagination incomplete")
+
+    try:
+        asyncio.run(fetch_fills_and_settlements(Client()))
+    except RuntimeError as exc:
+        assert "incomplete" in str(exc)
+    else:
+        raise AssertionError("incomplete settlements read was swallowed")
+
+
+def test_apply_uses_the_configured_port(monkeypatch):
+    from src.config import settings
+    from tools.repair_realized_pnl import repair_listen_port
+
+    monkeypatch.setattr(settings, "port", 8123)
+    assert repair_listen_port() == 8123
+
+
+def test_same_exchange_order_is_not_booked_twice():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from src.bot.fill_bookkeeping import apply_cumulative_fill
+    from src.database.models import Base, Position
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    order = {"order_id": "exch-1", "side": "yes", "action": "buy", "fill_count_fp": "3.00", "yes_price_dollars": "0.40"}
+    first = apply_cumulative_fill(
+        db,
+        action="buy",
+        side="YES",
+        market_id="MKT",
+        cumulative_qty=3,
+        cumulative_fees=0.02,
+        price=0.40,
+        client_order_id="intent-a",
+        exchange_order_id="exch-1",
+        order=order,
+    )
+    db.commit()
+    second = apply_cumulative_fill(
+        db,
+        action="buy",
+        side="YES",
+        market_id="MKT",
+        cumulative_qty=3,
+        cumulative_fees=0.02,
+        price=0.40,
+        client_order_id="intent-b",
+        exchange_order_id="exch-1",
+        order=order,
+    )
+    db.commit()
+    assert first["ok"] is True and first.get("replay") is not True
+    assert second.get("replay") is True
+    assert int(db.query(Position).one().quantity) == 3
 
 
 def test_apply_is_refused_while_a_port_is_open():

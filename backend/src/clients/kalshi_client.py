@@ -1783,6 +1783,31 @@ class KalshiClient:
             logger.error("Error fetching settlements: %s", e)
             return []
 
+    async def get_settlements_complete(self, *, page_limit: int = 250, max_pages: int = 30) -> List[Dict[str, Any]]:
+        """Every settlement row, or an error. An empty list means the account has none."""
+        path_base = "/trade-api/v2/portfolio/settlements"
+        page_limit = max(1, min(1000, page_limit))
+        accum: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        for _ in range(max(1, max_pages)):
+            qp: Dict[str, str] = {"limit": str(page_limit)}
+            if cursor:
+                qp["cursor"] = cursor
+            response = await self._http_get_signed(path_base, params=qp, timeout=25.0)
+            if response.status_code != 200:
+                raise RuntimeError(f"settlements read failed: HTTP {response.status_code}")
+            data = response.json() or {}
+            batch = data.get("settlements") or []
+            if not isinstance(batch, list):
+                raise RuntimeError("settlements read failed: response was not a list")
+            accum.extend(batch)
+            cursor = str(data.get("cursor") or "").strip()
+            if not cursor:
+                return accum
+            if not batch:
+                raise RuntimeError("settlements pagination incomplete: cursor without rows")
+        raise RuntimeError("settlements pagination incomplete")
+
     async def get_settlements_cached(self) -> List[Dict[str, Any]]:
         """Cached settlements list for reconciliation (bot loop + dashboard avoid hammering the API)."""
         hit = self._settlements_cache

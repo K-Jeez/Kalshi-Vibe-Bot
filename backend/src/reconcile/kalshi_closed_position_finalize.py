@@ -270,10 +270,21 @@ async def finalize_live_closed_positions_from_kalshi(
                 won = (side_name == "YES" and result_name == "yes") or (
                     side_name == "NO" and result_name == "no"
                 )
-                remaining = held_qty - sold_qty
-                payout = float(remaining) if won else 0.0
-                cost = float(remaining) * float(pos.entry_price or 0.0)
-                pos.realized_pnl = float(pos.realized_pnl or 0.0) + payout - cost
+                # After a partial sell, quantity is the unsold remainder, not the original size.
+                from src.reconcile.realized_cashflow import remainder_settlement_pnl
+
+                remaining = int(pos.quantity or 0)
+                cost = float(pos.entry_cost or 0.0)
+                if cost <= 1e-12:
+                    cost = float(remaining) * float(pos.entry_price or 0.0)
+                addon = remainder_settlement_pnl(
+                    remaining_qty=remaining,
+                    entry_cost=cost,
+                    fees_paid=float(getattr(pos, "fees_paid", 0) or 0.0),
+                    sold_qty=sold_qty,
+                    won=won,
+                )
+                pos.realized_pnl = float(pos.realized_pnl or 0.0) + addon
                 pos.kalshi_flat_reconcile_pending = False
                 pos.kalshi_closure_finalized = True
                 finalized = True
