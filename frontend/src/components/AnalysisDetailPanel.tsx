@@ -48,41 +48,62 @@ export function finiteNum(v: unknown): number | undefined {
   return undefined
 }
 
-/** Human-readable decision badge (API still uses BUY_YES / BUY_NO). */
-export function formatDecisionBadge(d: DecisionAnalysis['decision']): string {
-  if (d === 'BUY_YES') return 'Buy YES'
-  if (d === 'BUY_NO') return 'Buy NO'
-  return d
+export type AnalysisBadgeTone = 'green' | 'grey' | 'amber' | 'red'
+
+export interface AnalysisOutcomeBadge {
+  /** What happened, from the same `action_taken` record as the Action line. */
+  label: string
+  tone: AnalysisBadgeTone
+  /** Model recommendation, never used as the buy badge. */
+  modelLean: string | null
+}
+
+function _modelLean(decision: DecisionAnalysis['decision']): string | null {
+  if (decision === 'BUY_YES') return 'Model leaned YES'
+  if (decision === 'BUY_NO') return 'Model leaned NO'
+  return null
+}
+
+function _filledSide(side: string | undefined): 'YES' | 'NO' | null {
+  const s = String(side || '').toUpperCase()
+  if (s === 'YES' || s === 'NO') return s
+  return null
 }
 
 /**
- * Upper-right badge: actual outcome (did we trade?), not only the model's directional signal.
- * When the model says BUY_YES but execution skips (edge gate, liquidity, etc.), still show SKIP.
+ * Upper-right badge: the recorded outcome, not the model's buy side.
+ * Green only when a buy was sent and filled. A skip, including `no_trade`,
+ * stays grey even if the model recommended YES or NO.
  */
-export function effectiveAnalysisBadgeDecision(a: DecisionAnalysis): DecisionAnalysis['decision'] {
+export function analysisOutcomeBadge(a: DecisionAnalysis): AnalysisOutcomeBadge {
   const at = a.action_taken
-  if (at?.status === 'executed' || at?.status === 'partial') {
-    const side = String(at.side || '').toUpperCase()
-    if (side === 'YES') return 'BUY_YES'
-    if (side === 'NO') return 'BUY_NO'
+  const lean = _modelLean(a.decision)
+  const status = at?.status
+  if (status === 'executed' && at?.status === 'executed') {
+    const side = _filledSide(at.side)
+    return { label: side ? `Bought ${side}` : 'Bought', tone: 'green', modelLean: lean }
   }
-  if (at?.status === 'skipped') {
-    return 'SKIP'
+  if (status === 'partial' && at?.status === 'partial') {
+    const side = _filledSide(at.side)
+    return { label: side ? `Partial ${side}` : 'Partial', tone: 'green', modelLean: lean }
   }
-  return a.decision
+  if (status === 'rejected') return { label: 'Rejected', tone: 'red', modelLean: lean }
+  if (status === 'zero_fill' || status === 'fractional_fill') {
+    return { label: 'Not filled', tone: 'amber', modelLean: lean }
+  }
+  if (status === 'skipped' || status === 'no_trade') {
+    return { label: 'Skipped', tone: 'grey', modelLean: lean }
+  }
+  if (!at && a.decision === 'SKIP') return { label: 'Skipped', tone: 'grey', modelLean: null }
+  if (!at) return { label: 'Pending', tone: 'amber', modelLean: lean }
+  return { label: 'Pending', tone: 'amber', modelLean: lean }
 }
 
-/** Execution result shown beside the model decision. A rejected buy is not a model SKIP. */
-export function executionResultLabel(a: DecisionAnalysis): string {
-  const status = a.action_taken?.status
-  if (status === 'rejected') return 'Order rejected'
-  if (status === 'zero_fill') return 'Zero fill'
-  if (status === 'fractional_fill') return 'Below 1 contract'
-  if (status === 'partial') return 'Partial fill'
-  if (status === 'executed') return 'Filled'
-  if (status === 'no_trade') return 'Not sent'
-  if (status === 'skipped' || a.decision === 'SKIP') return 'Model skip'
-  return ''
+const BADGE_TONE_CLASS: Record<AnalysisBadgeTone, string> = {
+  green: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
+  grey: 'bg-white/10 text-white/80 border-white/20',
+  amber: 'bg-amber-500/15 text-amber-300 border-amber-500/40',
+  red: 'bg-red-500/20 text-red-300 border-red-500/40',
 }
 
 export function formatVolumeContracts(v: number | undefined): string {
@@ -221,10 +242,7 @@ export const AnalysisDetailBody: React.FC<{
   fallbackProvider?: AiProvider | null
 }> = ({ a }) => {
   const [ctxOpen, setCtxOpen] = React.useState(false)
-  const badgeDecision = effectiveAnalysisBadgeDecision(a)
-  const executionLabel = executionResultLabel(a)
-  const badgeYes = badgeDecision === 'BUY_YES'
-  const badgeNo = badgeDecision === 'BUY_NO'
+  const outcome = analysisOutcomeBadge(a)
 
   const aiYes = a.ai_probability_yes_pct ?? Math.round((a.confidence ?? 0) * 100)
   const aiNo = Math.max(0, Math.min(100, 100 - aiYes))
@@ -235,11 +253,7 @@ export const AnalysisDetailBody: React.FC<{
   const kelly = a.kelly_contracts ?? 0
   const batchLegId = (a.xai_analysis?.event_batch && String(a.market_id || '').trim()) || ''
 
-  const badgeStyles = badgeYes
-    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-    : badgeNo
-      ? 'bg-red-500/20 text-red-400 border-red-500/30'
-      : 'bg-brand-muted/15 text-white border-brand-muted/30'
+  const badgeStyles = BADGE_TONE_CLASS[outcome.tone]
 
   const analysisProvider = analysisAiProviderId(a)
 
@@ -264,10 +278,10 @@ export const AnalysisDetailBody: React.FC<{
           {analysisProvider ? <AiProviderLogo className="h-9 w-9" /> : null}
           <span className="flex flex-col items-end gap-0.5">
             <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
-              {formatDecisionBadge(badgeDecision)}
+              {outcome.label}
             </span>
-            {executionLabel ? (
-              <span className="text-[10px] text-white/70">{executionLabel}</span>
+            {outcome.modelLean ? (
+              <span className="text-[10px] font-medium text-white/55">{outcome.modelLean}</span>
             ) : null}
           </span>
         </div>

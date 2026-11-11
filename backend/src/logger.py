@@ -4,6 +4,7 @@ Logging setup: console + rotating file + in-memory buffer for WebSocket streamin
 
 import asyncio
 import logging
+import os
 import sys
 import time
 from collections import deque
@@ -89,6 +90,21 @@ class _SafeTimedRotatingFileHandler(RotatingFileHandler):
             raise
 
 
+def _write_live_log_file() -> bool:
+    """Tests must not append to ``backend/logs/kalshi_bot.log``.
+
+    Pytest sets ``PYTEST_CURRENT_TEST`` while a test runs, and ``pytest`` is
+    already imported when the bot modules load. ``KALSHI_LOG_TO_FILE=0`` turns
+    the file off explicitly.
+    """
+    flag = os.environ.get("KALSHI_LOG_TO_FILE", "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    return "pytest" not in sys.modules
+
+
 def setup_logging(name: str = "kalshi_bot", level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -106,25 +122,26 @@ def setup_logging(name: str = "kalshi_bot", level: int = logging.INFO) -> loggin
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
 
+    logger.addHandler(console_handler)
+
     # Size cap so one day's scan log cannot grow without bound (about 20 MB x 8).
-    log_dir = Path(__file__).resolve().parent.parent / "logs"
-    log_dir.mkdir(exist_ok=True)
-    file_handler = _SafeTimedRotatingFileHandler(
-        log_dir / "kalshi_bot.log",
-        maxBytes=20 * 1024 * 1024,
-        backupCount=8,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
+    if _write_live_log_file():
+        log_dir = Path(__file__).resolve().parent.parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        file_handler = _SafeTimedRotatingFileHandler(
+            log_dir / "kalshi_bot.log",
+            maxBytes=20 * 1024 * 1024,
+            backupCount=8,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     # Buffer + broadcast
     buffer_handler = _BufferAndBroadcastHandler()
     buffer_handler.setLevel(level)
     buffer_handler.setFormatter(formatter)
-
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
     logger.addHandler(buffer_handler)
 
     return logger
