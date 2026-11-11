@@ -18,6 +18,10 @@ from src.reconcile.open_positions import normalize_market_id
 
 logger = setup_logging("kalshi_client")
 
+# One GET /series/{ticker} per series. Known and unknown results both stay cached
+# so a scan does not refetch every market.
+SERIES_FEE_CACHE_TTL_SEC = 3600.0
+
 
 def _optional_float(v: object) -> Optional[float]:
     if v is None or v == "":
@@ -1346,29 +1350,36 @@ class KalshiClient:
         """Read ``fee_type`` and ``fee_multiplier`` from ``GET /series/{series_ticker}``.
 
         A failed or non-quadratic response is unknown. It is not treated as multiplier 1.
+        The result, including unknown, is cached for ``SERIES_FEE_CACHE_TTL_SEC`` so
+        each series is fetched at most once per hour. Concurrent callers share one read.
         """
         from src.decision_engine.strategy_gates import fee_schedule_from_mapping
 
         key = (series_ticker or "").strip()
         if not key:
             return {"known": False, "reason": "no series ticker"}
-        cache = getattr(self, "_series_fee_cache", None)
-        if cache is None:
+        if getattr(self, "_series_fee_cache", None) is None:
             self._series_fee_cache = {}
-            cache = self._series_fee_cache
-        hit = cache.get(key)
-        if hit is not None and time.monotonic() - hit[0] < 600:
-            return dict(hit[1])
-        try:
-            response = await self._http_get_signed(f"/trade-api/v2/series/{key}", timeout=10.0)
-            if response.status_code != 200:
-                return {"known": False, "reason": f"series HTTP {response.status_code}"}
-            result = fee_schedule_from_mapping(response.json() or {})
-        except Exception:
-            return {"known": False, "reason": "series fee read failed"}
-        if result.get("known"):
-            cache[key] = (time.monotonic(), result)
-        return result
+        if getattr(self, "_series_fee_locks", None) is None:
+            self._series_fee_locks = {}
+        lock = self._series_fee_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            hit = self._series_fee_cache.get(key)
+            if hit is not None and time.monotonic() - hit[0] < SERIES_FEE_CACHE_TTL_SEC:
+                return dict(hit[1])
+            try:
+                response = await self._http_get_signed(f"/trade-api/v2/series/{key}", timeout=10.0)
+                if getattr(response, "status_code", None) != 200:
+                    code = getattr(response, "status_code", "error")
+                    result = {"known": False, "reason": f"series HTTP {code}"}
+                else:
+                    payload = response.json() if hasattr(response, "json") else {}
+                    result = fee_schedule_from_mapping(payload or {})
+            except Exception:
+                result = {"known": False, "reason": "series fee read failed"}
+            stored = dict(result)
+            self._series_fee_cache[key] = (time.monotonic(), stored)
+            return dict(stored)
 
     async def get_market(self, ticker: str) -> Optional[Dict]:
         """Fetch a single market by ticker for price refresh."""

@@ -218,6 +218,76 @@ def event_exposure_room(equity: float, open_cost_basis: float, pending_reserve: 
     return total <= eq * float(EVENT_EXPOSURE_CAP_FRACTION) + 1e-9
 
 
+def _side_entry_quote(market: dict, side: str, schedule: dict) -> dict:
+    ask = executable_buy_best_ask_dollars(market, side)
+    if ask is None:
+        return {"side": side, "ask": None, "fee": None, "all_in": None}
+    fee = estimated_entry_fee_dollars(
+        1,
+        float(ask),
+        fee_multiplier=schedule["fee_multiplier"],
+        fee_type=schedule["fee_type"],
+    )
+    cost = all_in_entry_dollars(
+        1,
+        float(ask),
+        fee_multiplier=schedule["fee_multiplier"],
+        fee_type=schedule["fee_type"],
+    )
+    return {"side": side, "ask": float(ask), "fee": fee, "all_in": cost}
+
+
+def _cash_cap_skip_message(ticker: str, cap_dollars: float, sides: list) -> str:
+    parts = [f"Skip model {ticker} — one contract exceeds the cash cap ${cap_dollars:.2f}"]
+    for row in sides:
+        if row["ask"] is None:
+            parts.append(f"{row['side']} ask missing")
+            continue
+        fee = "n/a" if row["fee"] is None else f"{float(row['fee']):.2f}"
+        cost = "n/a" if row["all_in"] is None else f"{float(row['all_in']):.2f}"
+        parts.append(f"{row['side']} ask {float(row['ask']):.2f} estimated fee {fee} all-in {cost}")
+    return "; ".join(parts)
+
+
+def premodel_entry_block(market: dict, bankroll: float) -> Optional[dict]:
+    """Why this market cannot buy one capped contract, or None when it can.
+
+    An unknown series fee is ``fee_unknown``. It is not reported as a cash-cap miss.
+    A real cash-cap miss includes the asks, the estimated fee, the all-in cost,
+    and the dollar cap. Model probability is not used.
+    """
+    schedule = fee_schedule_from_mapping(market)
+    ticker = str(market.get("id") or "")
+    series = str(market.get("series_ticker") or "").strip() or ticker or "unknown"
+    if not schedule["known"]:
+        return {
+            "kind": "fee_unknown",
+            "series": series,
+            "ticker": ticker,
+            "message": f"fee schedule unknown for series {series} — skipping",
+        }
+    sides = [_side_entry_quote(market, side, schedule) for side in ("YES", "NO")]
+    for row in sides:
+        if row["ask"] is None:
+            continue
+        if kelly_contract_cap_for_bankroll(
+            float(bankroll),
+            float(row["ask"]),
+            fee_multiplier=schedule["fee_multiplier"],
+            fee_type=schedule["fee_type"],
+        ) >= 1:
+            return None
+    cap = float(bankroll) * float(MAX_KELLY_BANKROLL_PCT)
+    return {
+        "kind": "cash_cap",
+        "series": series,
+        "ticker": ticker,
+        "cap_dollars": cap,
+        "sides": sides,
+        "message": _cash_cap_skip_message(ticker, cap, sides),
+    }
+
+
 def either_side_can_buy_one_capped_contract(market: dict, bankroll: float) -> bool:
     """True when YES or NO can buy one contract under the estimated 2.5% all-in cap.
 
@@ -225,21 +295,7 @@ def either_side_can_buy_one_capped_contract(market: dict, bankroll: float) -> bo
     A missing series fee schedule returns False. That is not a claim that the
     cap was met. Model probability is not used.
     """
-    schedule = fee_schedule_from_mapping(market)
-    if not schedule["known"]:
-        return False
-    for side in ("YES", "NO"):
-        ask = executable_buy_best_ask_dollars(market, side)
-        if ask is None:
-            continue
-        if kelly_contract_cap_for_bankroll(
-            float(bankroll),
-            float(ask),
-            fee_multiplier=schedule["fee_multiplier"],
-            fee_type=schedule["fee_type"],
-        ) >= 1:
-            return True
-    return False
+    return premodel_entry_block(market, bankroll) is None
 
 
 def autonomous_buy_gate_failure(

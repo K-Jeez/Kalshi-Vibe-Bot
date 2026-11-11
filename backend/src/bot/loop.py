@@ -55,8 +55,8 @@ from src.decision_engine.strategy_gates import (
     effective_scan_min_volume,
     exit_grace_minutes_for_market,
     all_in_entry_dollars,
-    either_side_can_buy_one_capped_contract,
     event_exposure_room,
+    premodel_entry_block,
     fee_inclusive_ev_dollars,
     fee_schedule_from_mapping,
     kelly_contract_cap_for_bankroll,
@@ -503,6 +503,97 @@ def get_bot_state_str(db_factory) -> str:
 def is_bot_playing(db_factory) -> bool:
     """True only when dashboard mode is ``play`` (market scan + AI analysis + new trades)."""
     return get_bot_state_str(db_factory) == "play"
+
+
+# Detail lines for the same market or series are not repeated every scan.
+_PREMODEL_SKIP_LOG_SEC = 15 * 60
+_premodel_skip_logged_at: Dict[str, float] = {}
+
+
+def series_ticker_for_market(market: dict) -> str:
+    """Series key for ``GET /series/{series_ticker}``.
+
+    The market payload's ``series_ticker`` wins. Otherwise the leading token of
+    the event ticker or market id is used, which is how Kalshi names the series.
+    """
+    explicit = str(market.get("series_ticker") or "").strip()
+    if explicit:
+        return explicit
+    for raw in (market.get("event_ticker"), market.get("id")):
+        text = str(raw or "").strip()
+        if "-" in text:
+            head = text.split("-", 1)[0].strip()
+            if head:
+                return head
+    return ""
+
+
+def apply_series_fee_schedule(market: dict, schedule: dict) -> None:
+    """Stamp a series read onto the market dict the entry gate already reads."""
+    if not isinstance(schedule, dict) or not schedule.get("known"):
+        market.pop("fee_type", None)
+        market.pop("fee_multiplier", None)
+        if isinstance(schedule, dict) and schedule.get("reason"):
+            market["fee_schedule_reason"] = str(schedule.get("reason"))
+        return
+    market["fee_type"] = schedule.get("fee_type")
+    market["fee_multiplier"] = schedule.get("fee_multiplier")
+    market.pop("fee_schedule_reason", None)
+
+
+async def attach_series_fee_schedules(kalshi_client, markets: List[dict]) -> None:
+    """Fetch each series at most once per cache TTL and copy it onto its markets.
+
+    A failed read stays unknown. It does not raise and it does not invent a multiplier.
+    """
+    groups: Dict[str, List[dict]] = {}
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        key = series_ticker_for_market(market)
+        if key and not str(market.get("series_ticker") or "").strip():
+            market["series_ticker"] = key
+        groups.setdefault(key, []).append(market)
+    for key, group in groups.items():
+        if not key or not hasattr(kalshi_client, "get_series_fee"):
+            schedule = {"known": False, "reason": "no series ticker"}
+        else:
+            try:
+                loaded = await kalshi_client.get_series_fee(key)
+            except Exception:
+                logger.exception("Series fee read failed for %s", key)
+                loaded = {"known": False, "reason": "series fee read failed"}
+            schedule = loaded if isinstance(loaded, dict) else {"known": False, "reason": "series fee read failed"}
+        for market in group:
+            apply_series_fee_schedule(market, schedule)
+
+
+async def ensure_market_fee_schedule(kalshi_client, market: dict) -> dict:
+    """Reuse a schedule already attached to the market, otherwise the series cache."""
+    current = fee_schedule_from_mapping(market)
+    if current.get("known"):
+        return current
+    await attach_series_fee_schedules(kalshi_client, [market])
+    return fee_schedule_from_mapping(market)
+
+
+def _note_premodel_skip(counts: Dict[str, int], block: dict) -> None:
+    kind = str(block.get("kind") or "fee_unknown")
+    counts[kind] = counts.get(kind, 0) + 1
+    if kind == "fee_unknown":
+        log_key = f"fee_unknown:{block.get('series') or block.get('ticker')}"
+    else:
+        log_key = f"cash_cap:{block.get('ticker')}"
+    now = time.monotonic()
+    if len(_premodel_skip_logged_at) > 4000:
+        stale = [key for key, seen in _premodel_skip_logged_at.items() if now - seen >= _PREMODEL_SKIP_LOG_SEC]
+        for key in stale:
+            _premodel_skip_logged_at.pop(key, None)
+    seen = _premodel_skip_logged_at.get(log_key)
+    if seen is not None and now - seen < _PREMODEL_SKIP_LOG_SEC:
+        return
+    _premodel_skip_logged_at[log_key] = now
+    logger.info("%s", block.get("message") or kind)
 
 
 def reentry_cooldown_minutes_from_settings(settings) -> int:
@@ -1312,6 +1403,12 @@ async def scan_and_trade(
             len(tradeable),
             TRADE_MODE,
         )
+        queued_markets = [market for _kind, _event, members in scan_queue for market in members]
+        try:
+            await attach_series_fee_schedules(kalshi_client, queued_markets)
+        except Exception:
+            logger.exception("Series fee prefetch failed; markets with no schedule stay closed")
+        premodel_skip_counts: Dict[str, int] = {"fee_unknown": 0, "cash_cap": 0}
 
         # Event titles are fetched lazily per batch/single unit (``get_event_title`` caches ~TTL).
         # Do **not** prefetch all unique events here — that is O(events)×HTTP and can stall the loop for minutes.
@@ -1447,12 +1544,10 @@ async def scan_and_trade(
             decision: Dict[str, Any]
 
             if unit_kind == "batch" and et_key:
-                if not any(either_side_can_buy_one_capped_contract(m, balance) for m in members):
-                    logger.info(
-                        "Skip model for event %s — neither side of any listed leg can buy "
-                        "one contract under the existing cash cap",
-                        et_key,
-                    )
+                entry_blocks = [premodel_entry_block(m, balance) for m in members]
+                if all(block is not None for block in entry_blocks):
+                    for block in entry_blocks:
+                        _note_premodel_skip(premodel_skip_counts, block)
                     for xm in members:
                         batch_completed_this_sweep.add(str(xm.get("id") or ""))
                     continue
@@ -1558,11 +1653,9 @@ async def scan_and_trade(
                         allowed_market_id_by_event.get(et_single),
                     )
                     continue
-                if not either_side_can_buy_one_capped_contract(market, balance):
-                    logger.info(
-                        "Skip model %s — neither side can buy one contract under the existing cash cap",
-                        ticker,
-                    )
+                entry_block = premodel_entry_block(market, balance)
+                if entry_block is not None:
+                    _note_premodel_skip(premodel_skip_counts, entry_block)
                     continue
                 route_hold = untradeable_reason(str(ticker))
                 if route_hold:
@@ -1791,14 +1884,7 @@ async def scan_and_trade(
                                 "signal": signal,
                             }
                         else:
-                            if not fee_schedule_from_mapping(market).get("known"):
-                                series_ticker = str(market.get("series_ticker") or "").strip()
-                                if series_ticker and hasattr(kalshi_client, "get_series_fee"):
-                                    loaded = await kalshi_client.get_series_fee(series_ticker)
-                                    if isinstance(loaded, dict) and loaded.get("known"):
-                                        market["fee_type"] = loaded.get("fee_type")
-                                        market["fee_multiplier"] = loaded.get("fee_multiplier")
-                            _fee = fee_schedule_from_mapping(market)
+                            _fee = await ensure_market_fee_schedule(kalshi_client, market)
                             kelly_cap = kelly_contract_cap_for_bankroll(
                                 float(balance),
                                 float(trade_price),
@@ -2410,6 +2496,12 @@ async def scan_and_trade(
             if stop_scan_after:
                 break
 
+        if premodel_skip_counts.get("fee_unknown") or premodel_skip_counts.get("cash_cap"):
+            logger.info(
+                "Scan pre-model skips this sweep: fee_schedule_unknown=%d cash_cap=%d",
+                premodel_skip_counts.get("fee_unknown", 0),
+                premodel_skip_counts.get("cash_cap", 0),
+            )
         logger.info(
             "Scan sweep finished: processed %d unit(s) in ~%.1fs",
             len(scan_queue),
