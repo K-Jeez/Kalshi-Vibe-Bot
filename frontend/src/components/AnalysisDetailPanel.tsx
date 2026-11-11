@@ -48,28 +48,62 @@ export function finiteNum(v: unknown): number | undefined {
   return undefined
 }
 
-/** Human-readable decision badge (API still uses BUY_YES / BUY_NO). */
-export function formatDecisionBadge(d: DecisionAnalysis['decision']): string {
-  if (d === 'BUY_YES') return 'Buy YES'
-  if (d === 'BUY_NO') return 'Buy NO'
-  return d
+export type AnalysisBadgeTone = 'green' | 'grey' | 'amber' | 'red'
+
+export interface AnalysisOutcomeBadge {
+  /** What happened, from the same `action_taken` record as the Action line. */
+  label: string
+  tone: AnalysisBadgeTone
+  /** Model recommendation, never used as the buy badge. */
+  modelLean: string | null
+}
+
+function _modelLean(decision: DecisionAnalysis['decision']): string | null {
+  if (decision === 'BUY_YES') return 'Model leaned YES'
+  if (decision === 'BUY_NO') return 'Model leaned NO'
+  return null
+}
+
+function _filledSide(side: string | undefined): 'YES' | 'NO' | null {
+  const s = String(side || '').toUpperCase()
+  if (s === 'YES' || s === 'NO') return s
+  return null
 }
 
 /**
- * Upper-right badge: actual outcome (did we trade?), not only the model's directional signal.
- * When the model says BUY_YES but execution skips (edge gate, liquidity, etc.), still show SKIP.
+ * Upper-right badge: the recorded outcome, not the model's buy side.
+ * Green only when a buy was sent and filled. A skip, including `no_trade`,
+ * stays grey even if the model recommended YES or NO.
  */
-export function effectiveAnalysisBadgeDecision(a: DecisionAnalysis): DecisionAnalysis['decision'] {
+export function analysisOutcomeBadge(a: DecisionAnalysis): AnalysisOutcomeBadge {
   const at = a.action_taken
-  if (at?.status === 'executed') {
-    const side = String(at.side || '').toUpperCase()
-    if (side === 'YES') return 'BUY_YES'
-    if (side === 'NO') return 'BUY_NO'
+  const lean = _modelLean(a.decision)
+  const status = at?.status
+  if (status === 'executed' && at?.status === 'executed') {
+    const side = _filledSide(at.side)
+    return { label: side ? `Bought ${side}` : 'Bought', tone: 'green', modelLean: lean }
   }
-  if (at?.status === 'skipped' || at?.status === 'no_trade') {
-    return 'SKIP'
+  if (status === 'partial' && at?.status === 'partial') {
+    const side = _filledSide(at.side)
+    return { label: side ? `Partial ${side}` : 'Partial', tone: 'green', modelLean: lean }
   }
-  return a.decision
+  if (status === 'rejected') return { label: 'Rejected', tone: 'red', modelLean: lean }
+  if (status === 'zero_fill' || status === 'fractional_fill') {
+    return { label: 'Not filled', tone: 'amber', modelLean: lean }
+  }
+  if (status === 'skipped' || status === 'no_trade') {
+    return { label: 'Skipped', tone: 'grey', modelLean: lean }
+  }
+  if (!at && a.decision === 'SKIP') return { label: 'Skipped', tone: 'grey', modelLean: null }
+  if (!at) return { label: 'Pending', tone: 'amber', modelLean: lean }
+  return { label: 'Pending', tone: 'amber', modelLean: lean }
+}
+
+const BADGE_TONE_CLASS: Record<AnalysisBadgeTone, string> = {
+  green: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
+  grey: 'bg-white/10 text-white/80 border-white/20',
+  amber: 'bg-amber-500/15 text-amber-300 border-amber-500/40',
+  red: 'bg-red-500/20 text-red-300 border-red-500/40',
 }
 
 export function formatVolumeContracts(v: number | undefined): string {
@@ -208,24 +242,26 @@ export const AnalysisDetailBody: React.FC<{
   fallbackProvider?: AiProvider | null
 }> = ({ a }) => {
   const [ctxOpen, setCtxOpen] = React.useState(false)
-  const badgeDecision = effectiveAnalysisBadgeDecision(a)
-  const badgeYes = badgeDecision === 'BUY_YES'
-  const badgeNo = badgeDecision === 'BUY_NO'
+  const outcome = analysisOutcomeBadge(a)
 
   const aiYes = a.ai_probability_yes_pct ?? Math.round((a.confidence ?? 0) * 100)
   const aiNo = Math.max(0, Math.min(100, 100 - aiYes))
   const recSide = a.decision === 'BUY_YES' ? 'YES' : a.decision === 'BUY_NO' ? 'NO' : null
   const aiForSide = recSide === 'YES' ? aiYes : recSide === 'NO' ? aiNo : null
   const mImpl = a.market_implied_probability_pct
+  const yesFromBook = finiteNum(a.yes_price)
+  const impliedShown =
+    mImpl != null && mImpl > 0
+      ? mImpl
+      : yesFromBook != null && yesFromBook > 0
+        ? Math.round(yesFromBook * 100)
+        : null
+  const impliedLabel = a.decision === 'SKIP' ? 'Market implied (YES ask)' : 'Market implied (buy side)'
   const edgePts = a.edge_pct ?? a.edge
   const kelly = a.kelly_contracts ?? 0
   const batchLegId = (a.xai_analysis?.event_batch && String(a.market_id || '').trim()) || ''
 
-  const badgeStyles = badgeYes
-    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-    : badgeNo
-      ? 'bg-red-500/20 text-red-400 border-red-500/30'
-      : 'bg-brand-muted/15 text-white border-brand-muted/30'
+  const badgeStyles = BADGE_TONE_CLASS[outcome.tone]
 
   const analysisProvider = analysisAiProviderId(a)
 
@@ -241,12 +277,20 @@ export const AnalysisDetailBody: React.FC<{
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-white leading-snug">{a.market_title}</p>
+          {a.market_id ? (
+            <p className="text-[10px] text-white/55 font-mono truncate">{a.market_id}</p>
+          ) : null}
           <AnalysisMarketSnapshot a={a} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {analysisProvider ? <AiProviderLogo className="h-9 w-9" /> : null}
-          <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
-            {formatDecisionBadge(badgeDecision)}
+          <span className="flex flex-col items-end gap-0.5">
+            <span className={`px-2 py-0.5 rounded-full text-xs font-bold border ${badgeStyles}`}>
+              {outcome.label}
+            </span>
+            {outcome.modelLean ? (
+              <span className="text-[10px] font-medium text-white/55">{outcome.modelLean}</span>
+            ) : null}
           </span>
         </div>
       </div>
@@ -279,12 +323,12 @@ export const AnalysisDetailBody: React.FC<{
             <div>
               <p
                 className="text-[10px] uppercase tracking-wide text-white/65"
-                title="Executable ask on the side we would buy, as an implied win probability (0–100%)."
+                title="Executable YES ask, or the buy-side ask when a side was chosen."
               >
-                Market implied (buy side)
+                {impliedLabel}
               </p>
               <p className="text-lg font-bold text-white tabular-nums">
-                {mImpl != null && mImpl > 0 ? `${mImpl}%` : '—'}
+                {impliedShown != null ? `${impliedShown}%` : '—'}
               </p>
             </div>
             <div>
@@ -321,6 +365,16 @@ export const AnalysisDetailBody: React.FC<{
                     : `Recommended: ${recSide}`
                   : 'SKIP'}
               </p>
+              {a.blended_side_pct != null ? (
+                <p
+                  className="text-[10px] text-amber-200/90 mt-1"
+                  title="Used for expected value and quarter Kelly. The fee-free mid is (YES bid + YES ask) / 2. Gates still use the raw model."
+                >
+                  Blended P(side) {Number(a.blended_side_pct).toFixed(1)}%
+                  {a.blend_weight != null ? ` · w=${Number(a.blend_weight).toFixed(2)}` : ''}
+                  {a.blend_market ? ` · ${a.blend_market}` : ''}
+                </p>
+              ) : null}
             </div>
             <div>
               <p className="text-[10px] uppercase tracking-wide text-white/65">Edge</p>
@@ -335,7 +389,7 @@ export const AnalysisDetailBody: React.FC<{
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-brand-muted/25 text-xs">
             <div>
-              <span className="text-white/70">Full Kelly size </span>
+              <span className="text-white/70">Quarter Kelly size </span>
               <span className="font-semibold text-amber-300 tabular-nums">{kelly}</span>
               <span className="text-white/70"> contracts</span>
             </div>
@@ -368,6 +422,15 @@ export const AnalysisDetailBody: React.FC<{
             })}
           </ul>
         </div>
+      )}
+      {a.xai_analysis?.uncertainty?.status && (
+        <p className="text-[10px] text-white/70 mb-1">
+          Uncertainty {a.xai_analysis.uncertainty.status}
+          {a.xai_analysis.uncertainty.level ? ` · ${a.xai_analysis.uncertainty.level}` : ''}
+          {a.xai_analysis.uncertainty.missing?.length
+            ? ` · missing ${a.xai_analysis.uncertainty.missing.join(', ')}`
+            : ''}
+        </p>
       )}
       {a.reasoning && (
         <p className="text-xs text-white leading-relaxed line-clamp-3 mb-2">{a.reasoning}</p>

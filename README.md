@@ -1,6 +1,6 @@
 # Kalshi Vibe Bot
 
-Mostly vibe-coded, autonomous [Kalshi](https://kalshi.com/) helper for **binary** markets: **local vetting** rejects bad books quickly, **xAI Grok** returns **P(YES)** (0–100) plus a **direction** (YES / NO / SKIP), the server computes **edge** vs executable asks and **full Kelly** whole-contract order sizing (**cash-capped**; **one** contract when fractional Kelly is below one contract but edge at the ask remains), and open legs exit on **stop-loss only** (drawdown of **open cash basis** vs dashboard **Est. Value** after a grace period when auto-sell is enabled).
+Mostly vibe-coded, autonomous [Kalshi](https://kalshi.com/) helper for **binary** markets: **local vetting** rejects bad books quickly, **xAI Grok** returns **P(YES)** (0–100) plus a **direction** (YES / NO / SKIP), the server computes **edge** vs executable asks and **quarter Kelly** whole-contract order sizing (**capped at 2.5% of available cash including an estimated entry fee**; **one** contract when quarter Kelly is below one contract but edge at the ask remains), and open legs exit on **stop-loss only** (drawdown of **open cash basis** vs dashboard **Est. Value** after a grace period when auto-sell is enabled).
 
 Fair warning: there is a *lot* going on under the hood. The backend is full of moving parts—parsing Kalshi payloads that do not always line up cleanly, normalizing timestamps and book fields, batching unrelated props apart, ranking line ladders, and running a pile of gates and Kelly math before anything hits the exchange. Trying to get toward **consistent** profits while also planning for every flavor of market (sports, weather bins, politics, crypto-adjacent stuff, etc.) and whatever shape the API happens to return that day is a genuinely hard puzzle. This project is still very much trial and error; knobs get tuned, edge cases show up, and behavior shifts as we learn what actually holds up in production.
 
@@ -39,7 +39,7 @@ Activates the venv, starts backend + frontend, opens the UI. Use `stop.bat` to s
 1. Pull open **binary** markets from Kalshi (contractual `max_close_ts` window), then vet by **time to event end**: **`expected_expiration_time`** when present and still in the future (so sports props are not blocked by a distant contractual `close_time`). If it is missing or already past, the bot uses the soonest future instant among **vetting horizon** (earlier of `expected_expiration_time` and `occurrence_datetime` when present) and contractual **`close_time`**. Rows missing usable timestamps are skipped.
 2. **Local vetting** (`is_tradeable_market` in `backend/src/bot/loop.py`) is pass/fail: volume, status, hardcoded **extreme YES/NO snapshot** skip (YES>90¢ and NO<10¢, or the reverse, on normalized ``yes_price``/``no_price``), spread and depth on at least one leg, the `BOT_MAX_HOURS` horizon rule (see above), and—when `LOCAL_MIN_RESIDUAL_PAYOFF` > 0—at least one leg that is **both** liquid and has gross upside `1 − ask` at or above that floor (same idea as the post–AI buy gate, so skewed books do not spend tokens on analysis that cannot execute).
 3. Passing markets are grouped by Kalshi **`event_ticker`**, then **partitioned** so unrelated props do not share one LLM call (see `backend/src/bot/event_batch_partition.py`): e.g. **line ladders** (same player stem, different numeric thresholds), **outcome codes** (home / away / tie), and **exclusive bins** (same-day high/low temperature brackets like `B88.5` / `T93` under `KXHIGH…` / `KXLOW…`). Each partition becomes **one** batched **Grok** call. **Line-ladder** partitions with more than three locally vetted legs are **shortlisted to the top three** by server-side volume, depth, and spread tightness before the model runs (saves tokens; **``codes:``** and **``exclusive_bins:``** batches are not cut). The model picks a single **best** contract (or SKIP all), and the dashboard logs **only that** market’s analysis row.
-4. The server derives **market-implied probability** from the executable **ask** on the buy side, **edge** (percentage points), and **full Kelly** whole-contract size (rounded down from Kelly stake, then **capped by deployable cash** and an automatic **5% of deployable cash** maximum per entry). If Kelly rounds to **zero** contracts but the Kelly fraction at the ask is still **positive**, the bot buys **one** contract when the **5% cap can pay for it**. If that cap cannot pay for one contract, the buy is skipped instead of using the rest of the cash. After the model returns **BUY_YES** or **BUY_NO**, the bot executes only if **edge** meets the **effective** minimum **and** AI win probability on that purchased side meets the **effective** minimum (defaults **5** edge points and **60%** win on the buy side from `.env` / **`tuning_state`**), plus **autonomous guardrails** in code (max edge **22** pts, max AI **90%**, min entry **26¢**, calibration block on mid-priced high-confidence picks — see `strategy_gates.py`), with **stricter** edge and AI floors when a **baked-in contrarian buy tier** applies (buy-side implied ≤ 25%, model buy-side minus implied ≥ 15 points, then +5 edge points and +4 win-% points on top of your saved floors). **Sports** markets use a higher scan volume floor and longer exit grace (min edge is your Settings value). **Scanning** for new ideas is gated by bot mode, deployable cash, and related checks — **not** by edge (edge is enforced at this pre-buy step). **No** edge at the ask, or **cannot** afford one whole contract at the execution price, blocks the buy.
+4. The server derives **market-implied probability** from the executable **ask** on the buy side, **edge** (percentage points), and **quarter Kelly** whole-contract size (one quarter of the full-Kelly stake, then **capped at 2.5% of available cash including an estimated entry fee**). The 0.07 figure in that estimate is not the exchange fill fee. If quarter Kelly rounds to **zero** contracts but the fraction is still **positive**, the bot buys **one** contract when that cap can pay for it. If that cap cannot pay for one contract, the buy is skipped instead of using the rest of the cash. After the model returns **BUY_YES** or **BUY_NO**, the bot executes only if **edge** meets the **effective** minimum **and** AI win probability on that purchased side meets the **effective** minimum (defaults **5** edge points and **60%** win on the buy side from `.env` / **`tuning_state`**), plus **autonomous guardrails** in code (max edge **22** pts, max AI **90%**, min entry **26¢**, calibration block on mid-priced high-confidence picks — see `strategy_gates.py`), with **stricter** edge and AI floors when a **baked-in contrarian buy tier** applies (buy-side implied ≤ 25%, model buy-side minus implied ≥ 15 points, then +5 edge points and +4 win-% points on top of your saved floors). **Sports** markets use a higher scan volume floor and longer exit grace (min edge is your Settings value). **Scanning** for new ideas is gated by bot mode, deployable cash, and related checks — **not** by edge (edge is enforced at this pre-buy step). **No** edge at the ask, or **cannot** afford one whole contract at the execution price, blocks the buy.
 5. Buys use Kalshi **V2** create-order with **IOC** (immediate-or-cancel) **limit** orders sized by contract count: **whole-contract** fills only (partial fills possible when the book is thin; unfilled size is canceled).
 6. **Open positions** store an optional **`stop_loss_drawdown_pct_at_entry`** audit snapshot. After **`EXIT_GRACE_MINUTES`**, when **stop-loss auto-sell** is enabled (Settings / `STOP_LOSS_SELLING_ENABLED`), the monitor compares **open cash basis** (contract notional at open plus buy-side fees in `fees_paid`) to **display Est. Value** (per contract × quantity — same numbers as the dashboard) using the **current** **`STOP_LOSS_DRAWDOWN_PCT`** / Settings value (not the frozen snapshot). If **(basis − est value) / basis** meets the threshold, the bot issues a **stop-loss** exit (IOC reduce-only sells stepped down the book when bids exist). No automated take-profit or counter-trend exits.
 7. **`REENTRY_COOLDOWN_MINUTES`** can block a new entry on the same ticker after a stop-loss.
@@ -76,22 +76,26 @@ Trading is **live Kalshi only** (no paper mode). The **Settings** UI persists **
 | `AI_TEMPERATURE` | `0.1` | Sampling temperature for Grok |
 | `XAI_TEAM_ID` | _(empty)_ | Optional: prepaid balance tile (with Management key) |
 | `XAI_MANAGEMENT_API_KEY` | _(empty)_ | Optional: xAI Management API key |
-| `MIN_EDGE_TO_BUY_PCT` | `5` | Min edge (pts) to execute a buy |
-| `MIN_AI_WIN_PROB_BUY_SIDE_PCT` | `60` | Min AI win % on the purchased side (clamped **51–99** in code) |
+| `MIN_EDGE_TO_BUY_PCT` | `4` | Min edge (pts) to execute a buy |
+| `MIN_AI_WIN_PROB_BUY_SIDE_PCT` | `55` | Min AI win % on the purchased side (clamped **51–99** in code) |
+| `VIBE_MODEL_BLEND_WEIGHT` | `0.25` | Sizing only. Share of the raw model; the rest is the fee-free mid. Gates stay on the raw model |
+| `VIBE_BLEND_EV_GATE` | `false` | When false, raw edge and win-prob gates decide the buy. Blended Kelly sizes it, with a one-contract floor inside the cap and cash |
 | `STOP_LOSS_DRAWDOWN_PCT` | `0.80` | Stop-loss drawdown vs entry price (Est. Value) |
 | `STOP_LOSS_SELLING_ENABLED` | `false` | Auto stop-loss exits when `true` |
-| `BOT_MAX_OPEN_POSITIONS` | `30` | Max open positions before scan pauses |
 | `CLOSED_RESOLUTION_REFRESH_INTERVAL_SEC` | `450` | Poll closed rows for official outcome (`0` = off) |
 | `CLOSED_RESOLUTION_REFRESH_BATCH` | `25` | Max closed rows per outcome poll |
 | `EXIT_GRACE_MINUTES` | `10` | Minutes after entry before stop-loss applies |
 | `BOT_SCAN_INTERVAL` | `10` | Seconds between full scans |
 | `BOT_MIN_VOLUME` | `1500.0` | Min 24h volume (contracts); sports use a higher floor in code |
-| `BOT_MAX_HOURS` | `6` | Buy vetting window (hours to event end) |
+| `BOT_MAX_HOURS` | `4` | Buy vetting window (hours to event end). Read from `.env` only; `tuning_state` does not store it |
 | `BOT_MARKETS_FETCH_MAX_CLOSE_HOURS` | `720` | Kalshi list fetch horizon (contractual close) |
 | `BOT_MAX_SPREAD` | `0.15` | Max spread on purchased leg (decimal $) |
 | `BOT_MIN_TOP_SIZE` | `1.0` | Min top-of-book ask size (contracts) |
 | `REENTRY_COOLDOWN_MINUTES` | `120` | Cooldown after stop-loss on same ticker (`0` = off) |
 | `LOCAL_MIN_RESIDUAL_PAYOFF` | `0.12` | Min gross upside `1 − ask` on buy leg (`0` = off) |
+| `VIBE_LIVE_FACTS_ENABLED` | `true` | Fetch a public spot, NWS temp, or ESPN score before the model |
+| `VIBE_PREFILTER_SERIES_PREFIXES` | `KXESOCCER,KXCS2,...` | Series skipped before the model because no live feed exists |
+| `VIBE_NUMERIC_PREFILTER_SERIES_PREFIXES` | `KXSILVER,KXGOLD,KXINX,...` | Numeric series with no free price proxy |
 | `PORT` | `8000` | API port |
 | `HOST` | `127.0.0.1` | Bind address. `0.0.0.0` listens on the network; trading actions from other machines still need `LOCAL_API_TOKEN` |
 | `ENABLE_DEBUG_RAW_KALSHI` | `false` | Enables `GET /debug/raw` when `true` |
@@ -117,7 +121,7 @@ These are set in `config.py` or client code. You can still add them to `.env` ma
 | `KALSHI_MARKETS_PAGE_DELAY_SEC` | `0.05` | `config.py` |
 | `CORS_ORIGINS` | localhost:3000 | `config.py` (comma-separated) |
 | `DATABASE_URL` | `backend/trading_bot.db` | `config.py` |
-| Autonomous buy caps | edge ≤ **22** pts, AI ≤ **90%**, entry ≥ **26¢**, Kelly ≤ **5%** of deployable cash | `strategy_gates.py` |
+| Autonomous buy caps | edge ≤ **22** pts, AI ≤ **90%**, entry ≥ **26¢**, quarter Kelly, entry ≤ **2.5%** of cash including an estimated fee, event ≤ **5%** of equity, max **12** open | `strategy_gates.py` |
 | Sports scan/exit | min volume **2000**, **+5** min exit grace | `strategy_gates.py` |
 | xAI HTTP retries / timeouts | `3` / `55s` / `150s` batch | `xai_client.py` |
 
@@ -187,7 +191,7 @@ pytest backend\tests -q
 
 ## Strategy knobs
 
-SQLite **`tuning_state`** stores **`min_edge_to_buy_pct`**, **`min_ai_win_prob_buy_side_pct`**, **`max_open_positions`**, **`stop_loss_drawdown_pct`**, and **`stop_loss_selling_enabled`**. The **Settings** page edits these; **`POST /tuning/strategy-knobs`**, **`POST /tuning/stop-loss-selling`**, **`POST /tuning/reset-to-config-defaults`** persist and broadcast **`tuning_update`**. **Restore configuration defaults** reloads from **`config.py`** / your **`.env`** (including **`MIN_EDGE_TO_BUY_PCT`**, **`MIN_AI_WIN_PROB_BUY_SIDE_PCT`**, **`BOT_MAX_OPEN_POSITIONS`**, etc.).
+SQLite **`tuning_state`** stores **`min_edge_to_buy_pct`**, **`min_ai_win_prob_buy_side_pct`**, **`stop_loss_drawdown_pct`**, and **`stop_loss_selling_enabled`**. Available cash is the position limit. The **Settings** page edits these; **`POST /tuning/strategy-knobs`**, **`POST /tuning/stop-loss-selling`**, **`POST /tuning/reset-to-config-defaults`** persist and broadcast **`tuning_update`**. **Restore configuration defaults** reloads from **`config.py`** / your **`.env`** (including **`MIN_EDGE_TO_BUY_PCT`** and **`MIN_AI_WIN_PROB_BUY_SIDE_PCT`**).
 
 **Tuning endpoints** (see **`/docs`**): `GET /tuning/state`, `POST /tuning/strategy-knobs`, `POST /tuning/stop-loss-selling`, `POST /tuning/reset-to-config-defaults`.
 
@@ -242,7 +246,7 @@ UI: http://localhost:3000 — API http://localhost:8000 (`/docs` for OpenAPI).
 | `src/bot/event_batch_partition.py` | Event-batch grouping + line-ladder shortlist |
 | `src/bot/scan_eligibility.py` | When market scan + AI analysis runs (balance / xAI prepaid / deployable gates) |
 | `src/decision_engine/analyzer.py` | xAI Grok analysis + strategy payload |
-| `src/decision_engine/strategy_math.py` | Edge, full Kelly order sizing (cash-capped; single-contract fallback) |
+| `src/decision_engine/strategy_math.py` | Edge, quarter Kelly order sizing (2.5% all-in cap; single-contract fallback) |
 | `src/decision_engine/strategy_gates.py` | Autonomous buy guardrails (caps, sports, calibration block) |
 | `src/clients/` | Kalshi, xAI (`xai_client.py`), shared JSON parse (`ai_json_parse.py`) |
 | `src/database/models.py` | ORM + migrations |

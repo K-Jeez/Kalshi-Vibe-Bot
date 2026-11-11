@@ -72,7 +72,7 @@ EXPECTED_SAFETY_COMMIT_PREFIX = "c2994d3"
 
 def assert_corrected_stake_cap() -> None:
     """The corrected cap returns 0 when 5% of cash cannot buy one contract."""
-    got = kelly_contract_cap_for_bankroll(10.46, 0.67)
+    got = kelly_contract_cap_for_bankroll(10.46, 0.67, fee_multiplier=1, fee_type="quadratic")
     if got != 0:
         raise SystemExit(
             "Refusing to run: kelly_contract_cap_for_bankroll(10.46, 0.67) "
@@ -192,7 +192,9 @@ def decide_buy(
         return {"action": "skip", "reason": "min_ai", "qty": 0, "tag": "none", "ask": ask, "edge": edge}
     if edge + 1e-9 < float(eff_edge):
         return {"action": "skip", "reason": "min_edge", "qty": 0, "tag": "none", "ask": ask, "edge": edge}
-    kcap = kelly_contract_cap_for_bankroll(cash, ask)
+    # This study assumes the general quadratic table with multiplier 1.
+    # A live order does not assume that when the series schedule is missing.
+    kcap = kelly_contract_cap_for_bankroll(cash, ask, fee_multiplier=1, fee_type="quadratic")
     from src.decision_engine.strategy_math import kelly_contracts_for_order
 
     qty, tag = kelly_contracts_for_order(

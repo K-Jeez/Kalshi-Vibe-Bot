@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+
+from src.json_safe import dumps_payload
 import math
 import time
 import uuid
@@ -16,6 +18,7 @@ from src.clients.kalshi_client import (
     open_position_mark_dollars,
 )
 from src.activity_log import (
+    decision_model_usage,
     fresh_unresolved_order_hold,
     make_order_submit_gate,
     persist_order_intent,
@@ -53,6 +56,11 @@ from src.decision_engine.strategy_gates import (
     effective_min_edge_for_market,
     effective_scan_min_volume,
     exit_grace_minutes_for_market,
+    all_in_entry_dollars,
+    event_exposure_room,
+    premodel_entry_block,
+    fee_inclusive_ev_dollars,
+    fee_schedule_from_mapping,
     kelly_contract_cap_for_bankroll,
 )
 from src.decision_engine.strategy_math import (
@@ -62,6 +70,12 @@ from src.decision_engine.strategy_math import (
     kelly_contracts_for_order,
     kelly_order_skip_summary,
 )
+from src.ledger_money import whole_contracts
+from src.bot.order_outcome import buy_fill_status, classify_routing_error
+from src.bot.routing_cooldown import note_untradeable, untradeable_reason
+from src.bot.fill_bookkeeping import apply_cumulative_fill, ensure_fill_trade
+from src.bot.order_reconcile import reconcile_open_intents
+from src.bot.supervision import market_execution_lock, run_parallel_cycles, submission_reservation_lock
 from src.bot.event_batch_partition import (
     LINE_LADDER_MAX_LEGS_FOR_XAI,
     group_markets_by_event_batch_partition,
@@ -112,6 +126,14 @@ async def _maybe_auto_refresh_closed_resolution(
             limit=batch,
             only_missing_result=True,
         )
+        try:
+            from src.shadow_buys import resolve_shadow_markets
+
+            scored = await resolve_shadow_markets(db, kalshi_client, limit=10)
+            if scored:
+                logger.info("Shadow buys scored: %s", scored)
+        except Exception as shadow_exc:
+            logger.debug("Shadow resolution skipped: %s", shadow_exc)
         if int(out.get("updated", 0) or 0) > 0:
             logger.info(
                 "Closed resolution auto-refresh: examined=%s updated=%s fetch_failed=%s",
@@ -204,6 +226,37 @@ def _tradeable_scan_queue(tradeable: List[dict]) -> List[Tuple[str, Optional[str
             else:
                 out.append(("single", et, sub))
     return out
+
+
+def _promote_fast_close_markets(
+    scan_queue: List[Tuple[str, Optional[str], List[dict]]],
+) -> List[Tuple[str, Optional[str], List[dict]]]:
+    """Markets closing inside an hour are single units at the front of the queue.
+
+    Their order is placed as soon as that analysis returns, ahead of slower batches.
+    """
+    now = datetime.now(timezone.utc)
+    fast: List[Tuple[float, Tuple[str, Optional[str], List[dict]]]] = []
+    rest: List[Tuple[str, Optional[str], List[dict]]] = []
+    for kind, et, members in scan_queue:
+        fast_members = []
+        slow_members = []
+        for market in members:
+            seconds, _reason = _seconds_until_buy_horizon(market, now=now)
+            if seconds is not None and 0 < seconds < 3600:
+                fast_members.append((seconds, market))
+            else:
+                slow_members.append(market)
+        for seconds, market in fast_members:
+            fast.append((seconds, ("single", et, [market])))
+        if len(slow_members) > 1 and kind == "batch":
+            rest.append(("batch", et, slow_members))
+        elif len(slow_members) == 1:
+            rest.append(("single", et, slow_members))
+        elif len(slow_members) > 1:
+            rest.append((kind, et, slow_members))
+    fast.sort(key=lambda item: item[0])
+    return [unit for _seconds, unit in fast] + rest
 
 
 def _cooldown_market_ids_from_event_batch_xai_jsons(
@@ -395,7 +448,7 @@ def _seconds_until_buy_horizon(market: dict, *, now: datetime) -> Tuple[Optional
 
 def is_tradeable_market(
     market: dict,
-    max_hours: int = 6,
+    max_hours: int = 4,
     min_volume: float = 1.0,
     max_spread: float = 0.15,
     min_top_size: float = 1.0,
@@ -493,6 +546,97 @@ def is_bot_playing(db_factory) -> bool:
     return get_bot_state_str(db_factory) == "play"
 
 
+# Detail lines for the same market or series are not repeated every scan.
+_PREMODEL_SKIP_LOG_SEC = 15 * 60
+_premodel_skip_logged_at: Dict[str, float] = {}
+
+
+def series_ticker_for_market(market: dict) -> str:
+    """Series key for ``GET /series/{series_ticker}``.
+
+    The market payload's ``series_ticker`` wins. Otherwise the leading token of
+    the event ticker or market id is used, which is how Kalshi names the series.
+    """
+    explicit = str(market.get("series_ticker") or "").strip()
+    if explicit:
+        return explicit
+    for raw in (market.get("event_ticker"), market.get("id")):
+        text = str(raw or "").strip()
+        if "-" in text:
+            head = text.split("-", 1)[0].strip()
+            if head:
+                return head
+    return ""
+
+
+def apply_series_fee_schedule(market: dict, schedule: dict) -> None:
+    """Stamp a series read onto the market dict the entry gate already reads."""
+    if not isinstance(schedule, dict) or not schedule.get("known"):
+        market.pop("fee_type", None)
+        market.pop("fee_multiplier", None)
+        if isinstance(schedule, dict) and schedule.get("reason"):
+            market["fee_schedule_reason"] = str(schedule.get("reason"))
+        return
+    market["fee_type"] = schedule.get("fee_type")
+    market["fee_multiplier"] = schedule.get("fee_multiplier")
+    market.pop("fee_schedule_reason", None)
+
+
+async def attach_series_fee_schedules(kalshi_client, markets: List[dict]) -> None:
+    """Fetch each series at most once per cache TTL and copy it onto its markets.
+
+    A failed read stays unknown. It does not raise and it does not invent a multiplier.
+    """
+    groups: Dict[str, List[dict]] = {}
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        key = series_ticker_for_market(market)
+        if key and not str(market.get("series_ticker") or "").strip():
+            market["series_ticker"] = key
+        groups.setdefault(key, []).append(market)
+    for key, group in groups.items():
+        if not key or not hasattr(kalshi_client, "get_series_fee"):
+            schedule = {"known": False, "reason": "no series ticker"}
+        else:
+            try:
+                loaded = await kalshi_client.get_series_fee(key)
+            except Exception:
+                logger.exception("Series fee read failed for %s", key)
+                loaded = {"known": False, "reason": "series fee read failed"}
+            schedule = loaded if isinstance(loaded, dict) else {"known": False, "reason": "series fee read failed"}
+        for market in group:
+            apply_series_fee_schedule(market, schedule)
+
+
+async def ensure_market_fee_schedule(kalshi_client, market: dict) -> dict:
+    """Reuse a schedule already attached to the market, otherwise the series cache."""
+    current = fee_schedule_from_mapping(market)
+    if current.get("known"):
+        return current
+    await attach_series_fee_schedules(kalshi_client, [market])
+    return fee_schedule_from_mapping(market)
+
+
+def _note_premodel_skip(counts: Dict[str, int], block: dict) -> None:
+    kind = str(block.get("kind") or "fee_unknown")
+    counts[kind] = counts.get(kind, 0) + 1
+    if kind == "fee_unknown":
+        log_key = f"fee_unknown:{block.get('series') or block.get('ticker')}"
+    else:
+        log_key = f"cash_cap:{block.get('ticker')}"
+    now = time.monotonic()
+    if len(_premodel_skip_logged_at) > 4000:
+        stale = [key for key, seen in _premodel_skip_logged_at.items() if now - seen >= _PREMODEL_SKIP_LOG_SEC]
+        for key in stale:
+            _premodel_skip_logged_at.pop(key, None)
+    seen = _premodel_skip_logged_at.get(log_key)
+    if seen is not None and now - seen < _PREMODEL_SKIP_LOG_SEC:
+        return
+    _premodel_skip_logged_at[log_key] = now
+    logger.info("%s", block.get("message") or kind)
+
+
 def reentry_cooldown_minutes_from_settings(settings) -> int:
     """Read ``reentry_cooldown_minutes``. A leftover hours attribute is ignored."""
     try:
@@ -502,18 +646,27 @@ def reentry_cooldown_minutes_from_settings(settings) -> int:
 
 
 def losing_exit_cooldown_market_ids(rows, *, now: datetime, cooldown_minutes: int) -> Set[str]:
-    """Tickers whose latest close inside the window has negative realized P&L."""
+    """Tickers whose latest close inside the window has negative realized P&L.
+
+    SQLite returns ``closed_at`` without a timezone. ``now`` is UTC-aware.
+    Both sides are normalized to UTC before they are compared. The instant
+    does not change.
+    """
     if cooldown_minutes <= 0:
         return set()
-    cutoff = now - timedelta(minutes=int(cooldown_minutes))
+    now_utc = ensure_utc(now)
+    if now_utc is None:
+        return set()
+    cutoff = now_utc - timedelta(minutes=int(cooldown_minutes))
     latest: Dict[str, Tuple[datetime, float]] = {}
     for mid, closed_at, realized in rows:
-        if not mid or closed_at is None or closed_at < cutoff:
+        closed_utc = ensure_utc(closed_at) if isinstance(closed_at, datetime) else None
+        if not mid or closed_utc is None or closed_utc < cutoff:
             continue
         key = normalize_market_id(str(mid)).upper()
         prev = latest.get(key)
-        if prev is None or closed_at > prev[0]:
-            latest[key] = (closed_at, float(realized or 0.0))
+        if prev is None or closed_utc > prev[0]:
+            latest[key] = (closed_utc, float(realized or 0.0))
     return {key for key, (_, pnl) in latest.items() if pnl < 0}
 
 
@@ -706,6 +859,10 @@ async def monitor_positions(
             # or an official resolved intrinsic (winning YES legs often have **no bids** while ``finalized``).
             # ``live_best_bid_dollars`` may still read ``yes_price`` composite and wrongly clear dead-market
             # state while the dashboard bid column shows 0¢.
+            if mark_last > 0:
+                from src.bot.exit_backoff import clear_exit_backoff
+
+                clear_exit_backoff(str(pos.market_id or ""))
             if mark_last > 0 or intrinsic_resolved_mark is not None:
                 had_flag = bool(getattr(pos, "awaiting_settlement", False)) or bool(
                     getattr(pos, "dead_market", False)
@@ -749,6 +906,12 @@ async def monitor_positions(
                 )
                 continue
 
+            from src.bot.exit_backoff import exit_is_backed_off
+
+            if exit_is_backed_off(str(pos.market_id or "")):
+                logger.info("Skip auto-exit %s — empty-book backoff", pos.market_id)
+                continue
+
             logger.info(
                 "Exiting %s (%s x%d) — reason=%s  P&L=%.2f",
                 pos.market_id, pos.side, pos.quantity, exit_reason,
@@ -777,24 +940,57 @@ async def monitor_positions(
                 continue
             sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
             if sell_hold:
+                from src.database.models import release_sqlite_write
+
+                release_sqlite_write(db)
+                await reconcile_open_intents(
+                    kalshi_client,
+                    db_factory,
+                    market_id=pos.market_id,
+                    action="sell",
+                )
+                sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
+            if sell_hold:
+                from src.ops_status import note_unresolved
+
+                note_unresolved(sell_hold)
                 logger.info("Skip auto-exit %s — %s", pos.market_id, sell_hold)
                 continue
-            sell_gate = make_order_submit_gate(
-                {
-                    "market_id": pos.market_id,
-                    "event_ticker": getattr(pos, "event_ticker", None),
-                    "side": pos.side,
-                    "action": "sell",
-                    "quantity": sell_n,
-                    "detail": f"auto-exit {exit_reason}",
-                }
-            )
-            sell_result = await kalshi_client.place_sell_market(
-                pos.market_id,
-                pos.side,
-                sell_n,
-                before_submit=sell_gate,
-            )
+            async with market_execution_lock(str(getattr(pos, "event_ticker", "") or pos.market_id or "")):
+                async with market_execution_lock(str(pos.market_id or "")):
+                    db.refresh(pos)
+                    if (pos.status or "") != "open" or int(pos.quantity or 0) < 1:
+                        logger.info(
+                            "Skip auto-exit %s — position changed before the order",
+                            pos.market_id,
+                        )
+                        continue
+                    from src.database.models import BotState
+
+                    state_row = db.query(BotState).filter(BotState.id == 1).first()
+                    if state_row is not None and (state_row.state or "") == "stop":
+                        logger.info("Skip auto-exit %s — bot is stopped", pos.market_id)
+                        continue
+                    sell_n = int(pos.quantity)
+                    from src.database.models import release_sqlite_write
+
+                    release_sqlite_write(db)
+                    sell_gate = make_order_submit_gate(
+                        {
+                            "market_id": pos.market_id,
+                            "event_ticker": getattr(pos, "event_ticker", None),
+                            "side": pos.side,
+                            "action": "sell",
+                            "quantity": sell_n,
+                            "detail": f"auto-exit {exit_reason}",
+                        }
+                    )
+                    sell_result = await kalshi_client.place_sell_market(
+                        pos.market_id,
+                        pos.side,
+                        sell_n,
+                        before_submit=sell_gate,
+                    )
             record_order_ack(
                 sell_result,
                 {
@@ -837,6 +1033,9 @@ async def monitor_positions(
                     )
                 continue
             if kalshi_order_filled_contracts(sell_result) <= 0:
+                from src.bot.exit_backoff import note_empty_exit
+
+                empty_tries = note_empty_exit(str(pos.market_id or ""))
                 # Native bid only — parity-inferred bids can show liquidity IOC cannot hit.
                 exe_bid = (
                     live_best_bid_dollars(
@@ -853,7 +1052,7 @@ async def monitor_positions(
                     sell_result.get("status"),
                     bid_txt,
                 )
-                if not sell_result.get("error") and (exe_bid is None or exe_bid <= 0):
+                if empty_tries >= 3 or (not sell_result.get("error") and (exe_bid is None or exe_bid <= 0)):
                     pos.awaiting_settlement = True
                     pos.dead_market = True
                     logger.info(
@@ -900,28 +1099,12 @@ async def monitor_positions(
             sold_proceeds = float(proceeds) * scale
             sold_px = float(avg_exit_px)
             exit_fees_scaled = float(kalshi_order_fees_dollars(sell_result)) * scale
-            record_activity(
-                {
-                    "event_type": "fill",
-                    "market_id": pos.market_id,
-                    "side": pos.side,
-                    "action": "sell",
-                    "quantity": int(sold_qty_trade),
-                    "fill_qty": float(filled_fp),
-                    "fill_price": float(sold_px),
-                    "fees_dollars": float(exit_fees_scaled),
-                    "client_order_id": sell_result.get("client_order_id"),
-                    "order_status": "filled",
-                    "detail": f"auto-exit {exit_reason}",
-                }
-            )
-            pos.fees_paid = float(getattr(pos, "fees_paid", 0) or 0) + exit_fees_scaled
             pos.dead_market = False
             pos.awaiting_settlement = False
             pre_qty = max(0, int(pos.quantity or 0))
             pre_entry_cost = float(pos.entry_cost or 0.0)
             pre_entry_price = float(pos.entry_price or 0.0)
-            pre_sync_fees_paid = float(getattr(pos, "fees_paid", 0) or 0.0)
+            pre_sync_fees_paid = float(getattr(pos, "fees_paid", 0) or 0.0) + float(exit_fees_scaled)
             per_contract_basis = float(cash_basis) / float(pre_qty) if pre_qty > 0 else 0.0
             sold_basis = per_contract_basis * float(sold_qty_trade)
             fill_integer = filled_fp > 1e-9 and abs(float(filled_fp) - round(float(filled_fp))) < 1e-6
@@ -944,21 +1127,22 @@ async def monitor_positions(
                 fees_paid_roundtrip=pre_sync_fees_paid,
             )
 
-            db.add(Trade(
-                id=str(exit_order_id or uuid.uuid4()),
-                market_id=pos.market_id,
-                market_title=pos.market_title,
-                action="sell",
-                side=pos.side,
-                quantity=int(sold_qty_trade),
-                price=sold_px,
-                total_cost=gross_exit_notional,
-                realized_pnl=realized,
-                trade_mode=TRADE_MODE,
-            ))
-
             synced = await sync_open_position_qty_cost_from_kalshi(kalshi_client, pos, db=db)
             if synced:
+                ensure_fill_trade(
+                    db,
+                    action="sell",
+                    market_id=pos.market_id,
+                    market_title=pos.market_title or pos.market_id,
+                    side=str(pos.side or ""),
+                    cumulative_qty=int(sold_qty_trade),
+                    delta_qty=int(sold_qty_trade),
+                    price=float(sold_px),
+                    notional=float(gross_exit_notional),
+                    client_order_id=str(sell_result.get("client_order_id") or exit_order_id or ""),
+                    exchange_order_id=str(sell_result.get("order_id") or ""),
+                    realized_pnl=float(realized),
+                )
                 if int(pos.quantity or 0) <= 0:
                     # Kalshi flat-row sync zeros qty and often avg_price; keep exit leg + basis for history/UI.
                     pos.quantity = int(sold_qty_trade)
@@ -973,6 +1157,9 @@ async def monitor_positions(
                     pos.realized_pnl = realized
                     pos.current_price = sold_px
                     mark_position_kalshi_flat_reconcile_pending(pos)
+                    from src.bot.exit_backoff import clear_exit_backoff
+
+                    clear_exit_backoff(str(pos.market_id or ""))
                 else:
                     logger.info(
                         "Partial exit IOC filled: %s %s filled_fp=%.4f proceeds=%.2f remaining=%d (Kalshi sync)",
@@ -984,30 +1171,36 @@ async def monitor_positions(
                     )
                     continue
             else:
-                remaining = max(0, int(pre_qty) - int(sold_qty_trade))
-                if remaining <= 0:
-                    pos.status = "closed"
-                    pos.closed_at = utc_now()
-                    pos.exit_reason = exit_reason
-                    pos.realized_pnl = realized
-                    pos.current_price = sold_px
-                    mark_position_kalshi_flat_reconcile_pending(pos)
-                else:
-                    pos.quantity = remaining
-                    basis_removed = fifo_basis if fifo_ok else sold_basis
-                    pos.entry_cost = max(0.0, float(pos.entry_cost or 0.0) - basis_removed)
-                    pos.entry_price = (
-                        (pos.entry_cost / pos.quantity) if int(pos.quantity or 0) > 0 else pos.entry_price
-                    )
-                    logger.info(
-                        "Partial exit IOC filled: %s %s filled_fp=%.4f proceeds=%.2f remaining=%d (local fallback)",
+                booked_exit = apply_cumulative_fill(
+                    db,
+                    action="sell",
+                    side=pos.side,
+                    market_id=pos.market_id,
+                    cumulative_qty=int(sold_qty_trade),
+                    cumulative_fees=float(exit_fees_scaled),
+                    price=float(sold_px),
+                    client_order_id=str(sell_result.get("client_order_id") or exit_order_id or ""),
+                    exchange_order_id=str(sell_result.get("order_id") or ""),
+                    event_ticker=getattr(pos, "event_ticker", None),
+                    exit_reason=exit_reason,
+                    order=sell_result,
+                )
+                if not booked_exit.get("ok"):
+                    logger.error(
+                        "Live exit filled but was not booked %s: %s",
                         pos.market_id,
-                        pos.side,
-                        filled_fp,
-                        sold_proceeds,
-                        pos.quantity,
+                        booked_exit.get("reason"),
                     )
                     continue
+                if not booked_exit.get("closed"):
+                    logger.info(
+                        "Partial exit booked %s remaining=%s",
+                        pos.market_id,
+                        booked_exit.get("remaining"),
+                    )
+                    continue
+                realized = booked_exit.get("realized_pnl", realized)
+                mark_position_kalshi_flat_reconcile_pending(pos)
             closed_notices.append(
                 {
                     "market_id": pos.market_id,
@@ -1182,6 +1375,23 @@ async def scan_and_trade(
             for p in positions_open
             if (normalize_market_id(p.market_id) or "").strip()
         }
+        from src.bot.match_exposure import match_exposure_key
+
+        held_match_keys = {
+            match_exposure_key(p.market_id)
+            for p in positions_open
+            if (p.market_id or "").strip()
+        }
+        from src.decision_engine.bucket_caps import load_bucket_caps
+
+        bucket_caps = load_bucket_caps(db)
+        try:
+            from src.activity_log import list_unresolved_intents
+
+            for intent in list_unresolved_intents(action="buy") or []:
+                held_match_keys.add(match_exposure_key(str(intent.get("market_id") or "")))
+        except Exception:
+            logger.debug("Unconfirmed buys were not added to the match cap", exc_info=True)
 
         # Tiered re-analysis cooldown:
         # - Markets that escalated to the AI provider: long debounce (API cost + stale signal window).
@@ -1223,6 +1433,19 @@ async def scan_and_trade(
             .all()
         }
         recently_analyzed = recent_xai | recent_local_only | xai_batch_sibling_cooldown
+        from src.bot.reanalysis import should_skip_unchanged_quote
+
+        previous_quotes: Dict[str, Tuple[float, float]] = {}
+        for mid, yes_px, no_px in (
+            db.query(DecisionLog.market_id, DecisionLog.snapshot_yes_price, DecisionLog.snapshot_no_price)
+            .filter(DecisionLog.snapshot_yes_price.isnot(None))
+            .order_by(DecisionLog.timestamp.desc())
+            .limit(2000)
+            .all()
+        ):
+            key = normalize_market_id(str(mid or "")).upper()
+            if key and yes_px is not None and no_px is not None and key not in previous_quotes:
+                previous_quotes[key] = (float(yes_px), float(no_px))
 
         logger.debug(
             "Scan cooldown: ai_escalation_window=%d local_only_window=%d batch_event_sibling=%d (local_debounce=%ds)",
@@ -1255,7 +1478,7 @@ async def scan_and_trade(
             )
 
         batch_completed_this_sweep: Set[str] = set()
-        scan_queue = _tradeable_scan_queue(tradeable)
+        scan_queue = _promote_fast_close_markets(_tradeable_scan_queue(tradeable))
         full_sq = len(scan_queue)
         cap_u = int(getattr(settings, "bot_max_scan_queue_units_per_sweep", 0) or 0)
         if cap_u > 0:
@@ -1273,6 +1496,12 @@ async def scan_and_trade(
             len(tradeable),
             TRADE_MODE,
         )
+        queued_markets = [market for _kind, _event, members in scan_queue for market in members]
+        try:
+            await attach_series_fee_schedules(kalshi_client, queued_markets)
+        except Exception:
+            logger.exception("Series fee prefetch failed; markets with no schedule stay closed")
+        premodel_skip_counts: Dict[str, int] = {"fee_unknown": 0, "cash_cap": 0}
 
         # Event titles are fetched lazily per batch/single unit (``get_event_title`` caches ~TTL).
         # Do **not** prefetch all unique events here — that is O(events)×HTTP and can stall the loop for minutes.
@@ -1310,6 +1539,13 @@ async def scan_and_trade(
                 )
                 break
 
+            try:
+                from src.api.tuning import sync_runtime_from_db
+
+                sync_runtime_from_db(db)
+            except Exception as exc:
+                logger.error("Settings sync before unit failed (%s)", type(exc).__name__)
+
             if not is_bot_playing(db_factory):
                 logger.info(
                     "Scan aborted — bot left play mode (pause/stop); skipping remaining markets "
@@ -1323,7 +1559,24 @@ async def scan_and_trade(
                 for m in members:
                     tid = m.get("id", "")
                     nt = normalize_market_id(str(tid)).upper()
-                    if nt in held_tickers or nt in recently_analyzed or tid in batch_completed_this_sweep:
+                    from src.bot.buy_retry import miss_is_watched
+
+                    prev_quote = previous_quotes.get(nt)
+                    if (
+                        nt in held_tickers
+                        or tid in batch_completed_this_sweep
+                        or match_exposure_key(str(tid)) in held_match_keys
+                        or (
+                            not miss_is_watched(str(tid))
+                            and should_skip_unchanged_quote(
+                                analyzed_recently=nt in recently_analyzed,
+                                previous_yes=None if prev_quote is None else prev_quote[0],
+                                previous_no=None if prev_quote is None else prev_quote[1],
+                                yes_price=float(m.get("yes_price") or 0),
+                                no_price=float(m.get("no_price") or 0),
+                            )
+                        )
+                    ):
                         continue
                     if reentry_cd_min > 0 and nt in loss_exit_cooldown_tickers:
                         continue
@@ -1375,10 +1628,39 @@ async def scan_and_trade(
                         else:
                             continue
 
+            if unit_kind == "batch" and et_key:
+                still_open = []
+                for m in list(members):
+                    mid = str(m.get("id") or "")
+                    if untradeable_reason(mid):
+                        logger.info(
+                            "Skip leg %s — recent routing rejection; sibling legs stay eligible",
+                            mid,
+                        )
+                        batch_completed_this_sweep.add(mid)
+                        continue
+                    still_open.append(m)
+                if len(still_open) < 2:
+                    if len(still_open) == 1:
+                        members = still_open
+                        unit_kind = "single"
+                        et_key = None
+                    else:
+                        continue
+                else:
+                    members = still_open
+
             market: dict
             decision: Dict[str, Any]
 
             if unit_kind == "batch" and et_key:
+                entry_blocks = [premodel_entry_block(m, balance) for m in members]
+                if all(block is not None for block in entry_blocks):
+                    for block in entry_blocks:
+                        _note_premodel_skip(premodel_skip_counts, block)
+                    for xm in members:
+                        batch_completed_this_sweep.add(str(xm.get("id") or ""))
+                    continue
                 ev_display = ""
                 try:
                     ev_display = (await kalshi_client.get_event_title(et_key)) or ""
@@ -1427,6 +1709,27 @@ async def scan_and_trade(
                             "vetting_horizon_time": m.get("vetting_horizon_time"),
                         }
                     )
+                from src.live_facts import live_fact_for_market, note_live_fact_skip, series_of
+
+                skip_fact = None
+                member_facts = []
+                for member in members:
+                    fact = await live_fact_for_market(member)
+                    if fact["skip"]:
+                        skip_fact = fact
+                        break
+                    member_facts.append(fact)
+                if skip_fact is not None:
+                    note_live_fact_skip(series_of(members[0]), skip_fact["reason"])
+                    for xm in members:
+                        batch_completed_this_sweep.add(str(xm.get("id") or ""))
+                    continue
+                for leg, fact in zip(legs, member_facts):
+                    if not fact["context"]:
+                        continue
+                    leg["market_description"] = (
+                        str(leg.get("market_description") or "") + "\n\n" + fact["context"]
+                    ).strip()
                 try:
                     decision = await decision_engine.analyze_event_batch(
                         event_ticker=et_key,
@@ -1459,7 +1762,24 @@ async def scan_and_trade(
                 market = members[0]
                 ticker = market.get("id", "")
                 nt0 = normalize_market_id(str(ticker)).upper()
-                if nt0 in held_tickers or nt0 in recently_analyzed or ticker in batch_completed_this_sweep:
+                from src.bot.buy_retry import miss_is_watched
+
+                prev_quote = previous_quotes.get(nt0)
+                if (
+                    nt0 in held_tickers
+                    or ticker in batch_completed_this_sweep
+                    or match_exposure_key(str(ticker)) in held_match_keys
+                    or (
+                        not miss_is_watched(str(ticker))
+                        and should_skip_unchanged_quote(
+                            analyzed_recently=nt0 in recently_analyzed,
+                            previous_yes=None if prev_quote is None else prev_quote[0],
+                            previous_no=None if prev_quote is None else prev_quote[1],
+                            yes_price=float(market.get("yes_price") or 0),
+                            no_price=float(market.get("no_price") or 0),
+                        )
+                    )
+                ):
                     continue
                 if reentry_cd_min > 0 and nt0 in loss_exit_cooldown_tickers:
                     logger.info(
@@ -1480,6 +1800,14 @@ async def scan_and_trade(
                         ticker,
                         allowed_market_id_by_event.get(et_single),
                     )
+                    continue
+                entry_block = premodel_entry_block(market, balance)
+                if entry_block is not None:
+                    _note_premodel_skip(premodel_skip_counts, entry_block)
+                    continue
+                route_hold = untradeable_reason(str(ticker))
+                if route_hold:
+                    logger.info("Skip model %s — recent routing rejection (%s)", ticker, route_hold)
                     continue
 
                 try:
@@ -1506,6 +1834,14 @@ async def scan_and_trade(
                     description = enrich_ai_market_description(
                         (subtitle or contract_title).strip(), market
                     )
+                    from src.live_facts import live_fact_for_market, note_live_fact_skip, series_of
+
+                    fact = await live_fact_for_market(market)
+                    if fact["skip"]:
+                        note_live_fact_skip(series_of(market), fact["reason"])
+                        continue
+                    if fact["context"]:
+                        description = (description + "\n\n" + fact["context"]).strip()
                     yes_bid = market.get("yes_bid")
                     yes_ask = market.get("yes_ask")
                     no_bid = market.get("no_bid")
@@ -1576,6 +1912,7 @@ async def scan_and_trade(
             stop_scan_after = False
             kelly_sizing_tag = ""
             trade_side = ""
+            entry_cap = 0.025
             trade_quantity = 0
             trade_price = 0.0
             trade_cost = 0.0
@@ -1672,6 +2009,18 @@ async def scan_and_trade(
                             min_ai_win_prob_base=min_ai_base,
                         )
                         ai_buy = ai_win_prob_pct_on_buy_side(trade_side, ai_yes)
+                        from src.decision_engine.blend import blend_snapshot, stamp_blend
+                        from src.decision_engine.bucket_caps import cap_for_edge
+
+                        blend = blend_snapshot(
+                            side=trade_side,
+                            model_yes_pct=ai_yes,
+                            yes_bid=market.get("yes_bid"),
+                            yes_ask=y_ask_f,
+                            yes_price=float(yes_price),
+                        )
+                        stamp_blend(decision, blend)
+                        entry_cap = cap_for_edge(bucket_caps, edge_now)
                         risk_note = " (contrarian tier)" if risk_tier else ""
                         gate_fail = autonomous_buy_gate_failure(
                             side=trade_side,
@@ -1704,9 +2053,24 @@ async def scan_and_trade(
                                 "signal": signal,
                             }
                         else:
+                            _fee = await ensure_market_fee_schedule(kalshi_client, market)
                             kelly_cap = kelly_contract_cap_for_bankroll(
-                                float(balance), float(trade_price)
+                                float(balance),
+                                float(trade_price),
+                                fee_multiplier=_fee.get("fee_multiplier"),
+                                fee_type=_fee.get("fee_type"),
+                                bankroll_fraction=entry_cap,
                             )
+                            if not _fee.get("known"):
+                                action_taken = {
+                                    "status": "no_trade",
+                                    "summary": (
+                                        "Skipped — series fee schedule is unknown, so the "
+                                        "2.5% all-in cap and expected value are not proven"
+                                    ),
+                                    "signal": signal,
+                                }
+                                quantity = 0
                             quantity, kelly_sizing_tag = kelly_contracts_for_order(
                                 float(balance),
                                 trade_side,
@@ -1717,8 +2081,57 @@ async def scan_and_trade(
                                 float(no_price),
                                 per_contract_premium=float(trade_price),
                                 max_kelly_contracts=kelly_cap,
+                                win_probability=float(blend["win_probability"]),
                             )
-                            if quantity < 1:
+                            action_taken = {}
+                            blend_ev_gate = bool(getattr(settings, "vibe_blend_ev_gate", False))
+                            ev_dollars = None
+                            if _fee.get("known"):
+                                ev_dollars = fee_inclusive_ev_dollars(
+                                    float(blend["win_probability"]),
+                                    float(trade_price),
+                                    max(int(quantity), 1),
+                                    fee_multiplier=_fee.get("fee_multiplier"),
+                                    fee_type=_fee.get("fee_type"),
+                                )
+                            from src.decision_engine.blend import quantity_after_blend
+                            from src.decision_engine.strategy_gates import all_in_entry_dollars
+
+                            one_cost = (
+                                all_in_entry_dollars(
+                                    1,
+                                    float(trade_price),
+                                    fee_multiplier=_fee.get("fee_multiplier"),
+                                    fee_type=_fee.get("fee_type"),
+                                )
+                                if _fee.get("known")
+                                else None
+                            )
+                            sized, size_tag = quantity_after_blend(
+                                blend_ev_gate=blend_ev_gate,
+                                kelly_quantity=int(quantity),
+                                blended_ev=ev_dollars,
+                                cap_contracts=int(kelly_cap),
+                                one_contract_fits_cash=one_cost is not None and one_cost <= float(balance) + 1e-9,
+                            )
+                            quantity = sized
+                            if size_tag == "blend_floor":
+                                kelly_sizing_tag = size_tag
+                            if quantity < 1 and blend_ev_gate:
+                                action_taken = {
+                                    "status": "no_trade",
+                                    "summary": (
+                                        "Skipped — blended fee-inclusive expected value is not positive "
+                                        f"(w={blend['weight']:.2f}, {blend['market_source']}). "
+                                        "VIBE_BLEND_EV_GATE is on. "
+                                        "That fee is the 0.07 schedule estimate, not the exchange fill fee."
+                                    ),
+                                    "signal": signal,
+                                }
+                            if quantity < 1 and not (
+                                isinstance(action_taken, dict)
+                                and "expected value" in str(action_taken.get("summary") or "")
+                            ):
                                 kelly_skip = kelly_order_skip_summary(
                                     float(balance),
                                     trade_side,
@@ -1729,6 +2142,7 @@ async def scan_and_trade(
                                     float(no_price),
                                     per_contract_premium=float(trade_price),
                                     max_kelly_contracts=kelly_cap,
+                                    win_probability=float(blend["win_probability"]),
                                 )
                                 action_taken = {
                                     "status": "no_trade",
@@ -1779,7 +2193,19 @@ async def scan_and_trade(
                                 else:
                                     buy_hold = fresh_unresolved_order_hold(ticker_clean, "buy")
                                     order_intent_id = None
+                                    fill_client_order_id = None
                                     if buy_hold:
+                                        await reconcile_open_intents(
+                                            kalshi_client,
+                                            db_factory,
+                                            market_id=ticker_clean,
+                                            action="buy",
+                                        )
+                                        buy_hold = fresh_unresolved_order_hold(ticker_clean, "buy")
+                                    if buy_hold:
+                                        from src.ops_status import note_unresolved
+
+                                        note_unresolved(buy_hold)
                                         action_taken = {
                                             "status": "no_trade",
                                             "summary": f"Skipped — {buy_hold}",
@@ -1819,31 +2245,201 @@ async def scan_and_trade(
                                                 "signal": signal,
                                             }
                                     if order_intent_id:
-                                        result = await kalshi_client.place_buy_ioc_limit(
-                                            ticker,
-                                            trade_side,
-                                            quantity,
-                                            ioc_limit_dollars,
-                                            client_order_id=order_intent_id,
-                                        )
-                                        record_order_ack(
-                                            result,
-                                            {
-                                                "market_id": ticker_clean,
-                                                "event_ticker": _pos_et_val,
-                                                "side": trade_side,
-                                                "action": "buy",
-                                                "quantity": int(quantity),
-                                                "limit_price": float(ioc_limit_dollars),
-                                                "client_order_id": order_intent_id,
-                                                "model_id": str(
-                                                    (decision.get("xai_analysis") or {}).get("model")
-                                                    or getattr(settings, "xai_model", "")
-                                                    or ""
-                                                ),
-                                                **quote_snapshot(market),
-                                            },
-                                        )
+                                        async with submission_reservation_lock():
+                                            async with market_execution_lock(str(_pos_et_val or ticker_clean)):
+                                                async with market_execution_lock(ticker_clean):
+                                                    if not is_bot_playing(db_factory):
+                                                        result = {
+                                                            "error": "order not sent",
+                                                            "order_not_sent": True,
+                                                        }
+                                                        action_taken = {
+                                                            "status": "no_trade",
+                                                            "summary": "Skipped — bot paused/stopped before the order",
+                                                            "signal": signal,
+                                                        }
+                                                    elif fresh_unresolved_order_hold(
+                                                        ticker_clean,
+                                                        "buy",
+                                                        exclude_client_order_id=order_intent_id,
+                                                    ):
+                                                        result = {
+                                                            "error": "order not sent",
+                                                            "order_not_sent": True,
+                                                        }
+                                                    else:
+                                                        open_basis = 0.0
+                                                        for open_row in db.query(Position).filter(
+                                                            Position.status == "open",
+                                                            Position.trade_mode == TRADE_MODE,
+                                                            Position.event_ticker == _pos_et_val,
+                                                        ).all():
+                                                            open_basis += float(open_row.entry_cost or 0)
+                                                            open_basis += float(getattr(open_row, "fees_paid", 0) or 0)
+                                                        added = all_in_entry_dollars(
+                                                            int(quantity),
+                                                            float(trade_price),
+                                                            fee_multiplier=_fee.get("fee_multiplier"),
+                                                            fee_type=_fee.get("fee_type"),
+                                                        )
+                                                        if added is None:
+                                                            result = {
+                                                                "error": "order not sent",
+                                                                "order_not_sent": True,
+                                                            }
+                                                            action_taken = {
+                                                                "status": "no_trade",
+                                                                "summary": (
+                                                                    "Skipped — series fee schedule is unknown, "
+                                                                    "so the 2.5% all-in cap is not proven"
+                                                                ),
+                                                                "signal": signal,
+                                                            }
+                                                        else:
+                                                            from src.bot.exposure_reserve import unconfirmed_buy_exposure
+                                                            from src.bot.match_exposure import match_exposure_key
+                                                            from src.database.models import ActivityEvent
+
+                                                            try:
+                                                                local_intents = (
+                                                                    db.query(ActivityEvent)
+                                                                    .filter(
+                                                                        ActivityEvent.action == "buy",
+                                                                        ActivityEvent.event_type.in_(("order_intent", "order_ack")),
+                                                                    )
+                                                                    .order_by(ActivityEvent.ts_utc.desc(), ActivityEvent.seq.desc())
+                                                                    .all()
+                                                                )
+                                                            except Exception:
+                                                                local_intents = None
+                                                            try:
+                                                                resting_now = await kalshi_client.list_orders(
+                                                                    status="resting", strict=True
+                                                                )
+                                                                resting_known = True
+                                                            except Exception as exc:
+                                                                from src.ops_status import note_api_error
+
+                                                                note_api_error(type(exc).__name__)
+                                                                resting_now = None
+                                                                resting_known = False
+                                                            exposure = unconfirmed_buy_exposure(
+                                                                local_rows=local_intents,
+                                                                resting_orders=resting_now,
+                                                                resting_known=resting_known,
+                                                                event_ticker=str(_pos_et_val or ""),
+                                                                market_id=ticker_clean,
+                                                                exclude_client_order_id=order_intent_id,
+                                                                fee_type=_fee.get("fee_type"),
+                                                                fee_multiplier=_fee.get("fee_multiplier"),
+                                                            )
+                                                            if exposure.get("reason"):
+                                                                result = {
+                                                                    "error": "order not sent",
+                                                                    "order_not_sent": True,
+                                                                }
+                                                                action_taken = {
+                                                                    "status": "no_trade",
+                                                                    "summary": f"Skipped — {exposure['reason']}",
+                                                                    "signal": signal,
+                                                                }
+                                                            elif match_exposure_key(ticker_clean) in held_match_keys:
+                                                                result = {
+                                                                    "error": "order not sent",
+                                                                    "order_not_sent": True,
+                                                                }
+                                                                action_taken = {
+                                                                    "status": "no_trade",
+                                                                    "summary": (
+                                                                        "Skipped — one open position already covers this match"
+                                                                    ),
+                                                                    "signal": signal,
+                                                                }
+                                                            elif not event_exposure_room(
+                                                                float(total_portfolio_value),
+                                                                open_basis,
+                                                                float(exposure.get("reserve_dollars") or 0.0),
+                                                                added,
+                                                            ):
+                                                                result = {
+                                                                    "error": "order not sent",
+                                                                    "order_not_sent": True,
+                                                                }
+                                                                action_taken = {
+                                                                    "status": "no_trade",
+                                                                    "summary": (
+                                                                        "Skipped — event cost basis plus unconfirmed buys "
+                                                                        "would exceed 5% of account equity. "
+                                                                        "The entry fee in that check is an estimate, "
+                                                                        "not the exchange fill fee."
+                                                                    ),
+                                                                    "signal": signal,
+                                                                }
+                                                            else:
+                                                                from src.bot.shard_funding import fund_buy_shard
+                                                                from src.clients.kalshi_client import known_exchange_index
+
+                                                                shard_index = known_exchange_index(market.get("exchange_index"))
+                                                                if shard_index is None:
+                                                                    funding = {"ok": True}
+                                                                else:
+                                                                    funding = await fund_buy_shard(
+                                                                        kalshi_client,
+                                                                        exchange_index=shard_index,
+                                                                        order_all_in=float(added),
+                                                                        bankroll=float(balance),
+                                                                        ticker=ticker_clean,
+                                                                        client_order_id=str(order_intent_id or ""),
+                                                                        cap_fraction=entry_cap,
+                                                                    )
+                                                                if not funding.get("ok"):
+                                                                    result = {
+                                                                        "error": "order not sent",
+                                                                        "order_not_sent": True,
+                                                                    }
+                                                                    action_taken = {
+                                                                        "status": "no_trade",
+                                                                        "summary": funding.get("reason")
+                                                                        or f"shard {shard_index} funding failed",
+                                                                        "signal": signal,
+                                                                    }
+                                                                    note_untradeable(
+                                                                        ticker_clean,
+                                                                        "shard_funding",
+                                                                        minutes=int(funding.get("cooldown_minutes") or 30),
+                                                                    )
+                                                                    logger.info(
+                                                                        "Skip buy %s — %s",
+                                                                        ticker,
+                                                                        action_taken["summary"],
+                                                                    )
+                                                                else:
+                                                                    result = await kalshi_client.place_buy_ioc_limit(
+                                                                        ticker,
+                                                                        trade_side,
+                                                                        quantity,
+                                                                        ioc_limit_dollars,
+                                                                        client_order_id=order_intent_id,
+                                                                        exchange_index=shard_index,
+                                                                    )
+                                                record_order_ack(
+                                                    result,
+                                                    {
+                                                        "market_id": ticker_clean,
+                                                        "event_ticker": _pos_et_val,
+                                                        "side": trade_side,
+                                                        "action": "buy",
+                                                        "quantity": int(quantity),
+                                                        "limit_price": float(ioc_limit_dollars),
+                                                        "client_order_id": order_intent_id,
+                                                        "model_id": str(
+                                                            (decision.get("xai_analysis") or {}).get("model")
+                                                            or getattr(settings, "xai_model", "")
+                                                            or ""
+                                                        ),
+                                                        **quote_snapshot(market),
+                                                    },
+                                                )
                                     else:
                                         result = {"error": "order not sent", "order_not_sent": True}
                                     if result.get("order_not_sent"):
@@ -1855,29 +2451,183 @@ async def scan_and_trade(
                                             trade_side,
                                             result["error"],
                                         )
-                                        action_taken = {
-                                            "status": "no_trade",
-                                            "summary": f"Kalshi error: {result['error']}",
-                                            "signal": signal,
-                                        }
-                                    else:
-                                        filled = kalshi_order_filled_contracts(result)
-                                        qty_int = max(0, int(math.floor(float(filled) + 1e-9)))
-                                        if qty_int < 1:
-                                            logger.warning(
-                                                "Live buy had no whole-contract fill — %s %s filled_fp=%.6f status=%s",
+                                        route_kind = classify_routing_error(
+                                            str(result.get("error") or ""),
+                                            result.get("status_code"),
+                                        )
+                                        if route_kind in ("exchange_shard_user", "exchange_shard_balance"):
+                                            note_untradeable(ticker_clean, route_kind)
+                                            from src.ops_status import note_rejection
+
+                                            note_rejection()
+                                            logger.error(
+                                                "Order rejected %s %s class=%s http=%s "
+                                                "exchange_index=%s ticker_field=ticker detail=%s",
                                                 ticker,
                                                 trade_side,
-                                                filled,
-                                                result.get("status"),
+                                                route_kind,
+                                                result.get("status_code"),
+                                                market.get("exchange_index") if market.get("exchange_index") is not None else "omitted",
+                                                result.get("error"),
                                             )
+                                        action_taken = {
+                                            "status": "rejected",
+                                            "summary": f"Kalshi error: {result['error']}",
+                                            "signal": signal,
+                                            "error_class": route_kind,
+                                        }
+                                    else:
+                                        from src.fixed_point import FixedPointCountError, format_count_fp, is_whole_count
+
+                                        try:
+                                            filled = kalshi_order_filled_contracts(result)
+                                        except FixedPointCountError as exc:
+                                            filled = None
                                             action_taken = {
-                                                "status": "no_trade",
-                                                "summary": "Fill was fractional or empty; no whole-contract position recorded",
+                                                "status": "fractional_fill",
+                                                "summary": f"Exchange fill count was not a fixed-point string ({exc})",
                                                 "signal": signal,
-                                                "kalshi_status": result.get("status"),
                                             }
+                                        if filled is not None and not is_whole_count(filled):
+                                            from decimal import ROUND_DOWN
+
+                                            whole = int(filled.to_integral_value(rounding=ROUND_DOWN))
+                                            frac = filled - type(filled)(whole)
+                                            residue = format_count_fp(frac) if frac > 0 else ""
+                                            sold_residue = False
+                                            if residue:
+                                                cleanup = await kalshi_client.sell_fractional_residue(
+                                                    ticker, trade_side, residue
+                                                )
+                                                sold_residue = (
+                                                    not cleanup.get("error")
+                                                    and float(kalshi_order_filled_contracts(cleanup) or 0) > 0
+                                                )
+                                                record_activity(
+                                                    {
+                                                        "event_type": "fill",
+                                                        "market_id": ticker_clean,
+                                                        "side": trade_side,
+                                                        "action": "sell" if sold_residue else "buy",
+                                                        "order_status": "fractional_fill",
+                                                        "fill_count_fp": residue,
+                                                        "detail": f"Sold fractional residue {residue}; kept {whole} whole contracts",
+                                                    }
+                                                )
+                                            qty_int = whole
+                                            if whole < 1:
+                                                action_taken = {
+                                                    "status": "fractional_fill",
+                                                    "summary": (
+                                                        f"Exchange filled {format_count_fp(filled)}. "
+                                                        + (
+                                                            f"The {residue} residue was sold."
+                                                            if sold_residue
+                                                            else "The fractional residue was not sold and was not booked."
+                                                        )
+                                                    ),
+                                                    "signal": signal,
+                                                    "filled_fp": format_count_fp(filled),
+                                                    "residue_sold": sold_residue,
+                                                }
+                                        elif filled is not None:
+                                            qty_int = int(filled)
                                         else:
+                                            qty_int = 0
+                                        if filled is not None and qty_int < 1 and is_whole_count(filled):
+                                            from src.bot.buy_retry import retry_buy_once
+
+                                            retry_result, gap = await retry_buy_once(
+                                                kalshi_client,
+                                                market_id=ticker_clean,
+                                                side=trade_side,
+                                                quantity=int(quantity),
+                                                original_ask=float(ioc_limit_dollars),
+                                                ai_yes_pct=int(decision.get("ai_probability_yes_pct") or 0),
+                                                min_edge=float(getattr(settings, "min_edge_to_buy_pct", 4) or 4),
+                                                min_ai=int(getattr(settings, "min_ai_win_prob_buy_side_pct", 55) or 55),
+                                                fee_multiplier=_fee.get("fee_multiplier"),
+                                                fee_type=_fee.get("fee_type"),
+                                                exchange_index=shard_index,
+                                                balance=float(balance),
+                                                cap_fraction=entry_cap,
+                                                blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
+                                                persist_intent=lambda limit, qty: persist_order_intent(
+                                                    {
+                                                        "market_id": ticker_clean,
+                                                        "event_ticker": _pos_et_val,
+                                                        "side": trade_side,
+                                                        "action": "buy",
+                                                        "quantity": int(qty),
+                                                        "limit_price": float(limit),
+                                                        "detail": "retry buy intent",
+                                                        **quote_snapshot(market),
+                                                    }
+                                                ),
+                                                fund=(
+                                                    None
+                                                    if shard_index is None
+                                                    else (
+                                                        lambda cost: fund_buy_shard(
+                                                            kalshi_client,
+                                                            exchange_index=shard_index,
+                                                            order_all_in=float(cost),
+                                                            bankroll=float(balance),
+                                                            ticker=ticker_clean,
+                                                            cap_fraction=entry_cap,
+                                                        )
+                                                    )
+                                                ),
+                                                acknowledge=lambda res, oid: record_order_ack(
+                                                    res,
+                                                    {
+                                                        "market_id": ticker_clean,
+                                                        "side": trade_side,
+                                                        "action": "buy",
+                                                        "client_order_id": oid,
+                                                        "detail": "retry buy",
+                                                    },
+                                                ),
+                                            )
+                                            fill_client_order_id = order_intent_id
+                                            if isinstance(retry_result, dict) and not retry_result.get("error"):
+                                                try:
+                                                    retry_filled = kalshi_order_filled_contracts(retry_result)
+                                                except FixedPointCountError:
+                                                    retry_filled = None
+                                                if (
+                                                    retry_filled is not None
+                                                    and is_whole_count(retry_filled)
+                                                    and int(retry_filled) >= 1
+                                                ):
+                                                    result = retry_result
+                                                    filled = retry_filled
+                                                    qty_int = int(retry_filled)
+                                                    fill_client_order_id = str(
+                                                        retry_result.get("client_order_id") or order_intent_id
+                                                    )
+                                            if qty_int < 1:
+                                                summary = (
+                                                    "Missed buy. Price gap "
+                                                    f"{gap:+.2f} after one reprice. "
+                                                    "The market is on the short watch list."
+                                                )
+                                                logger.warning(
+                                                    "Live buy had no whole-contract fill — %s %s gap=%+.4f status=%s",
+                                                    ticker,
+                                                    trade_side,
+                                                    gap,
+                                                    result.get("status"),
+                                                )
+                                                action_taken = {
+                                                    "status": "missed_fill",
+                                                    "summary": summary,
+                                                    "signal": signal,
+                                                    "kalshi_status": result.get("status"),
+                                                    "filled_fp": filled,
+                                                    "price_gap": gap,
+                                                }
+                                        if qty_int >= 1:
                                             if qty_int < quantity:
                                                 logger.info(
                                                     "Live IOC buy partial fill %s %s filled=%d requested=%d",
@@ -1894,85 +2644,35 @@ async def scan_and_trade(
                                             )
                                             scale = qty_int / float(filled) if filled > 1e-9 else 1.0
                                             buy_fees = float(kalshi_order_fees_dollars(result)) * scale
-                                            record_activity(
-                                                {
-                                                    "event_type": "fill",
-                                                    "market_id": ticker_clean,
-                                                    "event_ticker": _pos_et_val,
-                                                    "side": trade_side,
-                                                    "action": "buy",
-                                                    "quantity": qty_int,
-                                                    "fill_qty": float(filled),
-                                                    "fill_price": float(avg_px),
-                                                    "fees_dollars": buy_fees,
-                                                    "client_order_id": order_intent_id,
-                                                    "order_status": "filled",
-                                                    "limit_price": float(ioc_limit_dollars),
-                                                }
-                                            )
-                                            fill_notional = float(kalshi_order_fill_cost_dollars(result)) * scale
-                                            if fill_notional <= 1e-12 and float(full_cost) > 1e-12:
-                                                fill_notional = max(
-                                                    0.0, float(full_cost) * scale - buy_fees
-                                                )
-                                            order_id_out = (
-                                                result.get("order_id")
-                                                or result.get("client_order_id")
-                                                or str(uuid.uuid4())
-                                            )
-                                            db.add(
-                                                Trade(
-                                                    id=order_id_out,
-                                                    market_id=ticker_clean,
-                                                    market_title=title,
-                                                    action="buy",
-                                                    side=trade_side,
-                                                    quantity=qty_int,
-                                                    price=avg_px,
-                                                    total_cost=fill_notional,
-                                                    trade_mode=TRADE_MODE,
-                                                )
-                                            )
-                                            existing_open = get_open_position(
+                                            booked = apply_cumulative_fill(
                                                 db,
-                                                trade_mode=TRADE_MODE,
-                                                market_id=ticker_clean,
+                                                action="buy",
                                                 side=trade_side,
+                                                market_id=ticker_clean,
+                                                cumulative_qty=qty_int,
+                                                cumulative_fees=buy_fees,
+                                                price=float(avg_px),
+                                                client_order_id=str(fill_client_order_id or order_intent_id or ""),
+                                                exchange_order_id=str(result.get("order_id") or ""),
+                                                event_ticker=_pos_et_val,
+                                                market_title=title,
+                                                order=result,
+                                                entry_decision_log_id=decision_log_row_id,
+                                                stop_loss_drawdown_pct_at_entry=float(settings.stop_loss_drawdown_pct),
+                                                close_time=contractual_close,
+                                                expected_expiration_time=expected_expiration_iso,
                                             )
-                                            if not existing_open:
-                                                db.add(
-                                                    Position(
-                                                        id=str(uuid.uuid4()),
-                                                        market_id=ticker_clean,
-                                                        market_title=title,
-                                                        event_ticker=_pos_et_val,
-                                                        side=trade_side,
-                                                        quantity=qty_int,
-                                                        entry_price=avg_px,
-                                                        entry_cost=fill_notional,
-                                                        entry_decision_log_id=decision_log_row_id,
-                                                        stop_loss_drawdown_pct_at_entry=float(settings.stop_loss_drawdown_pct),
-                                                        current_price=avg_px,
-                                                        fees_paid=buy_fees,
-                                                        status="open",
-                                                        close_time=contractual_close,
-                                                        expected_expiration_time=expected_expiration_iso,
-                                                        trade_mode=TRADE_MODE,
-                                                    )
-                                                )
+                                            if not booked.get("ok"):
+                                                action_taken = {
+                                                    "status": "no_trade",
+                                                    "summary": f"Skipped — {booked.get('reason')}",
+                                                    "signal": signal,
+                                                }
+                                                result = {"error": booked.get("reason"), "order_not_sent": True}
                                             else:
-                                                existing_open.quantity += qty_int
-                                                existing_open.entry_cost += fill_notional
-                                                existing_open.fees_paid = float(
-                                                    getattr(existing_open, "fees_paid", 0) or 0
-                                                ) + buy_fees
-                                                if int(existing_open.quantity or 0) > 0:
-                                                    existing_open.entry_price = (
-                                                        existing_open.entry_cost / existing_open.quantity
-                                                    )
-
-                                            action_taken = {
-                                                "status": "executed",
+                                                fill_notional = float(qty_int) * float(avg_px)
+                                                action_taken = {
+                                                "status": "partial" if qty_int < int(quantity) else "executed",
                                                 "side": trade_side,
                                                 "quantity": qty_int,
                                                 "price": avg_px,
@@ -1980,12 +2680,32 @@ async def scan_and_trade(
                                                 "at": utc_iso_z(traded_at),
                                                 "execution": "ioc_limit",
                                                 "ioc_limit_dollars": round(ioc_limit_dollars, 4),
-                                            }
-                                            executed_trade = True
-                                            trade_quantity = qty_int
-                                            trade_price = avg_px
-                                            trade_cost = fill_notional + buy_fees
+                                                }
+                                                executed_trade = True
+                                                trade_quantity = qty_int
+                                                trade_price = avg_px
+                                                trade_cost = fill_notional + buy_fees
             decision["action_taken"] = action_taken
+            if str(decision.get("decision") or "").startswith("BUY"):
+                taken = str((action_taken or {}).get("status") or "")
+                if taken not in ("executed", "partial"):
+                    from src.shadow_buys import record_shadow_buy
+
+                    try:
+                        held = str(trade_side or "").upper()
+                        blob = decision.get("xai_analysis")
+                        record_shadow_buy(
+                            db,
+                            market_id=ticker_clean,
+                            side=held,
+                            reason=str((action_taken or {}).get("summary") or taken or "skipped"),
+                            edge_pct=float(decision.get("edge_pct") or 0.0),
+                            ai_yes_pct=int(decision.get("ai_probability_yes_pct") or 0),
+                            ask=float(yes_price if held == "YES" else no_price or 0.0),
+                            blended_side_pct=blob.get("blended_side_pct") if isinstance(blob, dict) else None,
+                        )
+                    except Exception:
+                        logger.debug("Shadow buy was not recorded", exc_info=True)
 
             _snap = {
                 "yes_price": float(yes_price),
@@ -2003,11 +2723,11 @@ async def scan_and_trade(
                 market_id=ticker_clean,
                 market_title=title,
                 decision=decision.get("decision", "SKIP"),
-                xai_analysis=json.dumps(decision.get("xai_analysis", {})),
+                xai_analysis=dumps_payload(decision.get("xai_analysis", {})),
                 confidence=float(decision.get("confidence", 0.0) or 0.0),
                 reasoning=decision.get("reasoning", ""),
                 real_time_context=decision.get("real_time_context", ""),
-                key_factors=json.dumps(decision.get("key_factors", [])),
+                key_factors=dumps_payload(decision.get("key_factors", [])),
                 yes_confidence=int(decision.get("yes_confidence", int(yes_price * 100))),
                 no_confidence=int(decision.get("no_confidence", int(no_price * 100))),
                 escalated_to_xai=decision.get("escalated_to_xai", False),
@@ -2016,8 +2736,8 @@ async def scan_and_trade(
                 market_implied_probability_pct=int(decision.get("market_implied_probability_pct", 0) or 0),
                 kelly_contracts=int(decision.get("kelly_contracts", 0) or 0),
                 filter_pass=True,
-                action_taken=json.dumps(action_taken),
-                market_context=json.dumps(_snap),
+                action_taken=dumps_payload(action_taken),
+                market_context=dumps_payload(_snap),
                 snapshot_yes_price=_snap["yes_price"],
                 snapshot_no_price=_snap["no_price"],
                 snapshot_volume=_snap["volume"],
@@ -2028,6 +2748,7 @@ async def scan_and_trade(
             xa_blob = decision.get("xai_analysis")
             if isinstance(xa_blob, dict):
                 xa_model = str(xa_blob.get("model") or "")
+            db.commit()
             record_activity(
                 {
                     "event_type": "decision",
@@ -2043,10 +2764,10 @@ async def scan_and_trade(
                     "kelly_contracts": int(decision.get("kelly_contracts") or 0),
                     "order_status": str((action_taken or {}).get("status") or ""),
                     "detail": scrub_text((action_taken or {}).get("summary") or decision.get("action_summary") or ""),
+                    "model_usage": decision_model_usage(xa_blob if isinstance(xa_blob, dict) else None),
                     **quote_snapshot(market),
                 }
             )
-            db.commit()
 
             decision["trade_mode"] = TRADE_MODE
             decision["market_id"] = ticker_clean
@@ -2061,6 +2782,7 @@ async def scan_and_trade(
 
             if executed_trade:
                 held_tickers.add((ticker_clean or "").strip().upper())
+                held_match_keys.add(match_exposure_key(ticker_clean))
                 balance -= trade_cost
                 num_open += 1
 
@@ -2111,6 +2833,12 @@ async def scan_and_trade(
             if stop_scan_after:
                 break
 
+        if premodel_skip_counts.get("fee_unknown") or premodel_skip_counts.get("cash_cap"):
+            logger.info(
+                "Scan pre-model skips this sweep: fee_schedule_unknown=%d cash_cap=%d",
+                premodel_skip_counts.get("fee_unknown", 0),
+                premodel_skip_counts.get("cash_cap", 0),
+            )
         logger.info(
             "Scan sweep finished: processed %d unit(s) in ~%.1fs",
             len(scan_queue),
@@ -2118,7 +2846,7 @@ async def scan_and_trade(
         )
 
     except Exception as e:
-        logger.error("Error in scan_and_trade: %s", scrub_text(e))
+        logger.exception("Error in scan_and_trade: %s", scrub_text(e))
         record_activity(
             {
                 "event_type": "error",
@@ -2140,74 +2868,89 @@ async def run_bot_loop(
     broadcast_fn: Callable[[dict], Coroutine],
     settings,
 ):
-    """Long-running background coroutine that drives the autonomous trading bot."""
-    logger.info("Bot loop started (scan_interval=%ds)", settings.bot_scan_interval)
+    """Position checks and the market scan run as two tasks.
+
+    A slow scan no longer delays stop-loss monitoring. Stop still disables
+    automatic exits. Pause still allows them. New buys still require Play.
+    """
+    logger.info("Bot loop started (scan_interval=%ds, monitor separate)", settings.bot_scan_interval)
     from src.api.tuning import sync_runtime_from_db
 
-    while True:
+    stop = asyncio.Event()
+
+    async def _monitor_once() -> None:
+        db_tune = db_factory()
         try:
-            await asyncio.sleep(settings.bot_scan_interval)
+            sync_runtime_from_db(db_tune)
+        finally:
+            db_tune.close()
+        state = get_bot_state_str(db_factory)
+        from src.ops_status import stamp_monitor
 
-            db_tune = db_factory()
-            try:
-                sync_runtime_from_db(db_tune)
-            finally:
-                db_tune.close()
+        stamp_monitor()
+        await reconcile_open_intents(kalshi_client, db_factory)
+        logger.info(
+            "Position monitor — state=%s trade_mode=%s exits=%s",
+            state,
+            TRADE_MODE,
+            "on" if state != "stop" else "off",
+        )
+        await monitor_positions(
+            kalshi_client,
+            db_factory,
+            broadcast_fn,
+            settings,
+            allow_exits=(state != "stop"),
+            bot_state_label=state,
+        )
+        await _maybe_auto_refresh_closed_resolution(
+            kalshi_client,
+            db_factory,
+            broadcast_fn,
+            settings,
+        )
 
-            state = get_bot_state_str(db_factory)
-            logger.info(
-                "Bot cycle — state=%s trade_mode=%s (next: positions then scan if play)",
-                state,
-                TRADE_MODE,
-            )
-
-            # Always refresh open positions. When stopped, do not auto-exit.
-            await monitor_positions(
-                kalshi_client,
-                db_factory,
-                broadcast_fn,
-                settings,
-                allow_exits=(state != "stop"),
-                bot_state_label=state,
-            )
-
-            await _maybe_auto_refresh_closed_resolution(
-                kalshi_client,
-                db_factory,
-                broadcast_fn,
-                settings,
-            )
-
-            if state == "stop":
-                continue
-
-            if state == "pause":
-                continue
-
-            # Play mode: full scan + trade
-            scan_timeout = int(getattr(settings, "bot_loop_scan_timeout_sec", 0) or 0)
+    async def _scan_once() -> None:
+        db_tune = db_factory()
+        try:
+            sync_runtime_from_db(db_tune)
+        finally:
+            db_tune.close()
+        state = get_bot_state_str(db_factory)
+        if state != "play":
+            return
+        scan_timeout = int(getattr(settings, "bot_loop_scan_timeout_sec", 0) or 0)
+        try:
             if scan_timeout > 0:
-                try:
-                    await asyncio.wait_for(
-                        scan_and_trade(
-                            kalshi_client, decision_engine, db_factory, broadcast_fn, settings
-                        ),
-                        timeout=float(scan_timeout),
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(
-                        "scan_and_trade exceeded bot_loop_scan_timeout_sec=%ss — aborting this sweep; "
-                        "next cycle will retry. Raise timeout or reduce scan universe if this repeats.",
-                        scan_timeout,
-                    )
+                await asyncio.wait_for(
+                    scan_and_trade(
+                        kalshi_client, decision_engine, db_factory, broadcast_fn, settings
+                    ),
+                    timeout=float(scan_timeout),
+                )
             else:
                 await scan_and_trade(
                     kalshi_client, decision_engine, db_factory, broadcast_fn, settings
                 )
-
+        except asyncio.TimeoutError:
+            logger.error(
+                "scan_and_trade exceeded bot_loop_scan_timeout_sec=%ss — this sweep stopped; "
+                "position monitoring continues",
+                scan_timeout,
+            )
         except asyncio.CancelledError:
-            logger.info("Bot loop cancelled")
-            break
+            raise
         except Exception as e:
-            logger.error("Unhandled error in bot loop: %s", e)
-            await asyncio.sleep(10)
+            logger.error("Unhandled error in scan task: %s", e)
+
+    try:
+        await run_parallel_cycles(
+            _monitor_once,
+            _scan_once,
+            stop,
+            float(settings.bot_scan_interval),
+        )
+    except asyncio.CancelledError:
+        stop.set()
+        logger.info("Bot loop cancelled")
+        raise

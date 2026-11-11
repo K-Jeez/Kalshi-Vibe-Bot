@@ -133,8 +133,8 @@ class TestStrategyMath(unittest.TestCase):
             0.50,
             per_contract_premium=0.55,
         )
-        self.assertEqual(tag, "cash_capped")
-        self.assertEqual(qty, 5)
+        self.assertEqual(tag, "quarter_kelly")
+        self.assertEqual(qty, 1)
 
 
 if __name__ == "__main__":

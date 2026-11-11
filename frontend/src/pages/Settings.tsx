@@ -8,7 +8,6 @@ export const Settings: React.FC = () => {
   const [minEdgeDraft, setMinEdgeDraft] = useState('')
   const [stopLossDraft, setStopLossDraft] = useState('')
   const [minAiWinDraft, setMinAiWinDraft] = useState('')
-  const [maxOpenPositionsDraft, setMaxOpenPositionsDraft] = useState('')
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [resettingConfigDefaults, setResettingConfigDefaults] = useState(false)
   const [toggleSavingStopLoss, setToggleSavingStopLoss] = useState(false)
@@ -37,8 +36,7 @@ export const Settings: React.FC = () => {
     if (!cur) return
     setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 5))))
     setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
-    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 60))))
-    setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 30))))
+    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 55))))
   }, [cur])
 
   useEffect(() => {
@@ -56,16 +54,10 @@ export const Settings: React.FC = () => {
     const me = Number(minEdgeDraft)
     const sl = Number(stopLossDraft)
     const ma = Number(minAiWinDraft)
-    const mx = Number(maxOpenPositionsDraft)
-    if (!Number.isFinite(me) || !Number.isFinite(sl) || !Number.isFinite(ma) || !Number.isFinite(mx)) {
+    if (!Number.isFinite(me) || !Number.isFinite(sl) || !Number.isFinite(ma)) {
       alert(
-        'Enter whole numbers for minimum edge, stop-loss drawdown, min AI win % on the buy side, and max open positions.',
+        'Enter whole numbers for minimum edge, stop-loss drawdown, and min AI win % on the buy side.',
       )
-      return
-    }
-    const mxI = Math.round(mx)
-    if (mxI < 1 || mxI > 500) {
-      alert('Max open positions must be between 1 and 500.')
       return
     }
     setSavingStrategy(true)
@@ -74,7 +66,6 @@ export const Settings: React.FC = () => {
         min_edge_to_buy_pct: Math.round(me),
         stop_loss_drawdown_pct: sl / 100,
         min_ai_win_prob_buy_side_pct: Math.round(ma),
-        max_open_positions: mxI,
       })
       setCur(next)
     } catch (e: unknown) {
@@ -228,8 +219,9 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Position size uses <strong className="text-white">full Kelly</strong> from Grok&apos;s P(YES) and executable
-            asks, capped by deployable cash and an automatic <strong className="text-white">5% of deployable cash</strong> maximum premium per entry.
+            Position size uses <strong className="text-white">quarter Kelly</strong> from Grok&apos;s P(YES) and the executable
+            ask. One entry, including the estimated entry fee, is capped at <strong className="text-white">2.5% of available cash</strong>.
+            The 0.07 coefficient is used only when the series fee type is quadratic and its fee multiplier is known. That figure is an estimate, rounded up to the next cent. It is not the billed fee. If the series schedule is missing, the bot does not treat expected value as proven positive and does not treat the 2.5% cap as satisfied. The exchange fill fee is stored when the order response includes it.
             Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
             edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
             no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
@@ -286,18 +278,6 @@ export const Settings: React.FC = () => {
                     className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
                   />
                 </label>
-                <label className="flex min-h-0 flex-col gap-1">
-                  <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Max open positions (1–500)
-                  </span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={maxOpenPositionsDraft}
-                    onChange={(e) => setMaxOpenPositionsDraft(e.target.value)}
-                    className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                  />
-                </label>
               </div>
               <button
                 type="button"
@@ -309,11 +289,16 @@ export const Settings: React.FC = () => {
                 {savingStrategy ? 'Saving…' : 'Save strategy settings'}
               </button>
               <p className="text-[11px] text-white/70">
-                Saved values apply immediately to the running bot. To match <code className="text-cyan-200/90">backend/.env</code> defaults
-                (including <code className="text-cyan-200/90">BOT_MAX_OPEN_POSITIONS</code>,{' '}
-                <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT</code>, or <code className="text-cyan-200/90">MIN_AI_WIN_PROB_BUY_SIDE_PCT</code>), use{' '}
-                <strong className="text-white">Restore configuration defaults</strong> — editing the file alone does not overwrite what is already in the database.
+                Saved values apply immediately to the running bot. Available cash is the position limit. Restore configuration defaults reloads edge, the 55% win floor, and the stop from <code className="text-cyan-200/90">backend/.env</code>. Editing the file alone does not overwrite the database.
               </p>
+              {health?.entry_caps && health.entry_caps.length > 0 ? (
+                <p className="text-[11px] text-white/70">
+                  Per-bet cash cap by raw edge, from closed results (starts at 2.5%, floor 1%, ceiling 5% after 8 closes):{' '}
+                  {health.entry_caps
+                    .map((row) => `${row.bucket} ${row.cap_pct.toFixed(2)}% (n=${row.n})`)
+                    .join(' · ')}
+                </p>
+              ) : null}
 
               <div className="pt-3 border-t border-brand-muted/25 flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -335,6 +320,10 @@ export const Settings: React.FC = () => {
                   {toggleSavingStopLoss ? 'Saving…' : cur.stop_loss_selling_enabled === true ? 'Enabled' : 'Disabled'}
                 </button>
               </div>
+              <p className="text-[11px] text-white/70">
+                {cur.config_source_note ||
+                  'The numbers on this screen come from the database. The .env file applies when that row is missing, or after Restore configuration defaults.'}
+              </p>
 
               <button
                 type="button"

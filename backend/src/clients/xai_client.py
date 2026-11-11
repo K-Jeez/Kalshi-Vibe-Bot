@@ -14,6 +14,7 @@ import asyncio
 import json
 import random
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -26,6 +27,9 @@ from src.logger import setup_logging
 from src.reconcile.open_positions import normalize_market_id
 
 _logger = setup_logging("xai_client")
+
+PROMPT_VERSION = "decision-2026-11-11"
+_UNCERTAINTY_LEVELS = {"low", "medium", "high", "abstain"}
 
 XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_MANAGEMENT_BASE_URL = "https://management-api.x.ai"
@@ -229,7 +233,9 @@ Do not choose a side mainly because it looks cheap/rich. Never recommend the sid
 
 **Calibration:** If you report **ai_probability_yes_pct** above **75** while the executable ask on your buy side is **40–65¢**, lower your probability or **SKIP** unless you have strong, specific evidence—the market is pricing meaningful risk. Treat implied edge above **~20 percentage points** as a warning sign of overconfidence unless you can defend it point-by-point; otherwise **SKIP**.
 
-The server computes edge and full Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks (whole contracts, cash-capped; may use exactly **one** contract when fractional Kelly is below one contract but edge at the ask remains). Keep that field calibrated and honest."""
+The server computes edge and quarter-Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks (whole contracts, cash-capped; may use exactly **one** contract when quarter Kelly is below one contract but edge at the ask remains). Keep that field calibrated and honest.
+
+Prompt version decision-2026-11-11. Always output a calibrated ai_probability_yes_pct. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable for this strategy and is never by itself a reason to SKIP. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
 
 USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this contract. Recommend **YES** or **NO** only when that matches your genuine outcome view—not because either side looks under/overpriced.
 
@@ -282,8 +288,15 @@ Output strict JSON only:
             "when": "<date or time window>",
             "link": "<optional>"
         }}
-    ]
-}}"""
+    ],
+    "uncertainty": {{
+        "level": "<low | medium | high | abstain>",
+        "missing": ["<fact this horizon needs and you do not have>"],
+        "as_of": "<source time, or empty>"
+    }}
+}}
+
+uncertainty is required. Use abstain only when the contract is unparseable or already expired; then direction is SKIP. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon."""
 
 # Line-ladder batches: switch to a sibling leg when its P(YES) beats the model pick by at least this much.
 _LADDER_LIKELIHOOD_OVERRIDE_MIN_GAP_PCT = 5
@@ -302,7 +315,9 @@ Use book/quotes/volume secondarily; poor liquidity can justify SKIP. If your pic
 
 Rules: best_market_id must be one from the list (if SKIP, use the first). direction applies to that contract only. Honor BOT FILTER ALIGNMENT if present.
 
-The server computes edge and Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks (whole contracts, cash-capped; may use exactly **one** contract when fractional Kelly is below one contract but edge at the ask remains)."""
+The server computes edge and quarter-Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks (whole contracts, cash-capped; may use exactly **one** contract when quarter Kelly is below one contract but edge at the ask remains).
+
+Prompt version decision-2026-11-11. Always output a calibrated ai_probability_yes_pct for the chosen contract. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to SKIP. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
 
 EVENT_BATCH_USER_TEMPLATE = """EVENT (shared): {event_title}
 EVENT_TICKER: {event_ticker}
@@ -335,8 +350,15 @@ OUTPUT JSON ONLY:
   "key_factors": ["<factor>", "..."],
   "evidence": [
     {{"claim": "<...>", "source": "<...>", "when": "<...>", "link": "<optional>"}}
-  ]
+  ],
+  "uncertainty": {{
+    "level": "<low | medium | high | abstain>",
+    "missing": ["<fact this horizon needs and you do not have>"],
+    "as_of": "<source time, or empty>"
+  }}
 }}
+
+uncertainty is required. Use abstain only when the chosen contract is unparseable or already expired; then direction is SKIP. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon.
 
 Include **outcome_probability_pct_by_market_id** when the legs are **mutually exclusive on YES** (only one can settle YES — e.g. home / away / **draw**). Keys must be **exact** ``market_id`` strings from the list; values are your P(YES) for each; they must **sum to 99–101** across **all listed legs** in that case. Omit this field (or use null) only when legs are clearly **not** such a partition (e.g. unrelated props)."""
 
@@ -433,6 +455,7 @@ class XAIClient:
         except Exception:
             pass
 
+        started = time.perf_counter()
         try:
             outcome, resp_or_msg = await _post_xai_chat_with_retries(
                 api_key=self.api_key,
@@ -447,6 +470,7 @@ class XAIClient:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             result = _parse_json(content)
+            attach_model_usage(result, data if isinstance(data, dict) else {}, started=started)
             _logger.debug(
                 "xAI direction=%s ai_yes_pct=%s for '%s'",
                 result.get("direction"),
@@ -523,6 +547,7 @@ class XAIClient:
         }
 
         fallback_best = str(legs[0].get("market_id") or "")
+        started = time.perf_counter()
         try:
             outcome, resp_or_msg = await _post_xai_chat_with_retries(
                 api_key=self.api_key,
@@ -537,6 +562,7 @@ class XAIClient:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             parsed = _parse_event_batch_json(content, allowed_ids=allowed, ladder_stat_line_batch=ladder)
+            attach_model_usage(parsed, data if isinstance(data, dict) else {}, started=started)
             _logger.debug(
                 "xAI event batch %s best=%s dir=%s",
                 event_ticker,
@@ -763,7 +789,8 @@ def _parse_event_batch_json(
     if market_id_rejected:
         direction = "SKIP"
 
-    ai_yes = _extract_ai_probability_yes_pct(result)
+    raw_probability = result.get("ai_probability_yes_pct", result.get("confidence_pct"))
+    ai_yes = None if raw_probability is None else _extract_ai_probability_yes_pct(result)
 
     omap = _normalize_outcome_probability_pct_by_market_id(
         result.get("outcome_probability_pct_by_market_id"),
@@ -794,6 +821,9 @@ def _parse_event_batch_json(
     key_factors = [str(f) for f in key_factors[:5]]
 
     reasoning = str(result.get("reasoning", "")).strip()
+    uncertainty = uncertainty_from_result(result)
+    if uncertainty.get("level") == "abstain":
+        direction = "SKIP"
     if market_id_rejected:
         reasoning = (
             f"{reasoning} [Rejected: best_market_id is not one of the listed contracts; no order.]"
@@ -807,6 +837,7 @@ def _parse_event_batch_json(
         "real_time_context": str(result.get("real_time_context", "")).strip(),
         "key_factors": key_factors,
         "evidence": result.get("evidence", []) if isinstance(result.get("evidence", []), list) else [],
+        "uncertainty": uncertainty,
     }
     if omap:
         out["outcome_probability_pct_by_market_id"] = omap
@@ -816,6 +847,55 @@ def _parse_event_batch_json(
     if ladder_stat_line_batch:
         out = _prioritize_line_ladder_likelihood(out, allowed_ids=allowed_ids)
     return out
+
+
+def normalize_uncertainty(raw: object) -> dict:
+    """Validate a structured uncertainty object. Missing stays missing. Invalid is not guessed."""
+    if not isinstance(raw, dict):
+        return {"status": "invalid"}
+    level = str(raw.get("level") or "").strip().lower()
+    if level not in _UNCERTAINTY_LEVELS:
+        return {"status": "invalid"}
+    missing = raw.get("missing", [])
+    if missing is None:
+        missing = []
+    if not isinstance(missing, list) or any(not isinstance(item, str) for item in missing):
+        return {"status": "invalid"}
+    as_of = raw.get("as_of")
+    if as_of is not None and not isinstance(as_of, str):
+        return {"status": "invalid"}
+    out = {
+        "status": "present",
+        "level": level,
+        "missing": [item.strip()[:80] for item in missing if item.strip()][:8],
+    }
+    if isinstance(as_of, str) and as_of.strip():
+        out["as_of"] = as_of.strip()[:40]
+    return out
+
+
+def uncertainty_from_result(result: dict) -> dict:
+    if "uncertainty" not in result:
+        return {"status": "missing"}
+    return normalize_uncertainty(result.get("uncertainty"))
+
+
+def attach_model_usage(result: dict, data: dict, *, started: float) -> None:
+    """Attach token counts and cost labels. Does not copy prompt or completion text."""
+    from src.model_usage import estimate_usd, prompt_fingerprint, usage_from_response
+
+    usage = usage_from_response(data if isinstance(data, dict) else {})
+    usage["estimated_usd"] = estimate_usd(
+        usage.get("input_tokens"),
+        usage.get("output_tokens"),
+        usage.get("cached_input_tokens"),
+    )
+    usage["duration_sec"] = round(max(0.0, time.perf_counter() - float(started)), 3)
+    usage["estimate_is_not_a_bill"] = usage.get("actual_usd") is None
+    usage["cost_label"] = "provider_reported" if usage.get("actual_usd") is not None else "list_price_estimate"
+    result["usage"] = usage
+    result["prompt_version"] = PROMPT_VERSION
+    result["prompt_fingerprint"] = prompt_fingerprint(PROMPT_VERSION)
 
 
 def _parse_json(content: str) -> dict:
@@ -835,7 +915,12 @@ def _parse_json(content: str) -> dict:
         else:
             direction = "SKIP"
 
-    ai_yes = _extract_ai_probability_yes_pct(result)
+    raw_probability = result.get("ai_probability_yes_pct", result.get("confidence_pct"))
+    ai_yes = None if raw_probability is None else _extract_ai_probability_yes_pct(result)
+    uncertainty = uncertainty_from_result(result)
+    # Abstain means the contract cannot be analysed. It does not replace a stated probability with 50.
+    if uncertainty.get("level") == "abstain":
+        direction = "SKIP"
 
     key_factors = result.get("key_factors", [])
     if not isinstance(key_factors, list):
@@ -849,6 +934,7 @@ def _parse_json(content: str) -> dict:
         "real_time_context": str(result.get("real_time_context", "")).strip(),
         "key_factors": key_factors,
         "evidence": result.get("evidence", []) if isinstance(result.get("evidence", []), list) else [],
+        "uncertainty": uncertainty,
     }
 
 

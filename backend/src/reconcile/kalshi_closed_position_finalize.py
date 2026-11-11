@@ -216,38 +216,91 @@ async def finalize_live_closed_positions_from_kalshi(
             db.add(pos)
 
         mid = normalize_market_id(pos.market_id).upper()
-        for s in settlement_rows or []:
-            tkr = normalize_market_id((s.get("ticker") or "")).strip().upper()
-            if tkr != mid:
-                continue
-            if not position_matches_settlement_row(pos, s, relax_quantity=True):
-                continue
-            auth = authoritative_realized_pnl_from_settlement_row(pos, s)
-            if auth is None:
-                auth = estimate_realized_pnl_from_settlement_row(pos, s)
-            if auth is None:
-                continue
-            pos.realized_pnl = float(auth)
-            pos.kalshi_flat_reconcile_pending = False
-            pos.kalshi_closure_finalized = True
-            ex = _find_exit_trade_for_position(db, pos)
-            if ex:
-                ex.realized_pnl = float(auth)
-                db.add(ex)
-            finalized = True
-            n += 1
-            logger.info(
-                "Closed position finalized from Kalshi settlement row %s %s realized=%.4f",
-                pos.market_id,
-                pos.side,
-                float(auth),
-            )
-            break
+        exit_trade = _find_exit_trade_for_position(db, pos)
+        sold_qty = int(getattr(exit_trade, "quantity", 0) or 0) if exit_trade is not None else 0
+        from src.reconcile.realized_cashflow import sale_split
+
+        split = sale_split(
+            position_qty=int(pos.quantity or 0),
+            sold_qty=sold_qty,
+            settlement=settlements_latest_by_ticker(settlement_rows or []).get(mid),
+            side=str(pos.side or "YES"),
+        )
+        fully_sold = split["kind"] == "full"
+        partial_sale = split["kind"] == "partial"
+        sold_already = fully_sold or partial_sale
+        if sold_already:
+            # A stop or other sell is the cash flow. Do not rebook it as a
+            # hold-to-settlement, which drops the sale and can flip the sign.
+            pass
+        else:
+            for s in settlement_rows or []:
+                tkr = normalize_market_id((s.get("ticker") or "")).strip().upper()
+                if tkr != mid:
+                    continue
+                if not position_matches_settlement_row(pos, s, relax_quantity=True):
+                    continue
+                auth = authoritative_realized_pnl_from_settlement_row(pos, s)
+                if auth is None:
+                    auth = estimate_realized_pnl_from_settlement_row(pos, s)
+                if auth is None:
+                    continue
+                pos.realized_pnl = float(auth)
+                pos.kalshi_flat_reconcile_pending = False
+                pos.kalshi_closure_finalized = True
+                ex = _find_exit_trade_for_position(db, pos)
+                if ex:
+                    ex.realized_pnl = float(auth)
+                    db.add(ex)
+                finalized = True
+                n += 1
+                logger.info(
+                    "Closed position finalized from Kalshi settlement row %s %s realized=%.4f",
+                    pos.market_id,
+                    pos.side,
+                    float(auth),
+                )
+                break
 
         if finalized:
             continue
 
-        s_latest = settlements_latest_by_ticker(settlement_rows or []).get(mid)
+        if partial_sale and not finalized:
+            s_latest = settlements_latest_by_ticker(settlement_rows or []).get(mid)
+            if s_latest is not None:
+                result_name = str(s_latest.get("market_result") or "").strip().lower()
+                side_name = str(pos.side or "").strip().upper()
+                won = (side_name == "YES" and result_name == "yes") or (
+                    side_name == "NO" and result_name == "no"
+                )
+                # After a partial sell, quantity is the unsold remainder, not the original size.
+                from src.reconcile.realized_cashflow import combine_partial_realized, remainder_settlement_pnl
+
+                remaining = int(split["remaining"])
+                cost = float(pos.entry_cost or 0.0)
+                if cost <= 1e-12:
+                    cost = float(remaining) * float(pos.entry_price or 0.0)
+                addon = remainder_settlement_pnl(
+                    remaining_qty=remaining,
+                    entry_cost=cost,
+                    fees_paid=float(getattr(pos, "fees_paid", 0) or 0.0),
+                    sold_qty=int(split["sold"]),
+                    won=won,
+                )
+                pos.realized_pnl = combine_partial_realized(
+                    float(pos.realized_pnl or 0.0),
+                    float(getattr(exit_trade, "realized_pnl", 0) or 0.0),
+                    addon,
+                )
+                pos.kalshi_flat_reconcile_pending = False
+                pos.kalshi_closure_finalized = True
+                finalized = True
+                n += 1
+                continue
+        if sold_already:
+            s_latest = None
+        else:
+            s_latest = settlements_latest_by_ticker(settlement_rows or []).get(mid)
         if s_latest is not None:
             est = estimate_realized_pnl_from_settlement_row(pos, s_latest)
             if est is not None:
@@ -291,6 +344,9 @@ async def finalize_live_closed_positions_from_kalshi(
         order_id = str(ex_trade.id or "").strip()
         if not order_id:
             continue
+        from src.database.models import release_sqlite_write
+
+        release_sqlite_write(db)
         try:
             order = await kalshi_client.get_order(order_id)
         except Exception as ex:

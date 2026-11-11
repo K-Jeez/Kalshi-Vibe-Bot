@@ -18,6 +18,7 @@ export const Header: React.FC = () => {
   const [connected, setConnected]     = useState(false)
   const [botState, setBotState]       = useState<'play' | 'pause' | 'stop'>('stop')
   const [botLoading, setBotLoading]   = useState(false)
+  const [localAlert, setLocalAlert]   = useState('')
   const docVisible = useDocumentVisible()
   const prevVisibleRef = useRef(docVisible)
 
@@ -34,9 +35,14 @@ export const Header: React.FC = () => {
   const refresh = async () => {
     if (!docVisible) return
     try {
-      const [, bot] = await Promise.all([apiClient.getHealth(), apiClient.getBotState()])
+      const [, bot, ops] = await Promise.all([
+        apiClient.getHealth(),
+        apiClient.getBotState(),
+        apiClient.getOpsStatus().catch(() => ({ monitor_age_sec: null, alerts: [] as string[] })),
+      ])
       setConnected(true)
       setBotState(bot.state ?? 'stop')
+      setLocalAlert(ops.alerts?.[0] ?? '')
     } catch {
       setConnected(false)
     }
@@ -115,6 +121,11 @@ export const Header: React.FC = () => {
             >
               LIVE
             </span>
+            {localAlert ? (
+              <span className="max-w-[220px] truncate text-[10px] text-amber-200" title={localAlert}>
+                {localAlert}
+              </span>
+            ) : null}
 
             {/* Play / Pause / Stop */}
             <div className="flex gap-0.5 bg-primary/55 rounded-xl p-1 border border-brand-muted/35 shadow-inner shadow-black/40">

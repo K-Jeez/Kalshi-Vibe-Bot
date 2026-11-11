@@ -1,0 +1,15 @@
+{
+  "fills": [
+    {"ticker": "MKT-YES-WIN", "action": "buy", "side": "yes", "count_fp": "2.00", "yes_price_dollars": "0.4000", "no_price_dollars": "0.6000", "fee_cost": "0.0400"},
+    {"ticker": "MKT-NO-LOSS", "action": "sell", "side": "no", "count_fp": "2.00", "yes_price_dollars": "0.4000", "no_price_dollars": "0.6000", "fee_cost": "0.0400"},
+    {"ticker": "MKT-YES-STOP", "action": "buy", "side": "yes", "count_fp": "2.00", "yes_price": "0.5000", "fee": "0.0200"},
+    {"ticker": "MKT-YES-STOP", "action": "sell", "side": "no", "count_fp": "2.00", "yes_price": "0.2000", "fee": "0.0100"},
+    {"ticker": "MKT-PARTIAL", "action": "buy", "side": "yes", "count_fp": "4.00", "yes_price": "0.5000", "fee": "0.0000"},
+    {"ticker": "MKT-PARTIAL", "action": "sell", "side": "no", "count_fp": "2.00", "yes_price": "0.2500", "fee": "0.0000"}
+  ],
+  "settlements": [
+    {"ticker": "MKT-YES-WIN", "market_result": "yes"},
+    {"ticker": "MKT-NO-LOSS", "market_result": "yes"},
+    {"ticker": "MKT-PARTIAL", "market_result": "yes"}
+  ]
+}

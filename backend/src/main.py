@@ -17,6 +17,7 @@ from src.api.common import ensure_bot_state
 from src.api.health import router as health_router
 from src.api.local_guard import LocalMutationGuard
 from src.api.logs_debug import router as logs_debug_router
+from src.api.ops import router as ops_router
 from src.api.markets import router as markets_router
 from src.api.portfolio import router as portfolio_router
 from src.api.trades import router as trades_router
@@ -122,7 +123,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Kalshi Vibe Bot",
-    description="Binary Kalshi markets: local liquidity vetting, xAI (Grok) P(YES) + edge, full Kelly sizing, stop-loss-only exits.",
+    description="Binary Kalshi markets: local liquidity vetting, xAI (Grok) P(YES) + edge, quarter Kelly sizing, stop-loss-only exits.",
     version=APP_VERSION,
     lifespan=lifespan,
 )
@@ -146,3 +147,4 @@ app.include_router(markets_router)
 app.include_router(analysis_router)
 app.include_router(trades_router)
 app.include_router(logs_debug_router)
+app.include_router(ops_router)

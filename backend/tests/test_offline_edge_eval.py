@@ -15,7 +15,7 @@ import offline_edge_eval as ev  # noqa: E402
 
 def test_module_uses_corrected_stake_cap():
     ev.assert_corrected_stake_cap()
-    assert ev.kelly_contract_cap_for_bankroll(10.46, 0.67) == 0
+    assert ev.kelly_contract_cap_for_bankroll(10.46, 0.67, fee_multiplier=1, fee_type="quadratic") == 0
 
 
 def test_forecast_and_decision_have_no_outcome_argument():

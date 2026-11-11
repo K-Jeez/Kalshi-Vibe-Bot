@@ -331,8 +331,9 @@ export const PortfolioOverview: React.FC = () => {
           subtext="Cash locked from trading"
         />
         <StatCard
-          title="Total Invested"
+          title="Open mark value"
           value={`$${portfolio.invested_amount.toFixed(2)}`}
+          subtext="Current value of open contracts. Not the cash spent to enter."
           icon={<Briefcase className="text-amber-500" />}
           color="text-white"
         />

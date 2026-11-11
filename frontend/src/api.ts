@@ -157,11 +157,17 @@ export interface XAIAnalysis {
   event_batch_market_ids?: string[]
   /** When legs are mutually exclusive (e.g. 1X2), model P(YES) per market_id (sums ~100%). */
   outcome_probability_pct_by_market_id?: Record<string, number>
+  uncertainty?: { status?: string; level?: string; missing?: string[]; as_of?: string }
+  prompt_version?: string
 }
 
 export type AnalysisActionTaken =
   | { status: 'skipped'; summary?: string; reason?: string }
   | { status: 'no_trade'; summary?: string; reason?: string; signal?: string }
+  | { status: 'rejected'; summary?: string; signal?: string; error_class?: string }
+  | { status: 'zero_fill'; summary?: string; signal?: string; filled_fp?: number }
+  | { status: 'fractional_fill'; summary?: string; signal?: string; filled_fp?: number }
+  | { status: 'partial'; side?: string; summary?: string; signal?: string }
   | { status: 'executed'; side: string; quantity: number; price: number; cost: number; at: string }
 
 export interface DecisionAnalysis {
@@ -176,8 +182,14 @@ export interface DecisionAnalysis {
   market_implied_probability_pct?: number
   /** Edge in percentage points (AI side prob minus market-implied). */
   edge_pct?: number
-  /** Full Kelly contract count at analysis time and deployable cash snapshot. */
+  /** Quarter Kelly contract count at analysis time and deployable cash snapshot. */
   kelly_contracts?: number
+  /** w*model + (1-w)*fee-free mid, as a YES percent. Gates still use the raw model. */
+  blended_probability_yes_pct?: number | null
+  blended_side_pct?: number | null
+  blend_weight?: number | null
+  market_mid_yes_pct?: number | null
+  blend_market?: string | null
   yes_confidence: number
   no_confidence: number
   reasoning: string
@@ -285,6 +297,8 @@ export interface TuningSnapshot {
   ai_provider?: string
   /** Model id from server config (``XAI_MODEL``; default ``grok-4.3``). */
   xai_model?: string
+  config_source?: string
+  config_source_note?: string
   updated_at?: string | null
 }
 
@@ -309,11 +323,22 @@ export interface HealthResponse {
   status: string
   version?: string
   timestamp?: string
+  monitor_age_sec?: number | null
+  alerts?: string[]
+  fee_estimate_note?: string
+  approved_max_open_positions?: number
+  model_blend_weight?: number
+  entry_caps?: { bucket: string; cap_pct: number; n: number; roi: number | null }[]
 }
 
 export const apiClient = {
   getHealth: async (): Promise<HealthResponse> => {
     const { data } = await client.get('/health')
+    return data
+  },
+
+  getOpsStatus: async (): Promise<{ monitor_age_sec: number | null; alerts: string[] }> => {
+    const { data } = await client.get('/ops/status')
     return data
   },
 
