@@ -216,15 +216,18 @@ async def finalize_live_closed_positions_from_kalshi(
             db.add(pos)
 
         mid = normalize_market_id(pos.market_id).upper()
-        from src.reconcile.realized_cashflow import closed_by_our_sell
-
         exit_trade = _find_exit_trade_for_position(db, pos)
         sold_qty = int(getattr(exit_trade, "quantity", 0) or 0) if exit_trade is not None else 0
-        held_qty = int(pos.quantity or 0)
-        fully_sold = closed_by_our_sell(pos.exit_reason, exit_trade is not None) and (
-            held_qty <= 0 or sold_qty >= held_qty
+        from src.reconcile.realized_cashflow import sale_split
+
+        split = sale_split(
+            position_qty=int(pos.quantity or 0),
+            sold_qty=sold_qty,
+            settlement=settlements_latest_by_ticker(settlement_rows or []).get(mid),
+            side=str(pos.side or "YES"),
         )
-        partial_sale = exit_trade is not None and held_qty > sold_qty > 0
+        fully_sold = split["kind"] == "full"
+        partial_sale = split["kind"] == "partial"
         sold_already = fully_sold or partial_sale
         if sold_already:
             # A stop or other sell is the cash flow. Do not rebook it as a
@@ -271,9 +274,9 @@ async def finalize_live_closed_positions_from_kalshi(
                     side_name == "NO" and result_name == "no"
                 )
                 # After a partial sell, quantity is the unsold remainder, not the original size.
-                from src.reconcile.realized_cashflow import remainder_settlement_pnl
+                from src.reconcile.realized_cashflow import combine_partial_realized, remainder_settlement_pnl
 
-                remaining = int(pos.quantity or 0)
+                remaining = int(split["remaining"])
                 cost = float(pos.entry_cost or 0.0)
                 if cost <= 1e-12:
                     cost = float(remaining) * float(pos.entry_price or 0.0)
@@ -281,10 +284,14 @@ async def finalize_live_closed_positions_from_kalshi(
                     remaining_qty=remaining,
                     entry_cost=cost,
                     fees_paid=float(getattr(pos, "fees_paid", 0) or 0.0),
-                    sold_qty=sold_qty,
+                    sold_qty=int(split["sold"]),
                     won=won,
                 )
-                pos.realized_pnl = float(pos.realized_pnl or 0.0) + addon
+                pos.realized_pnl = combine_partial_realized(
+                    float(pos.realized_pnl or 0.0),
+                    float(getattr(exit_trade, "realized_pnl", 0) or 0.0),
+                    addon,
+                )
                 pos.kalshi_flat_reconcile_pending = False
                 pos.kalshi_closure_finalized = True
                 finalized = True

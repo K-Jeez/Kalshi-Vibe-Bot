@@ -189,6 +189,104 @@ def test_missing_settlement_is_skipped_instead_of_booked_as_a_loss():
     assert "no settlement" in plans[0]["note"]
 
 
+def test_selling_half_or_more_of_four_still_settles_the_remainder():
+    import asyncio
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from src.database.models import Base, Position, Trade
+    from src.reconcile.kalshi_closed_position_finalize import finalize_live_closed_positions_from_kalshi
+    from src.reconcile.realized_cashflow import sale_split
+    from src.util.datetimes import utc_now
+
+    for sold in (1, 2, 3):
+        assert sale_split(position_qty=4 - sold, sold_qty=sold, side="YES")["kind"] == "partial"
+    assert sale_split(
+        position_qty=4,
+        sold_qty=4,
+        settlement={"yes_count_fp": "4.00", "no_count_fp": "4.00"},
+        side="YES",
+    )["kind"] == "full"
+
+    class _Noop:
+        async def get_order(self, _oid):
+            return {}
+
+    for sold in (1, 2, 3):
+        for result, won in (("yes", True), ("no", False)):
+            rem = 4 - sold
+            engine = create_engine("sqlite:///:memory:")
+            Base.metadata.create_all(engine)
+            db = sessionmaker(bind=engine)()
+            now = utc_now()
+            sale_pnl = sold * 0.25 - sold * 0.50
+            db.add(
+                Position(
+                    id=f"p-{sold}-{result}",
+                    market_id="MKT",
+                    market_title="t",
+                    side="YES",
+                    quantity=rem,
+                    entry_price=0.50,
+                    entry_cost=rem * 0.50,
+                    current_price=0.25,
+                    status="closed",
+                    trade_mode="live",
+                    closed_at=now,
+                    exit_reason="stop_loss",
+                    realized_pnl=0.0,
+                    fees_paid=0.0,
+                    kalshi_closure_finalized=False,
+                )
+            )
+            db.add(
+                Trade(
+                    id=f"sell-{sold}-{result}",
+                    market_id="MKT",
+                    market_title="t",
+                    action="sell",
+                    side="YES",
+                    quantity=sold,
+                    price=0.25,
+                    total_cost=sold * 0.25,
+                    realized_pnl=sale_pnl,
+                    trade_mode="live",
+                    timestamp=now,
+                )
+            )
+            db.commit()
+            settlement = {
+                "ticker": "MKT",
+                "market_result": result,
+                "yes_count_fp": f"{rem:.2f}",
+                "no_count_fp": "0.00",
+                "revenue": rem * 100 if won else 0,
+                "fee_cost": "0",
+            }
+            asyncio.run(
+                finalize_live_closed_positions_from_kalshi(
+                    db,
+                    trade_mode="live",
+                    kalshi_client=_Noop(),
+                    settlement_rows=[settlement],
+                )
+            )
+            db.commit()
+            pos = db.query(Position).one()
+            addon = (rem * 1.0 if won else 0.0) - rem * 0.50
+            assert abs(float(pos.realized_pnl) - (sale_pnl + addon)) < 1e-6
+
+
+def test_void_settlement_uses_revenue_instead_of_zero():
+    cash = fills_to_cashflows(
+        [{"action": "buy", "side": "yes", "count_fp": "2", "yes_price": "0.40", "fee": "0"}],
+        {"market_result": "void", "revenue": 150, "side": "YES"},
+        held_side="YES",
+    )
+    assert abs(cash["realized_pnl"] - (1.50 - 0.80)) < 1e-9
+
+
 def test_incomplete_settlement_read_fails_instead_of_an_empty_list():
     import asyncio
 

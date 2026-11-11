@@ -18,6 +18,65 @@ def closed_by_our_sell(exit_reason: object, has_sell_trade: bool) -> bool:
     return str(exit_reason or "").strip().lower() in _SOLD_REASONS
 
 
+def settlement_revenue_dollars(settlement: Optional[dict]) -> Optional[float]:
+    """Kalshi ``revenue`` is integer cents. ``revenue_dollars`` is already dollars."""
+    if not settlement:
+        return None
+    if settlement.get("revenue_dollars") not in (None, ""):
+        return float(settlement["revenue_dollars"])
+    if settlement.get("revenue") not in (None, ""):
+        return float(int(float(settlement["revenue"]))) / 100.0
+    return None
+
+
+def sale_split(
+    *,
+    position_qty: int,
+    sold_qty: int,
+    settlement: Optional[dict] = None,
+    side: str = "YES",
+) -> dict:
+    """How many contracts were sold and how many were still held.
+
+    After a partial sale, ``position_qty`` is the unsold remainder. The original
+    size is that remainder plus the sold count. Selling 2 of 4 leaves quantity
+    2 and sold 2; that is still partial. A settlement that lists both YES and
+    NO counts is the paired close of a full exit, so nothing remains to settle.
+    """
+    sold = max(0, int(sold_qty))
+    stored = max(0, int(position_qty))
+    remaining = stored
+    paired = False
+    if settlement:
+        yes_c = fill_count({"count_fp": settlement.get("yes_count_fp", settlement.get("yes_count"))})
+        no_c = fill_count({"count_fp": settlement.get("no_count_fp", settlement.get("no_count"))})
+        if yes_c > 0.01 and no_c > 0.01:
+            paired = True
+            remaining = 0
+        else:
+            side_c = yes_c if str(side or "YES").upper() == "YES" else no_c
+            if side_c > 0:
+                remaining = int(round(side_c))
+    original = remaining + sold
+    if sold <= 0:
+        kind = "none"
+    elif remaining <= 0 or paired:
+        kind = "full"
+    elif sold < original:
+        kind = "partial"
+    else:
+        kind = "full"
+    return {"kind": kind, "remaining": remaining, "sold": sold, "original": original}
+
+
+def combine_partial_realized(position_realized: float, sale_realized: float, remainder_pnl: float) -> float:
+    """Sale P&L lives on the sell trade when the position row was not updated."""
+    pos = float(position_realized or 0.0)
+    sale = float(sale_realized or 0.0)
+    base = sale if abs(pos) <= 1e-9 else pos
+    return base + float(remainder_pnl)
+
+
 def remainder_settlement_pnl(
     *,
     remaining_qty: int,
@@ -173,7 +232,9 @@ def fills_to_cashflows(fills: list, settlement: Optional[dict] = None, held_side
     remaining = max(0.0, buy_count - sell_count)
     fully_exited = sell_count > 1e-9 and remaining <= 1e-6
     payout = 0.0
-    if has_settlement and not fully_exited and won:
+    if has_settlement and result in ("void", "scalar"):
+        payout = settlement_revenue_dollars(settlement) or 0.0
+    elif has_settlement and not fully_exited and won:
         payout = remaining if sell_count > 1e-9 else buy_count
         if settlement and settlement.get("payout") not in (None, "") and sell_count <= 1e-9:
             payout = float(settlement.get("payout") or payout)
