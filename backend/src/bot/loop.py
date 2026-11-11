@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+
+from src.json_safe import dumps_payload
 import math
 import time
 import uuid
@@ -2461,11 +2463,11 @@ async def scan_and_trade(
                 market_id=ticker_clean,
                 market_title=title,
                 decision=decision.get("decision", "SKIP"),
-                xai_analysis=json.dumps(decision.get("xai_analysis", {})),
+                xai_analysis=dumps_payload(decision.get("xai_analysis", {})),
                 confidence=float(decision.get("confidence", 0.0) or 0.0),
                 reasoning=decision.get("reasoning", ""),
                 real_time_context=decision.get("real_time_context", ""),
-                key_factors=json.dumps(decision.get("key_factors", [])),
+                key_factors=dumps_payload(decision.get("key_factors", [])),
                 yes_confidence=int(decision.get("yes_confidence", int(yes_price * 100))),
                 no_confidence=int(decision.get("no_confidence", int(no_price * 100))),
                 escalated_to_xai=decision.get("escalated_to_xai", False),
@@ -2474,8 +2476,8 @@ async def scan_and_trade(
                 market_implied_probability_pct=int(decision.get("market_implied_probability_pct", 0) or 0),
                 kelly_contracts=int(decision.get("kelly_contracts", 0) or 0),
                 filter_pass=True,
-                action_taken=json.dumps(action_taken),
-                market_context=json.dumps(_snap),
+                action_taken=dumps_payload(action_taken),
+                market_context=dumps_payload(_snap),
                 snapshot_yes_price=_snap["yes_price"],
                 snapshot_no_price=_snap["no_price"],
                 snapshot_volume=_snap["volume"],

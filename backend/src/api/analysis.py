@@ -15,6 +15,7 @@ from src.config import TRADE_MODE, settings
 from src.database.models import DecisionLog, get_db, get_vault_balance
 from src.logger import logger
 from src.analysis_payload import enrich_analysis_ai_provider
+from src.json_safe import dumps_payload
 from src.reconcile.open_positions import normalize_market_id
 
 router = APIRouter(tags=["analysis"])
@@ -276,11 +277,11 @@ async def analyze_market(
             market_id=canon_mid,
             market_title=market_title,
             decision=decision.get("decision", "SKIP"),
-            xai_analysis=json.dumps(decision.get("xai_analysis", {})),
+            xai_analysis=dumps_payload(decision.get("xai_analysis", {})),
             confidence=float(decision.get("confidence", 0) or 0),
             reasoning=decision.get("reasoning", ""),
             real_time_context=decision.get("real_time_context", ""),
-            key_factors=json.dumps(decision.get("key_factors", [])),
+            key_factors=dumps_payload(decision.get("key_factors", [])),
             yes_confidence=int(decision.get("yes_confidence", int(yes_price * 100))),
             no_confidence=int(decision.get("no_confidence", int(no_price * 100))),
             escalated_to_xai=bool(decision.get("escalated_to_xai", True)),
@@ -288,8 +289,8 @@ async def analyze_market(
             ai_probability_yes_pct=int(decision.get("ai_probability_yes_pct", 50) or 50),
             market_implied_probability_pct=int(decision.get("market_implied_probability_pct", 0) or 0),
             kelly_contracts=int(decision.get("kelly_contracts", 0) or 0),
-            action_taken=json.dumps(action_taken),
-            market_context=json.dumps(_snap),
+            action_taken=dumps_payload(action_taken),
+            market_context=dumps_payload(_snap),
             snapshot_yes_price=_snap["yes_price"],
             snapshot_no_price=_snap["no_price"],
             snapshot_volume=_snap["volume"],

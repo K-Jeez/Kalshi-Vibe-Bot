@@ -48,7 +48,12 @@ def test_health_with_trading_tasks_faked(tmp_path, monkeypatch):
         loop_calls.append("fake")
         return None
 
-    def _block_connect(*_args, **_kwargs):
+    real_connect = socket.socket.connect
+
+    def _block_connect(self, address):
+        host = address[0] if isinstance(address, tuple) and address else None
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return real_connect(self, address)
         raise AssertionError("network connect is blocked in this harness")
 
     monkeypatch.setattr("src.main.KalshiClient", FakeKalshi)

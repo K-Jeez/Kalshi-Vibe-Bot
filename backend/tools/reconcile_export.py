@@ -13,7 +13,6 @@ python tools/reconcile_export.py trading_bot.db --cash-start 100 --cash-end 98.8
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -238,7 +237,9 @@ def main(argv: list[str]) -> int:
     if not args.database.is_file():
         print("database file not found", file=sys.stderr)
         return 2
-    print(json.dumps(audit_database(args.database, cash_start=args.cash_start, cash_end=args.cash_end), default=str, indent=2))
+    from src.json_safe import dumps_payload
+
+    print(dumps_payload(audit_database(args.database, cash_start=args.cash_start, cash_end=args.cash_end), indent=2))
     return 0
 
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from src.config import settings
+from src.json_safe import dumps_payload
 from src.database.models import ActivityEvent, get_session_local
 from src.logger import setup_logging
 from src.reconcile.open_positions import normalize_market_id
@@ -25,10 +26,11 @@ from src.version import APP_VERSION
 
 logger = setup_logging("activity_log")
 
-# A locked writer should wait briefly, not for the process-wide 60s timeout.
-ACTIVITY_BUSY_TIMEOUT_MS = 1000
-_LOCK_ATTEMPTS = 4
-_LOCK_WAITS = (0.05, 0.15, 0.3)
+# One attempt waits up to 5s inside SQLite. Two more tries add about 1.5s of backoff.
+# This stays off the order path's critical section: a failed write returns False and does not raise.
+ACTIVITY_BUSY_TIMEOUT_MS = 5000
+_LOCK_ATTEMPTS = 3
+_LOCK_WAITS = (0.5, 1.0)
 
 # Keep the table from growing without bound on a long-running local bot.
 _MAX_ROWS = 4000
@@ -245,7 +247,7 @@ def _append_durable_event(row, model_usage: Optional[dict] = None) -> None:
         day = (row.ts_utc or utc_now()).strftime("%Y%m%d")
         directory = Path(__file__).resolve().parents[1] / "logs" / "events"
         directory.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(
+        line = dumps_payload(
             {
                 "id": row.id,
                 "run_id": row.run_id,
@@ -267,7 +269,6 @@ def _append_durable_event(row, model_usage: Optional[dict] = None) -> None:
                 "model_usage": model_usage,
                 "detail": row.detail,
             },
-            default=str,
         )
         with (directory / f"events-{day}.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
@@ -296,6 +297,7 @@ def _prepare_activity_sqlite(db) -> None:
         raw.commit()
     finally:
         raw.close()
+    db.connection().exec_driver_sql("PRAGMA journal_mode=WAL")
     db.connection().exec_driver_sql(f"PRAGMA busy_timeout={int(ACTIVITY_BUSY_TIMEOUT_MS)}")
 
 
@@ -326,8 +328,8 @@ def record_activity(payload: Dict[str, Any], *, session_factory: Optional[Callab
             except Exception:
                 pass
             if _sqlite_locked(exc) and attempt + 1 < _LOCK_ATTEMPTS:
-                logger.debug(
-                    "activity log write locked; retry %s/%s: %s",
+                logger.warning(
+                    "activity log write locked; retry %s/%s: database is locked (%s)",
                     attempt + 1,
                     _LOCK_ATTEMPTS,
                     exc,
