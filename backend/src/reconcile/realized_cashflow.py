@@ -29,6 +29,13 @@ def settlement_revenue_dollars(settlement: Optional[dict]) -> Optional[float]:
     return None
 
 
+def _stated_count(settlement: dict, *keys: str) -> Optional[float]:
+    for key in keys:
+        if key in settlement and settlement.get(key) not in (None, ""):
+            return fill_count({"count_fp": settlement.get(key)})
+    return None
+
+
 def sale_split(
     *,
     position_qty: int,
@@ -36,37 +43,56 @@ def sale_split(
     settlement: Optional[dict] = None,
     side: str = "YES",
 ) -> dict:
-    """How many contracts were sold and how many were still held.
+    """Split a close using Kalshi's bought-versus-sold settlement counts.
 
-    After a partial sale, ``position_qty`` is the unsold remainder. The original
-    size is that remainder plus the sold count. Selling 2 of 4 leaves quantity
-    2 and sold 2; that is still partial. A settlement that lists both YES and
-    NO counts is the paired close of a full exit, so nothing remains to settle.
+    ``yes_count`` is every contract bought and ``no_count`` is every contract
+    sold on the NO side of the book. A YES position's remainder is
+    ``yes_count - no_count``. NO positions mirror that. Selling 2 of 4 is
+    reported as 4/2, so the net is 2 and the close is partial. Net 0, including
+    a 0/0 row after a full sell, is a full exit. Net equal to the buy with no
+    sell is a hold to settlement, not a partial sale.
     """
     sold = max(0, int(sold_qty))
     stored = max(0, int(position_qty))
-    remaining = stored
-    paired = False
+    held = str(side or "YES").upper()
+    yes_c = no_c = None
     if settlement:
-        yes_c = fill_count({"count_fp": settlement.get("yes_count_fp", settlement.get("yes_count"))})
-        no_c = fill_count({"count_fp": settlement.get("no_count_fp", settlement.get("no_count"))})
-        if yes_c > 0.01 and no_c > 0.01:
-            paired = True
-            remaining = 0
+        yes_c = _stated_count(settlement, "yes_count_fp", "yes_count")
+        no_c = _stated_count(settlement, "no_count_fp", "no_count")
+    if yes_c is not None or no_c is not None:
+        yes_n = float(yes_c or 0.0)
+        no_n = float(no_c or 0.0)
+        net = yes_n - no_n if held == "YES" else no_n - yes_n
+        remaining = max(0, int(round(net)))
+        bought = int(round(yes_n if held == "YES" else no_n))
+        book_sold = no_n if held == "YES" else yes_n
+        if remaining <= 0:
+            kind = "full"
+        elif sold <= 0 and book_sold <= 0.01:
+            kind = "held"
         else:
-            side_c = yes_c if str(side or "YES").upper() == "YES" else no_c
-            if side_c > 0:
-                remaining = int(round(side_c))
-    original = remaining + sold
+            kind = "partial"
+        return {
+            "kind": kind,
+            "remaining": remaining,
+            "sold": sold,
+            "original": bought,
+        }
     if sold <= 0:
-        kind = "none"
-    elif remaining <= 0 or paired:
+        kind = "held" if stored else "none"
+        remaining = stored
+    elif stored <= 0:
         kind = "full"
-    elif sold < original:
-        kind = "partial"
+        remaining = 0
     else:
-        kind = "full"
-    return {"kind": kind, "remaining": remaining, "sold": sold, "original": original}
+        kind = "partial"
+        remaining = stored
+    return {
+        "kind": kind,
+        "remaining": remaining,
+        "sold": sold,
+        "original": remaining + sold,
+    }
 
 
 def combine_partial_realized(position_realized: float, sale_realized: float, remainder_pnl: float) -> float:

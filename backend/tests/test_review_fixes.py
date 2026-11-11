@@ -201,13 +201,39 @@ def test_selling_half_or_more_of_four_still_settles_the_remainder():
     from src.util.datetimes import utc_now
 
     for sold in (1, 2, 3):
-        assert sale_split(position_qty=4 - sold, sold_qty=sold, side="YES")["kind"] == "partial"
+        split = sale_split(
+            position_qty=4 - sold,
+            sold_qty=sold,
+            settlement={"yes_count_fp": "4.00", "no_count_fp": f"{sold:.2f}"},
+            side="YES",
+        )
+        assert split["kind"] == "partial"
+        assert split["remaining"] == 4 - sold
     assert sale_split(
-        position_qty=4,
-        sold_qty=4,
-        settlement={"yes_count_fp": "4.00", "no_count_fp": "4.00"},
+        position_qty=7,
+        sold_qty=0,
+        settlement={"yes_count_fp": "7.00", "no_count_fp": "0.00"},
+        side="YES",
+    )["kind"] == "held"
+    assert sale_split(
+        position_qty=5,
+        sold_qty=5,
+        settlement={"yes_count_fp": "5.00", "no_count_fp": "5.00"},
         side="YES",
     )["kind"] == "full"
+    assert sale_split(
+        position_qty=0,
+        sold_qty=4,
+        settlement={"yes_count_fp": "0.00", "no_count_fp": "0.00"},
+        side="YES",
+    )["kind"] == "full"
+    mirrored = sale_split(
+        position_qty=2,
+        sold_qty=2,
+        settlement={"yes_count_fp": "2.00", "no_count_fp": "4.00"},
+        side="NO",
+    )
+    assert mirrored["kind"] == "partial" and mirrored["remaining"] == 2
 
     class _Noop:
         async def get_order(self, _oid):
@@ -259,8 +285,9 @@ def test_selling_half_or_more_of_four_still_settles_the_remainder():
             settlement = {
                 "ticker": "MKT",
                 "market_result": result,
-                "yes_count_fp": f"{rem:.2f}",
-                "no_count_fp": "0.00",
+                "yes_count_fp": "4.00",
+                "no_count_fp": f"{sold:.2f}",
+                "yes_total_cost_dollars": f"{rem * 0.50:.4f}",
                 "revenue": rem * 100 if won else 0,
                 "fee_cost": "0",
             }
@@ -276,6 +303,67 @@ def test_selling_half_or_more_of_four_still_settles_the_remainder():
             pos = db.query(Position).one()
             addon = (rem * 1.0 if won else 0.0) - rem * 0.50
             assert abs(float(pos.realized_pnl) - (sale_pnl + addon)) < 1e-6
+
+
+def test_unfinalized_held_settlement_is_not_added_twice():
+    import asyncio
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from src.database.models import Base, Position
+    from src.reconcile.kalshi_closed_position_finalize import finalize_live_closed_positions_from_kalshi
+    from src.util.datetimes import utc_now
+
+    class _Noop:
+        async def get_order(self, _oid):
+            return {}
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    settlement = {
+        "ticker": "HELD",
+        "market_result": "yes",
+        "yes_count_fp": "7.00",
+        "no_count_fp": "0.00",
+        "yes_total_cost_dollars": "4.5500",
+        "revenue": 700,
+        "fee_cost": "0.1100",
+    }
+    once = 7.0 - 4.55 - 0.11
+    db.add(
+        Position(
+            id="held",
+            market_id="HELD",
+            market_title="t",
+            side="YES",
+            quantity=7,
+            entry_price=0.65,
+            entry_cost=4.55,
+            current_price=1.0,
+            status="closed",
+            trade_mode="live",
+            closed_at=utc_now(),
+            exit_reason="settlement",
+            realized_pnl=once,
+            fees_paid=0.11,
+            kalshi_closure_finalized=False,
+        )
+    )
+    db.commit()
+    asyncio.run(
+        finalize_live_closed_positions_from_kalshi(
+            db,
+            trade_mode="live",
+            kalshi_client=_Noop(),
+            settlement_rows=[settlement],
+        )
+    )
+    db.commit()
+    pos = db.query(Position).one()
+    assert abs(float(pos.realized_pnl) - once) < 1e-6
+    assert abs(float(pos.realized_pnl) - (2 * once)) > 1.0
 
 
 def test_void_settlement_uses_revenue_instead_of_zero():
