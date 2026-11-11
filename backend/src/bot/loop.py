@@ -889,6 +889,9 @@ async def monitor_positions(
                 continue
             sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
             if sell_hold:
+                from src.database.models import release_sqlite_write
+
+                release_sqlite_write(db)
                 await reconcile_open_intents(
                     kalshi_client,
                     db_factory,
@@ -918,6 +921,9 @@ async def monitor_positions(
                         logger.info("Skip auto-exit %s — bot is stopped", pos.market_id)
                         continue
                     sell_n = int(pos.quantity)
+                    from src.database.models import release_sqlite_write
+
+                    release_sqlite_write(db)
                     sell_gate = make_order_submit_gate(
                         {
                             "market_id": pos.market_id,

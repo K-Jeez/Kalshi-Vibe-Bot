@@ -277,6 +277,18 @@ _engine: Optional[Engine] = None
 _session_factory = None
 
 
+def release_sqlite_write(db) -> None:
+    """End the current transaction before a network call.
+
+    A flushed SQLite write stays locked until commit. Reconcile must not keep
+    that lock while it waits on Kalshi.
+    """
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
 def _sqlite_on_connect(dbapi_conn, _connection_record) -> None:
     """WAL + busy wait on each new SQLite connection (pool-safe)."""
     cur = dbapi_conn.cursor()

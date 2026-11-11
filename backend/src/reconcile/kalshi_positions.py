@@ -567,13 +567,18 @@ async def refresh_open_live_positions_from_kalshi_orders(
         .order_by(Position.opened_at.asc())
         .all()
     )
+    from src.database.models import release_sqlite_write
+
     n_ent = 0
     n_un = 0
     for pos in rows:
+        release_sqlite_write(db)
         if await refresh_open_live_position_entry_from_kalshi_buy_order(db, pos, kalshi_client=kalshi_client):
             n_ent += 1
+        release_sqlite_write(db)
         if await recompute_open_live_position_unrealized_pnl(kalshi_client, pos):
             n_un += 1
+        release_sqlite_write(db)
     return (n_ent, n_un)
 
 

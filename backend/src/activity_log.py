@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -22,6 +23,11 @@ from src.util.datetimes import utc_iso_z, utc_now
 from src.version import APP_VERSION
 
 logger = setup_logging("activity_log")
+
+# A locked writer should wait briefly, not for the process-wide 60s timeout.
+ACTIVITY_BUSY_TIMEOUT_MS = 1000
+_LOCK_ATTEMPTS = 4
+_LOCK_WAITS = (0.05, 0.15, 0.3)
 
 # Keep the table from growing without bound on a long-running local bot.
 _MAX_ROWS = 4000
@@ -266,32 +272,74 @@ def _append_durable_event(row, model_usage: Optional[dict] = None) -> None:
         return
 
 
+def _sqlite_locked(exc: BaseException) -> bool:
+    text = f"{exc} {getattr(exc, 'orig', '')}".lower()
+    return "locked" in text or "database is busy" in text or "sqlite_busy" in text
+
+
+def _prepare_activity_sqlite(db) -> None:
+    """WAL plus a short busy wait on the connection that writes this row."""
+    try:
+        bind = db.get_bind()
+    except Exception:
+        return
+    if bind is None or getattr(getattr(bind, "dialect", None), "name", "") != "sqlite":
+        return
+    raw = bind.raw_connection()
+    try:
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+        raw.commit()
+    finally:
+        raw.close()
+    db.connection().exec_driver_sql(f"PRAGMA busy_timeout={int(ACTIVITY_BUSY_TIMEOUT_MS)}")
+
+
 def record_activity(payload: Dict[str, Any], *, session_factory: Optional[Callable] = None) -> bool:
     """Insert one trace row. Returns False when the write fails. Never raises."""
     global _writes, _seq
     factory = session_factory or get_session_local()
-    db = factory()
-    try:
-        _seq += 1
-        row = ActivityEvent(id=str(uuid.uuid4()), seq=_seq)
-        _apply(row, payload)
-        db.add(row)
-        db.commit()
-        _append_durable_event(row, _public_model_usage(payload))
-        _writes += 1
-        if _writes % _PRUNE_EVERY == 0:
-            _prune(db)
-            db.commit()
-        return True
-    except Exception as exc:
+    last_exc: Optional[BaseException] = None
+    for attempt in range(_LOCK_ATTEMPTS):
+        db = factory()
         try:
-            db.rollback()
-        except Exception:
-            pass
-        logger.error("activity log write failed (%s)", type(exc).__name__)
-        return False
-    finally:
-        db.close()
+            _prepare_activity_sqlite(db)
+            _seq += 1
+            row = ActivityEvent(id=str(uuid.uuid4()), seq=_seq)
+            _apply(row, payload)
+            db.add(row)
+            db.commit()
+            _append_durable_event(row, _public_model_usage(payload))
+            _writes += 1
+            if _writes % _PRUNE_EVERY == 0:
+                _prune(db)
+                db.commit()
+            return True
+        except Exception as exc:
+            last_exc = exc
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            if _sqlite_locked(exc) and attempt + 1 < _LOCK_ATTEMPTS:
+                logger.debug(
+                    "activity log write locked; retry %s/%s: %s",
+                    attempt + 1,
+                    _LOCK_ATTEMPTS,
+                    exc,
+                )
+                time.sleep(_LOCK_WAITS[attempt])
+                continue
+            logger.error("activity log write failed (%s): %s", type(exc).__name__, exc)
+            logger.debug("activity log write failed", exc_info=exc)
+            return False
+        finally:
+            db.close()
+    if last_exc is not None:
+        logger.error("activity log write failed (%s): %s", type(last_exc).__name__, last_exc)
+        logger.debug("activity log write failed", exc_info=last_exc)
+    return False
 
 
 def persist_order_intent(payload: Dict[str, Any], *, session_factory: Optional[Callable] = None) -> Optional[str]:

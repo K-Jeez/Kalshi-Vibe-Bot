@@ -291,6 +291,9 @@ async def finalize_live_closed_positions_from_kalshi(
         order_id = str(ex_trade.id or "").strip()
         if not order_id:
             continue
+        from src.database.models import release_sqlite_write
+
+        release_sqlite_write(db)
         try:
             order = await kalshi_client.get_order(order_id)
         except Exception as ex:
