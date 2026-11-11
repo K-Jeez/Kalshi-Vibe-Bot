@@ -217,7 +217,7 @@ def test_scan_buy_fill_uses_the_shared_book(tmp_path, monkeypatch):
         async def get_series_fee(self, _ticker):
             return {"known": True, "fee_type": "quadratic", "fee_multiplier": 1}
 
-        async def place_buy_ioc_limit(self, ticker, side, quantity, limit_price, client_order_id=None):
+        async def place_buy_ioc_limit(self, ticker, side, quantity, limit_price, client_order_id=None, exchange_index=None):
             return {
                 "order_id": "ord-buy-1",
                 "client_order_id": client_order_id,

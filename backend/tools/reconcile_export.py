@@ -177,6 +177,7 @@ def audit_database(db_path: Path, *, cash_start: float | None = None, cash_end: 
             "count": n_legacy,
         })
 
+    transfers = [row for row in events if row.get("event_type") == "shard_transfer" and row.get("order_status") == "accepted"]
     realized = _sum(closed, "realized_pnl")
     components = {
         "closed_count": len(closed),
@@ -192,6 +193,9 @@ def audit_database(db_path: Path, *, cash_start: float | None = None, cash_end: 
         "activity_scope": "all_activity_rows_in_this_database_not_one_run",
         "activity_event_count": None if event_err else len(events),
         "fill_event_count": len(fills),
+        "shard_transfer_count": len(transfers),
+        "shard_transfer_dollars": _sum(transfers, "limit_price"),
+        "shard_transfer_note": "Intra-exchange shard transfers move cash between shards. They are not profit or loss.",
         "historical_pending_row_count": intent_view["historical_pending_rows"],
         "current_unresolved_intent_count": len(current_unresolved),
         "legacy_unresolved_without_client_order_id": len(intent_view["legacy_without_client_order_id"]),

@@ -2193,13 +2193,45 @@ async def scan_and_trade(
                                                                     "signal": signal,
                                                                 }
                                                             else:
-                                                                result = await kalshi_client.place_buy_ioc_limit(
-                                                                    ticker,
-                                                                    trade_side,
-                                                                    quantity,
-                                                                    ioc_limit_dollars,
-                                                                    client_order_id=order_intent_id,
+                                                                from src.bot.shard_funding import fund_buy_shard
+
+                                                                funding = await fund_buy_shard(
+                                                                    kalshi_client,
+                                                                    exchange_index=int(market.get("exchange_index") or 0),
+                                                                    order_all_in=float(added),
+                                                                    bankroll=float(balance),
+                                                                    ticker=ticker_clean,
                                                                 )
+                                                                if not funding.get("ok"):
+                                                                    result = {
+                                                                        "error": "order not sent",
+                                                                        "order_not_sent": True,
+                                                                    }
+                                                                    action_taken = {
+                                                                        "status": "no_trade",
+                                                                        "summary": funding.get("reason")
+                                                                        or f"shard {int(market.get('exchange_index') or 0)} funding failed",
+                                                                        "signal": signal,
+                                                                    }
+                                                                    note_untradeable(
+                                                                        ticker_clean,
+                                                                        "shard_funding",
+                                                                        minutes=int(funding.get("cooldown_minutes") or 30),
+                                                                    )
+                                                                    logger.info(
+                                                                        "Skip buy %s — %s",
+                                                                        ticker,
+                                                                        action_taken["summary"],
+                                                                    )
+                                                                else:
+                                                                    result = await kalshi_client.place_buy_ioc_limit(
+                                                                        ticker,
+                                                                        trade_side,
+                                                                        quantity,
+                                                                        ioc_limit_dollars,
+                                                                        client_order_id=order_intent_id,
+                                                                        exchange_index=int(market.get("exchange_index") or 0),
+                                                                    )
                                                 record_order_ack(
                                                     result,
                                                     {
@@ -2233,18 +2265,19 @@ async def scan_and_trade(
                                             str(result.get("error") or ""),
                                             result.get("status_code"),
                                         )
-                                        if route_kind == "exchange_shard_user":
+                                        if route_kind in ("exchange_shard_user", "exchange_shard_balance"):
                                             note_untradeable(ticker_clean, route_kind)
                                             from src.ops_status import note_rejection
 
                                             note_rejection()
                                             logger.error(
                                                 "Order rejected %s %s class=%s http=%s "
-                                                "exchange_index=omitted ticker_field=ticker detail=%s",
+                                                "exchange_index=%s ticker_field=ticker detail=%s",
                                                 ticker,
                                                 trade_side,
                                                 route_kind,
                                                 result.get("status_code"),
+                                                int(market.get("exchange_index") or 0),
                                                 result.get("error"),
                                             )
                                         action_taken = {

@@ -23,6 +23,19 @@ logger = setup_logging("kalshi_client")
 SERIES_FEE_CACHE_TTL_SEC = 3600.0
 
 
+def _exchange_index_or_zero(value: object) -> int:
+    """Market ``exchange_index``. Missing or unusable values stay on shard 0."""
+    if value is None or value == "":
+        return 0
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return 0
+    if index < 0:
+        return 0
+    return index
+
+
 def _optional_float(v: object) -> Optional[float]:
     if v is None or v == "":
         return None
@@ -1066,6 +1079,8 @@ class KalshiClient:
             "title":           raw.get("title", ""),
             "event_ticker":    _first_event_ticker(raw),
             "series_ticker":   raw.get("series_ticker") or "",
+            # GET /markets exchange_index is the shard. Absent means the catch-all shard.
+            "exchange_index":  _exchange_index_or_zero(raw.get("exchange_index")),
             "subtitle":        raw.get("subtitle") or raw.get("yes_sub_title", ""),
             "category":        raw.get("category", ""),
             "yes_price":       yes_price,
@@ -1466,6 +1481,25 @@ class KalshiClient:
     # ── Portfolio ─────────────────────────────────────────────────────────────
 
     @staticmethod
+    def _shard_cash_dollars(breakdown: object) -> Dict[int, float]:
+        """``balance_breakdown[].balance`` is a fixed-point dollar string, not cents."""
+        out: Dict[int, float] = {}
+        if not isinstance(breakdown, list):
+            return out
+        for row in breakdown:
+            if not isinstance(row, dict):
+                continue
+            try:
+                index = int(row.get("exchange_index"))
+                dollars = float(row.get("balance"))
+            except (TypeError, ValueError):
+                continue
+            if index < 0 or dollars < 0:
+                continue
+            out[index] = dollars
+        return out
+
+    @staticmethod
     def _parse_portfolio_balance_payload(data: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize Kalshi ``GET /portfolio/balance`` JSON to dollar fields used by the bot/UI."""
         # Kalshi v2 schema variants:
@@ -1494,9 +1528,11 @@ class KalshiClient:
                     positions_value_cents = 0.0
 
         out: Dict[str, Any] = {
+            # Unscoped GET /portfolio/balance includes every exchange index.
             "cash": available_cents / 100.0,
             "positions_value": positions_value_cents / 100.0,
             "portfolio_value": (available_cents + positions_value_cents) / 100.0,
+            "shard_cash": KalshiClient._shard_cash_dollars(data.get("balance_breakdown")),
         }
         if isinstance(raw_bal, dict):
             for key in ("blocked_balance", "reserved_balance", "payout_balance"):
@@ -1825,6 +1861,7 @@ class KalshiClient:
         reduce_only: bool = False,
         time_in_force: str = "immediate_or_cancel",
         client_order_id: Optional[str] = None,
+        exchange_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Create order using Kalshi recommended V2 endpoint (quantity + price + TIF).
 
@@ -1868,6 +1905,10 @@ class KalshiClient:
             }
             if reduce_only:
                 body["reduce_only"] = True
+            # Create Order V2: ticker auto-routes when exchange_index is omitted.
+            # A known market shard is sent so the order does not default to shard 0.
+            if exchange_index is not None:
+                body["exchange_index"] = int(exchange_index)
 
             log_label = f"V2 {tif} {action} {side_yesno} {t_eff} x{q} @ {body['price']} ({book_side})"
             try:
@@ -2036,6 +2077,77 @@ class KalshiClient:
                 raise
             return []
 
+    async def transfer_event_contract_shards(
+        self,
+        *,
+        source_shard: int,
+        destination_shard: int,
+        amount_dollars: float,
+        client_transfer_id: str,
+    ) -> Dict[str, Any]:
+        """Move primary-account event-contract cash between shards.
+
+        ``POST /trade-api/v2/portfolio/intra_exchange_instance_transfer``.
+        ``amount`` is centicents (1 dollar = 10_000). ``source`` and
+        ``destination`` are both ``event_contract``. A 200 only means Kalshi
+        accepted the transfer; it is applied asynchronously. Reusing
+        ``client_transfer_id`` returns 409 and does not create a second transfer.
+        """
+        cents = int(round(float(amount_dollars) * 100.0))
+        if cents < 1:
+            return {"ok": False, "ambiguous": False, "error": "transfer amount is below one cent"}
+        centicents = cents * 100
+        body = {
+            "source": "event_contract",
+            "destination": "event_contract",
+            "amount": centicents,
+            "source_exchange_shard": int(source_shard),
+            "destination_exchange_shard": int(destination_shard),
+            "client_transfer_id": str(client_transfer_id),
+        }
+        path = "/trade-api/v2/portfolio/intra_exchange_instance_transfer"
+        try:
+            response = await self._http_post_signed_json(path, body, timeout=15.0)
+        except Exception as exc:
+            return {"ok": False, "ambiguous": True, "error": type(exc).__name__, "body": body}
+        code = int(getattr(response, "status_code", 0) or 0)
+        payload: Dict[str, Any] = {}
+        try:
+            raw = response.json() if hasattr(response, "json") else {}
+            if isinstance(raw, dict):
+                payload = raw
+        except Exception:
+            payload = {}
+        if code == 200:
+            self.invalidate_portfolio_balance_cache()
+            return {
+                "ok": True,
+                "ambiguous": False,
+                "transfer_id": str(payload.get("transfer_id") or ""),
+                "status_code": 200,
+                "body": body,
+            }
+        if code == 409:
+            self.invalidate_portfolio_balance_cache()
+            return {
+                "ok": True,
+                "ambiguous": True,
+                "already_accepted": True,
+                "status_code": 409,
+                "error": "transfer id already accepted",
+                "body": body,
+            }
+        detail = str(payload.get("message") or payload.get("details") or payload.get("code") or code)
+        # 5xx is not proof the transfer was rejected.
+        ambiguous = code >= 500 or code == 0
+        return {
+            "ok": False,
+            "ambiguous": ambiguous,
+            "status_code": code,
+            "error": detail,
+            "body": body,
+        }
+
     async def place_buy_ioc_limit(
         self,
         market_id: str,
@@ -2043,6 +2155,7 @@ class KalshiClient:
         quantity: int,
         limit_price_dollars: float,
         client_order_id: Optional[str] = None,
+        exchange_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Aggressive **limit** buy with ``immediate_or_cancel`` (IOC).
 
@@ -2064,6 +2177,7 @@ class KalshiClient:
             reduce_only=False,
             time_in_force="immediate_or_cancel",
             client_order_id=client_order_id,
+            exchange_index=exchange_index,
         )
         if not out.get("error") and kalshi_order_filled_contracts(out) > 0:
             self.invalidate_market_detail_cache(market_id)

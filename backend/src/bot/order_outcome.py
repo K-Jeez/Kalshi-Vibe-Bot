@@ -18,6 +18,8 @@ def classify_routing_error(detail: str, status_code: Optional[int] = None) -> st
         return "exchange_shard_user"
     if "exchange sharding" in text or "exchange user not found" in text:
         return "exchange_shard_user"
+    if "no balance on the exchange index" in text or "intra_exchange_instance_transfer" in text:
+        return "exchange_shard_balance"
     if code == 404:
         return "not_found"
     if code == 429 or "429" in text:
