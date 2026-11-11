@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     # Series with no usable live feed are skipped before the model. Comma-separated prefixes.
     vibe_live_facts_enabled: bool = True
     vibe_prefilter_series_prefixes: str = (
-        "KXESOCCER,KXCS2,KXCSGO,KXDOTA,KXVALORANT,KXLOL,KXITF,KXCHALLENGER"
+        "KXESOCCER,KXCS2,KXCSGO,KXDOTA,KXVALORANT,KXLOL,KXITF,KXCHALLENGER,KXATPCHALLENGER,KXWTACHALLENGER"
     )
     vibe_numeric_prefilter_series_prefixes: str = "KXSILVER,KXGOLD,KXINX,KXNDX,KXSPX"
 

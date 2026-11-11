@@ -227,7 +227,7 @@ class DecisionEngine:
         reasoning_single = str(ai_result.get("reasoning", ""))
         ai_no = 100 - ai_yes
         side_label = "YES" if direction == "YES" else ("NO" if direction == "NO" else "no side")
-        ai_side_pct = ai_yes if direction == "YES" else (ai_no if direction == "NO" else 0)
+        ai_side_pct = ai_yes if direction == "YES" else (ai_no if direction == "NO" else ai_yes)
         implied_label = (
             f"market implied YES {strat['market_implied_probability_pct']}%"
             if direction not in ("YES", "NO")
@@ -430,5 +430,5 @@ class DecisionEngine:
             "evidence": xai_raw.get("evidence", []) if isinstance(xai_raw.get("evidence", []), list) else [],
             "xai_analysis": xai_analysis,
             "action_summary": action_summary,
-            "ai_probability_for_side_pct": int(ai_yes if direction == "YES" else (ai_no if direction == "NO" else 0)),
+            "ai_probability_for_side_pct": int(ai_yes if direction == "YES" else (ai_no if direction == "NO" else ai_yes)),
         }

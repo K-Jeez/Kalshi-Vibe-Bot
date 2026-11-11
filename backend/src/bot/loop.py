@@ -1607,17 +1607,25 @@ async def scan_and_trade(
                     )
                 from src.live_facts import live_fact_for_market, note_live_fact_skip, series_of
 
-                fact = await live_fact_for_market(members[0])
-                if fact["skip"]:
-                    note_live_fact_skip(series_of(members[0]), fact["reason"])
+                skip_fact = None
+                member_facts = []
+                for member in members:
+                    fact = await live_fact_for_market(member)
+                    if fact["skip"]:
+                        skip_fact = fact
+                        break
+                    member_facts.append(fact)
+                if skip_fact is not None:
+                    note_live_fact_skip(series_of(members[0]), skip_fact["reason"])
                     for xm in members:
                         batch_completed_this_sweep.add(str(xm.get("id") or ""))
                     continue
-                if fact["context"]:
-                    for leg in legs:
-                        leg["market_description"] = (
-                            str(leg.get("market_description") or "") + "\n\n" + fact["context"]
-                        ).strip()
+                for leg, fact in zip(legs, member_facts):
+                    if not fact["context"]:
+                        continue
+                    leg["market_description"] = (
+                        str(leg.get("market_description") or "") + "\n\n" + fact["context"]
+                    ).strip()
                 try:
                     decision = await decision_engine.analyze_event_batch(
                         event_ticker=et_key,

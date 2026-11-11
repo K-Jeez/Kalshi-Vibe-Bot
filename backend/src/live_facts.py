@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -21,8 +22,11 @@ from src.logger import setup_logging
 logger = setup_logging("live_facts")
 
 _CACHE_SEC = 20.0
+_NEG_CACHE_SEC = 45.0
+_NWS_MAX_AGE_SEC = 90 * 60
 _TIMEOUT = 2.5
 _SKIP_LOG_SEC = 15 * 60
+_MISS = object()
 _cache: dict[str, tuple[float, object]] = {}
 _skip_logged: dict[str, float] = {}
 
@@ -52,6 +56,8 @@ _DEFAULT_NO_SOURCE = (
     "KXLOL",
     "KXITF",
     "KXCHALLENGER",
+    "KXATPCHALLENGER",
+    "KXWTACHALLENGER",
 )
 _DEFAULT_NUMERIC_NO_SOURCE = ("KXSILVER", "KXGOLD", "KXINX", "KXNDX", "KXSPX")
 _ICAO = re.compile(r"\b(K[A-Z]{3})\b")
@@ -66,10 +72,13 @@ def series_of(market: dict) -> str:
     return raw.split("-", 1)[0]
 
 
-def _prefixes(raw: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
-    text = str(raw or "").strip()
-    if not text:
+def _prefixes(raw: Optional[str], fallback: tuple[str, ...]) -> tuple[str, ...]:
+    """None means the built-in list. An empty string means no prefixes."""
+    if raw is None:
         return fallback
+    text = str(raw).strip()
+    if not text:
+        return ()
     return tuple(part.strip().upper() for part in text.split(",") if part.strip())
 
 
@@ -87,14 +96,22 @@ def note_live_fact_skip(series: str, reason: str) -> None:
 
 def _cached(key: str):
     hit = _cache.get(key)
-    if hit and time.monotonic() - hit[0] < _CACHE_SEC:
-        return hit[1]
-    return None
+    if not hit:
+        return None
+    stored_at, value = hit
+    ttl = _NEG_CACHE_SEC if value is _MISS else _CACHE_SEC
+    if time.monotonic() - stored_at >= ttl:
+        return None
+    return value
 
 
 def _store(key: str, value):
     _cache[key] = (time.monotonic(), value)
     return value
+
+
+def _remember_miss(key: str) -> None:
+    _store(key, _MISS)
 
 
 async def _get_json(url: str, headers: Optional[dict] = None):
@@ -146,6 +163,8 @@ def _fact_block(lines: list[str]) -> str:
 async def _crypto_context(market: dict, product: str) -> Optional[str]:
     key = f"crypto:{product}"
     cached = _cached(key)
+    if cached is _MISS:
+        return None
     if cached is None:
         spot_body = await _get_json(f"https://api.coinbase.com/v2/prices/{product}/spot")
         candles = await _get_json(
@@ -170,6 +189,7 @@ async def _crypto_context(market: dict, product: str) -> Optional[str]:
                 mean = sum(closes) / len(closes)
                 vol = (sum((item - mean) ** 2 for item in closes) / len(closes)) ** 0.5
         if amount is None:
+            _remember_miss(key)
             return None
         cached = _store(key, {"spot": amount, "vol": vol})
     spot = float(cached["spot"])
@@ -189,6 +209,33 @@ async def _crypto_context(market: dict, product: str) -> Optional[str]:
     return _fact_block(lines)
 
 
+def _nws_observation(props: object) -> Optional[dict]:
+    if not isinstance(props, dict):
+        return None
+    raw = props.get("temperature")
+    value = raw.get("value") if isinstance(raw, dict) else None
+    try:
+        temp_c = float(value)
+    except (TypeError, ValueError):
+        return None
+    observed = str(props.get("timestamp") or "").strip()
+    if not observed:
+        return None
+    try:
+        parsed = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return {
+        "c": temp_c,
+        "f": temp_c * 9.0 / 5.0 + 32.0,
+        "observed_at": observed,
+        "stale": age > _NWS_MAX_AGE_SEC,
+    }
+
+
 async def _temp_context(market: dict) -> Optional[str]:
     blob = " ".join(
         str(market.get(key) or "")
@@ -200,25 +247,25 @@ async def _temp_context(market: dict) -> Optional[str]:
     station = found[0]
     key = f"nws:{station}"
     cached = _cached(key)
+    if cached is _MISS:
+        return None
     if cached is None:
         body = await _get_json(
             f"https://api.weather.gov/stations/{station}/observations/latest",
             headers={"User-Agent": "kalshi-vibe-bot", "Accept": "application/geo+json"},
         )
         props = body.get("properties") if isinstance(body, dict) else None
-        temp_c = None
-        if isinstance(props, dict):
-            raw = props.get("temperature")
-            value = raw.get("value") if isinstance(raw, dict) else None
-            try:
-                temp_c = float(value) if value is not None else None
-            except (TypeError, ValueError):
-                temp_c = None
-        if temp_c is None:
+        parsed = _nws_observation(props)
+        if parsed is None:
+            _remember_miss(key)
             return None
-        cached = _store(key, {"c": temp_c, "f": temp_c * 9.0 / 5.0 + 32.0})
+        cached = _store(key, parsed)
+    if cached.get("stale"):
+        return None
     lines = [
         f"Source: NWS api.weather.gov latest observation at {station}.",
+        "Settlement uses the official NWS climate report, not this observation.",
+        f"Observation time: {cached['observed_at']}",
         f"Temperature: {cached['f']:.1f} F ({cached['c']:.1f} C)",
     ]
     strike = _strike(market)
@@ -231,34 +278,76 @@ async def _temp_context(market: dict) -> Optional[str]:
     return _fact_block(lines)
 
 
-def _team_names(event: dict) -> list[str]:
-    names = []
+def _norm_name(text: str) -> str:
+    cleaned = text.lower().replace("&", " and ")
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned)
+    return " ".join(cleaned.split())
+
+
+def _split_kalshi_matchup(title: str) -> Optional[tuple[str, str]]:
+    """Split on Kalshi's ``vs`` separator only. ``at`` can be part of a school name."""
+    parts = re.split(r"\s+vs\.?\s+", title.strip(), maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) != 2:
+        return None
+    left, right = _norm_name(parts[0]), _norm_name(parts[1])
+    if not left or not right or left == right:
+        return None
+    return left, right
+
+
+def _team_identities(team: dict) -> set[str]:
+    """Full names, location plus nickname, and abbreviation. Whole-string equality only."""
+    if not isinstance(team, dict):
+        return set()
+    fields = []
+    for key in ("displayName", "shortDisplayName", "location", "name", "nickname", "abbreviation"):
+        value = str(team.get(key) or "").strip()
+        if value:
+            fields.append(value)
+    location = str(team.get("location") or "").strip()
+    nickname = str(team.get("nickname") or team.get("name") or "").strip()
+    if location and nickname and nickname.lower() != location.lower():
+        fields.append(f"{location} {nickname}")
+    out = set()
+    for value in fields:
+        normalized = _norm_name(value)
+        if normalized:
+            out.add(normalized)
+    return out
+
+
+def _competitors(event: dict) -> list[dict]:
     competitions = event.get("competitions") if isinstance(event, dict) else None
-    if not isinstance(competitions, list):
-        return names
-    for comp in competitions:
-        for side in comp.get("competitors") or []:
-            team = side.get("team") if isinstance(side, dict) else None
-            if not isinstance(team, dict):
-                continue
-            for key in ("displayName", "shortDisplayName", "abbreviation", "name"):
-                value = str(team.get(key) or "").strip().lower()
-                if len(value) >= 3:
-                    names.append(value)
-    return names
+    if not isinstance(competitions, list) or not competitions:
+        return []
+    sides = competitions[0].get("competitors") or []
+    return [side for side in sides if isinstance(side, dict)]
+
+
+def _side_matches(competitors: list[dict], side: str) -> list[dict]:
+    hits = []
+    for competitor in competitors:
+        if side in _team_identities(competitor.get("team") or {}):
+            hits.append(competitor)
+    return hits
 
 
 def match_espn_event(events: list, title: str) -> Optional[dict]:
-    """Return one event only when both title sides appear in that event's names."""
-    parts = re.split(r"\bvs\.?\b|\bat\b|\bv\b", title.lower())
-    sides = [part.strip(" -–") for part in parts if len(part.strip()) >= 3]
-    if len(sides) < 2:
+    """One event, and only when each title side equals one different team on it.
+
+    ``Georgia`` does not match ``Georgia Tech``. ``University at Albany`` stays
+    one name. Anything ambiguous returns nothing.
+    """
+    split = _split_kalshi_matchup(title)
+    if split is None:
         return None
-    left, right = sides[0], sides[1]
+    left, right = split
     hits = []
-    for event in events:
-        names = " ".join(_team_names(event))
-        if left in names and right in names:
+    for event in events or []:
+        competitors = _competitors(event)
+        left_hits = _side_matches(competitors, left)
+        right_hits = _side_matches(competitors, right)
+        if len(left_hits) == 1 and len(right_hits) == 1 and left_hits[0] is not right_hits[0]:
             hits.append(event)
     if len(hits) != 1:
         return None
@@ -287,12 +376,17 @@ def _score_line(event: dict) -> Optional[str]:
 async def _sports_context(market: dict, sport: str, league: str) -> Optional[str]:
     key = f"espn:{sport}:{league}"
     cached = _cached(key)
+    if cached is _MISS:
+        return None
     if cached is None:
         body = await _get_json(
             f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard"
         )
         events = body.get("events") if isinstance(body, dict) else None
-        cached = _store(key, events if isinstance(events, list) else [])
+        if not isinstance(events, list):
+            _remember_miss(key)
+            return None
+        cached = _store(key, events)
     title = f"{market.get('title') or ''} {market.get('subtitle') or ''}"
     event = match_espn_event(cached or [], title)
     if event is None:

@@ -94,7 +94,7 @@ def test_crypto_proxy_is_labeled_and_a_failed_spot_skips(monkeypatch):
 def test_nws_observation_uses_the_station_in_the_rules(monkeypatch):
     async def nws(url, headers=None):
         assert "KMIA" in url
-        return {"properties": {"temperature": {"value": 26.0}}}
+        return {"properties": {"temperature": {"value": 26.0}, "timestamp": "2099-01-01T00:00:00Z"}}
 
     monkeypatch.setattr("src.live_facts._get_json", nws)
     got = asyncio.run(live_fact_for_market({
@@ -108,3 +108,136 @@ def test_nws_observation_uses_the_station_in_the_rules(monkeypatch):
     assert got["skip"] is False
     assert "KMIA" in got["context"]
     assert "78.8 F" in got["context"]
+    assert "official NWS" in got["context"]
+    assert "2099-01-01T00:00:00Z" in got["context"]
+
+
+def _team(display: str, location: str, nickname: str, abbreviation: str) -> dict:
+    return {
+        "team": {
+            "displayName": display,
+            "shortDisplayName": location,
+            "location": location,
+            "nickname": nickname,
+            "name": nickname,
+            "abbreviation": abbreviation,
+        },
+        "score": "0",
+    }
+
+
+def _event(*teams: dict) -> dict:
+    return {"competitions": [{"competitors": list(teams), "status": {"type": {"shortDetail": "Final"}}}]}
+
+
+def test_espn_match_rejects_near_name_collisions_and_keeps_university_at():
+    georgia_tech = _event(
+        _team("Georgia Tech Yellow Jackets", "Georgia Tech", "Yellow Jackets", "GT"),
+        _team("Kentucky Wildcats", "Kentucky", "Wildcats", "UK"),
+    )
+    georgia = _event(
+        _team("Georgia Bulldogs", "Georgia", "Bulldogs", "UGA"),
+        _team("Kentucky Wildcats", "Kentucky", "Wildcats", "UK"),
+    )
+    utah_state = _event(
+        _team("Utah State Aggies", "Utah State", "Aggies", "USU"),
+        _team("Colorado State Rams", "Colorado State", "Rams", "CSU"),
+    )
+    utah = _event(
+        _team("Utah Utes", "Utah", "Utes", "UTAH"),
+        _team("Colorado Buffaloes", "Colorado", "Buffaloes", "COLO"),
+    )
+    miami_ohio = _event(
+        _team("Miami Hurricanes", "Miami", "Hurricanes", "MIA"),
+        _team("Miami (OH) RedHawks", "Miami (OH)", "RedHawks", "MOH"),
+    )
+    miami_only = _event(
+        _team("Miami Hurricanes", "Miami", "Hurricanes", "MIA"),
+        _team("Florida State Seminoles", "Florida State", "Seminoles", "FSU"),
+    )
+    albany = _event(
+        _team("University at Albany Great Danes", "University at Albany", "Great Danes", "ALB"),
+        _team("Binghamton Bearcats", "Binghamton", "Bearcats", "BING"),
+    )
+    wrong_albany = _event(
+        _team("Albany Great Danes", "Albany", "Great Danes", "ALB"),
+        _team("Binghamton Bearcats", "Binghamton", "Bearcats", "BING"),
+    )
+    assert match_espn_event([georgia_tech], "Georgia vs Kentucky") is None
+    assert match_espn_event([georgia_tech, georgia], "Georgia vs Kentucky") is georgia
+    assert match_espn_event([utah_state], "Utah vs Colorado") is None
+    assert match_espn_event([utah_state, utah], "Utah vs Colorado") is utah
+    assert match_espn_event([miami_only, miami_ohio], "Miami vs Miami (OH)") is miami_ohio
+    assert match_espn_event([albany, wrong_albany], "University at Albany vs Binghamton") is albany
+    assert match_espn_event([wrong_albany], "University at Albany vs Binghamton") is None
+
+
+def test_btc_ladder_keeps_each_legs_strike(monkeypatch):
+    async def spot(url, headers=None):
+        if "candles" in url:
+            return [[0, 1, 2, 1, 100.0], [0, 1, 2, 1, 101.0], [0, 1, 2, 1, 102.0]]
+        return {"data": {"amount": "100"}}
+
+    monkeypatch.setattr("src.live_facts._get_json", spot)
+    from src.live_facts import _cache
+    _cache.clear()
+    low = asyncio.run(live_fact_for_market({
+        "series_ticker": "KXBTCD", "id": "KXBTCD-T100", "title": "BTC above 100", "floor_strike": 100,
+    }))
+    high = asyncio.run(live_fact_for_market({
+        "series_ticker": "KXBTCD", "id": "KXBTCD-T110", "title": "BTC above 110", "floor_strike": 110,
+    }))
+    assert "Strike or threshold: 100.0000" in low["context"]
+    assert "Strike or threshold: 110.0000" not in low["context"]
+    assert "Strike or threshold: 110.0000" in high["context"]
+    assert "Strike or threshold: 100.0000" not in high["context"]
+
+
+def test_failed_spot_is_not_fetched_again_immediately(monkeypatch):
+    calls = {"n": 0}
+
+    async def down(url, headers=None):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr("src.live_facts._get_json", down)
+    from src.live_facts import _cache
+    _cache.clear()
+    first = asyncio.run(live_fact_for_market({"series_ticker": "KXBTCD", "id": "KXBTCD-1"}))
+    after = calls["n"]
+    second = asyncio.run(live_fact_for_market({"series_ticker": "KXBTCD", "id": "KXBTCD-2"}))
+    assert first["skip"] and second["skip"]
+    assert calls["n"] == after
+
+
+def test_empty_prefilter_lists_disable_the_skip(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "vibe_prefilter_series_prefixes", "")
+    monkeypatch.setattr(settings, "vibe_numeric_prefilter_series_prefixes", "")
+    decision = asyncio.run(live_fact_for_market({"id": "KXESOCCERGAME-1", "series_ticker": "KXESOCCERGAME"}))
+    assert decision["skip"] is False
+    silver = asyncio.run(live_fact_for_market({"id": "KXSILVER15M-1", "series_ticker": "KXSILVER15M"}))
+    assert silver["skip"] is False
+
+
+def test_atp_and_wta_challenger_prefixes_are_prefiltered():
+    for series in ("KXATPCHALLENGER", "KXWTACHALLENGER"):
+        decision = asyncio.run(live_fact_for_market({"id": f"{series}-1", "series_ticker": series}))
+        assert decision["skip"] is True
+
+
+def test_stale_nws_observation_is_dropped(monkeypatch):
+    async def nws(url, headers=None):
+        return {"properties": {"temperature": {"value": 10.0}, "timestamp": "2000-01-01T00:00:00Z"}}
+
+    monkeypatch.setattr("src.live_facts._get_json", nws)
+    from src.live_facts import _cache
+    _cache.clear()
+    got = asyncio.run(live_fact_for_market({
+        "series_ticker": "KXTEMPMIAH",
+        "id": "KXTEMPMIAH-OLD",
+        "rules_primary": "Station KMIA.",
+    }))
+    assert got["skip"] is True
+    assert got["context"] == ""
