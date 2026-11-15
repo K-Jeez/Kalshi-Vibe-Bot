@@ -219,14 +219,15 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Position size uses <strong className="text-white">quarter Kelly</strong> from Grok&apos;s P(YES) and the executable
-            ask. One entry, including the estimated entry fee, is capped at <strong className="text-white">2.5% of available cash</strong>.
+            Position size uses <strong className="text-white">quarter Kelly</strong> from a blend of Grok and the market.
+            There is no one-contract minimum. The cash cap starts at <strong className="text-white">2.5% of available cash</strong> and moves between 1% and 5% from settled results.
             The 0.07 coefficient is used only when the series fee type is quadratic and its fee multiplier is known. That figure is an estimate, rounded up to the next cent. It is not the billed fee. If the series schedule is missing, the bot does not treat expected value as proven positive and does not treat the 2.5% cap as satisfied. The exchange fill fee is stored when the order response includes it.
             Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
             edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
             no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
-            Sports markets use a higher volume floor at scan time and +5 minutes exit grace. Stop-loss compares{' '}
-            <strong className="text-white">entry price</strong> to <strong className="text-white">Est. Value</strong> per contract after grace
+            Sports markets use a higher volume floor at scan time. Stop-loss compares{' '}
+            <strong className="text-white">entry price</strong> to the{' '}
+            <strong className="text-white">executable best bid</strong> with no wait after entry
             (sports get +5 minutes). Contrarian longshots still get a fixed stricter edge and AI floor in code.
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
@@ -268,7 +269,7 @@ export const Settings: React.FC = () => {
                 </label>
                 <label className="flex min-h-0 flex-col gap-1">
                   <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Stop-loss drawdown (% below entry vs Est. Value)
+                    Stop-loss drawdown (% below entry vs best bid)
                   </span>
                   <input
                     type="text"
@@ -304,7 +305,7 @@ export const Settings: React.FC = () => {
                 <div>
                   <p className="text-sm font-medium text-white">Stop-loss auto sells</p>
                   <p className="text-xs text-white/80 mt-0.5">
-                    When enabled, the bot can exit when Est. Value has fallen far enough below your entry price (manual sells always work).
+                    When enabled, the bot can exit when the best bid has fallen far enough below your entry price (manual sells always work).
                   </p>
                 </div>
                 <button

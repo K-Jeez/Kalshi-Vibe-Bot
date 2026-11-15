@@ -22,7 +22,7 @@ export const Header: React.FC = () => {
   const docVisible = useDocumentVisible()
   const prevVisibleRef = useRef(docVisible)
 
-  const { data: wsData } = useWebSocket('ws://localhost:8000/ws')
+  const { data: wsData } = useWebSocket('')
 
   useEffect(() => {
     if (!wsData) return

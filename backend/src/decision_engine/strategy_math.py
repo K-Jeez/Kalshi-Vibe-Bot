@@ -137,17 +137,16 @@ def kelly_contracts_for_order(
 ) -> Tuple[int, str]:
     """Whole-contract size: quarter Kelly, then the cash cap.
 
-    If quarter Kelly is positive but floors to zero contracts, one contract is
-    still allowed when the cash cap can pay for it (``single_contract_retry``).
+    A quarter-Kelly fraction that floors to zero contracts is not raised to one.
+    There is no minimum bet size.
 
     Returns ``(quantity, tag)`` where ``tag`` is ``quarter_kelly``, ``cash_capped``,
-    ``single_contract_retry``, or ``none``.
+    or ``none``.
     """
     from src.decision_engine.strategy_gates import KELLY_FRACTION
 
     if win_probability is None:
         k_full = kelly_contracts_for_side(bankroll, side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
-        full_f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
     else:
         ya, na = executable_asks(yes_ask, no_ask, yes_mid, no_mid)
         price = ya if str(side).upper() == "YES" else na
@@ -174,13 +173,6 @@ def kelly_contracts_for_order(
         if q < 1:
             return 0, "none"
         return q, "cash_capped" if q < int(k) else "quarter_kelly"
-
-    f = float(full_f) * float(KELLY_FRACTION)
-    if f > 1e-12:
-        q = _cap(1)
-        if q < 1:
-            return 0, "none"
-        return q, "single_contract_retry"
     return 0, "none"
 
 

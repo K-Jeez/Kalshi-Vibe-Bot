@@ -26,8 +26,9 @@ def test_effective_min_edge_matches_settings():
     assert effective_min_edge_for_market(5, "Bitcoin") == 5
 
 
-def test_exit_grace_sports_extra():
-    assert exit_grace_minutes_for_market(10, "A vs B") == 15
+def test_exit_grace_is_removed():
+    assert exit_grace_minutes_for_market(10, "A vs B") == 0
+    assert exit_grace_minutes_for_market(10, "Bitcoin") == 0
 
 
 def test_autonomous_max_edge():

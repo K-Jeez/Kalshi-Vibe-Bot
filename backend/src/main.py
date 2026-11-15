@@ -40,6 +40,17 @@ def _cors_allow_origins() -> list[str]:
     return ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 
+# Phone on the home network loads the UI from a private address, not localhost.
+_PRIVATE_ORIGIN = (
+    r"https?://("
+    r"localhost|127\.0\.0\.1|"
+    r"10(?:\.\d{1,3}){3}|"
+    r"192\.168(?:\.\d{1,3}){2}|"
+    r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}"
+    r")(?::\d+)?$"
+)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -131,6 +142,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allow_origins(),
+    allow_origin_regex=None if (settings.cors_origins or "").strip() else _PRIVATE_ORIGIN,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

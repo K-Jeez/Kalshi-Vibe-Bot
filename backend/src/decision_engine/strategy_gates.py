@@ -21,9 +21,8 @@ MAX_KELLY_BANKROLL_PCT = 0.025
 EVENT_EXPOSURE_CAP_FRACTION = 0.05
 QUADRATIC_FEE_COEFFICIENT = 0.07
 
-# Sports: stricter scan (volume) and exit grace only — min edge uses your Settings value as-is.
+# Sports: stricter scan volume only. Min edge uses the Settings value as-is.
 _SPORTS_MIN_VOLUME_FLOOR = 2000.0
-_SPORTS_EXIT_GRACE_EXTRA_MINUTES = 5.0
 
 # High AI % on mid-priced contracts historically lost large despite decent win rate.
 _OVERCONF_AI_MIN_PCT = 75
@@ -60,10 +59,9 @@ def effective_min_edge_for_market(min_edge_base: float, title: str, event_ticker
 
 
 def exit_grace_minutes_for_market(settings_grace_minutes: float, title: str, event_ticker: str = "") -> float:
-    g = max(0.0, float(settings_grace_minutes))
-    if is_sports_market_title(title, event_ticker):
-        return g + _SPORTS_EXIT_GRACE_EXTRA_MINUTES
-    return g
+    """Exit grace is removed. The arguments are ignored so old callers stay safe."""
+    del settings_grace_minutes, title, event_ticker
+    return 0.0
 
 
 # GET /series/{series_ticker} documents these fee_type values.

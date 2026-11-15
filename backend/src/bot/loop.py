@@ -55,7 +55,6 @@ from src.decision_engine.strategy_gates import (
     autonomous_buy_gate_failure,
     effective_min_edge_for_market,
     effective_scan_min_volume,
-    exit_grace_minutes_for_market,
     all_in_entry_dollars,
     event_exposure_room,
     premodel_entry_block,
@@ -713,6 +712,10 @@ async def monitor_positions(
                 TRADE_MODE,
             )
             return
+        prior_marks = {
+            pos.id: (float(pos.current_price or 0.0), None if pos.bid_price is None else float(pos.bid_price))
+            for pos in positions
+        }
 
         # Live: Kalshi ``GET /portfolio/positions`` → DB (qty, cost, avg, fees) + settlement + flat-row patches.
         live_reconcile_ran_ok = False
@@ -765,7 +768,9 @@ async def monitor_positions(
             return
 
         for pos in positions:
-            prev_mark_cents = int(round(float(pos.current_price or 0.0) * 100))
+            prev_last, prev_bid = prior_marks.get(pos.id, (float(pos.current_price or 0.0), pos.bid_price))
+            prev_mark_cents = int(round(float(prev_last or 0.0) * 100))
+            prev_bid_cents = None if prev_bid is None else int(round(float(prev_bid) * 100))
             # ``reconcile_live_positions_from_kalshi`` already called ``get_market`` per open row via
             # ``recompute_open_live_position_unrealized_pnl``. Skip duplicate fetches when safe so each scan
             # does not pay 2× Kalshi market latency (still fetch when we need the live book).
@@ -837,12 +842,18 @@ async def monitor_positions(
             cash_basis = open_position_cash_basis_dollars(pos)
 
             intrinsic_resolved_mark = resolution_intrinsic_mark_dollars(pos)
+            from src.reconcile.open_positions import market_trading_closed
 
-            pos.bid_price = float(mark_last)
+            trading_closed = market_trading_closed(pos)
+            if market is not None:
+                pos.bid_price = float(mark_last)
+            elif pos.bid_price is None:
+                pos.bid_price = float(mark_last)
             pos.current_price = float(mark_last)
             pos.unrealized_pnl = current_value - cash_basis
             new_mark_cents = int(round(float(mark_last) * 100))
-            if new_mark_cents != prev_mark_cents:
+            new_bid_cents = int(round(float(pos.bid_price or 0.0) * 100))
+            if new_mark_cents != prev_mark_cents or new_bid_cents != prev_bid_cents:
                 record_activity(
                     {
                         "event_type": "mark",
@@ -850,8 +861,8 @@ async def monitor_positions(
                         "event_ticker": getattr(pos, "event_ticker", None),
                         "side": pos.side,
                         "quantity": int(pos.quantity or 0),
-                        "fill_price": float(mark_last),
-                        "detail": f"mark {prev_mark_cents}c -> {new_mark_cents}c",
+                        "fill_price": float(pos.bid_price or 0.0),
+                        "detail": f"bid {new_bid_cents}c last {new_mark_cents}c",
                     }
                 )
 
@@ -859,6 +870,9 @@ async def monitor_positions(
             # or an official resolved intrinsic (winning YES legs often have **no bids** while ``finalized``).
             # ``live_best_bid_dollars`` may still read ``yes_price`` composite and wrongly clear dead-market
             # state while the dashboard bid column shows 0¢.
+            if trading_closed:
+                pos.awaiting_settlement = True
+                continue
             if mark_last > 0:
                 from src.bot.exit_backoff import clear_exit_backoff
 
@@ -880,18 +894,11 @@ async def monitor_positions(
                     )
 
             exit_reason: Optional[str] = None
-            grace_min = exit_grace_minutes_for_market(
-                float(getattr(settings, "exit_grace_minutes", 10.0)),
-                str(getattr(pos, "market_title", "") or ""),
-                str(getattr(pos, "event_ticker", "") or ""),
-            )
-            past_grace = _position_age_minutes_utc(pos.opened_at) >= grace_min
-
-            # Stop-loss: **entry price** vs display **Est. Value** per contract (fees excluded).
-            # Uses **current** ``STOP_LOSS_DRAWDOWN_PCT`` from Settings / tuning.
+            # Stop-loss uses the executable best bid and the current drawdown setting.
+            # There is no post-entry grace period.
             sl_pct = float(getattr(settings, "stop_loss_drawdown_pct", 0.0))
             stop_sales_on = bool(getattr(settings, "stop_loss_selling_enabled", False))
-            if stop_sales_on and not exit_reason and past_grace:
+            if stop_sales_on and not exit_reason:
                 if stop_loss_triggered_from_position(pos, stop_loss_drawdown_pct=sl_pct):
                     exit_reason = "stop_loss"
 
@@ -1128,7 +1135,9 @@ async def monitor_positions(
             )
 
             synced = await sync_open_position_qty_cost_from_kalshi(kalshi_client, pos, db=db)
-            if synced:
+            full_exit = pre_qty > 0 and int(sold_qty_trade) >= int(pre_qty)
+            portfolio_flat = synced and int(pos.quantity or 0) <= 0
+            if synced or full_exit:
                 ensure_fill_trade(
                     db,
                     action="sell",
@@ -1143,7 +1152,7 @@ async def monitor_positions(
                     exchange_order_id=str(sell_result.get("order_id") or ""),
                     realized_pnl=float(realized),
                 )
-                if int(pos.quantity or 0) <= 0:
+                if portfolio_flat or full_exit:
                     # Kalshi flat-row sync zeros qty and often avg_price; keep exit leg + basis for history/UI.
                     pos.quantity = int(sold_qty_trade)
                     if pre_entry_price > 1e-12:
@@ -1383,8 +1392,27 @@ async def scan_and_trade(
             if (p.market_id or "").strip()
         }
         from src.decision_engine.bucket_caps import load_bucket_caps
+        from src.decision_engine.history_sizing import (
+            calibrated_blend_weight,
+            expected_xai_cost_per_buy,
+            floor_for_edge,
+            load_edge_floors,
+            order_covers_model_cost,
+            load_model_spend,
+            load_settled_calibration,
+        )
 
         bucket_caps = load_bucket_caps(db)
+        calibration_rows = load_settled_calibration(db)
+        blend_weight_now = calibrated_blend_weight(
+            calibration_rows,
+            prior=float(getattr(settings, "vibe_model_blend_weight", 0.25) or 0.25),
+        )
+        edge_floors = load_edge_floors(
+            db, float(getattr(settings, "min_edge_to_buy_pct", 4) or 4)
+        )
+        model_costs, filled_buys = load_model_spend(db)
+        expected_model_cost = expected_xai_cost_per_buy(model_costs, filled_buys)
         try:
             from src.activity_log import list_unresolved_intents
 
@@ -1967,6 +1995,11 @@ async def scan_and_trade(
                         entry_fail = (
                             f"Skipped — gross upside ${gross:.2f}/contract below floor ({min_res:.2f})"
                         )
+                    if gross is not None and 0.10 - 1e-9 <= gross < 0.12 - 1e-9:
+                        decision["upside_band"] = "tight_10c"
+                        xa_band = decision.get("xai_analysis")
+                        if isinstance(xa_band, dict):
+                            xa_band["upside_band"] = "tight_10c"
                     if entry_fail:
                         action_taken = {
                             "status": "no_trade",
@@ -2018,9 +2051,14 @@ async def scan_and_trade(
                             yes_bid=market.get("yes_bid"),
                             yes_ask=y_ask_f,
                             yes_price=float(yes_price),
+                            weight=blend_weight_now,
                         )
                         stamp_blend(decision, blend)
                         entry_cap = cap_for_edge(bucket_caps, edge_now)
+                        eff_min_edge = max(
+                            float(eff_min_edge),
+                            floor_for_edge(edge_floors, edge_now, float(eff_min_edge)),
+                        )
                         risk_note = " (contrarian tier)" if risk_tier else ""
                         gate_fail = autonomous_buy_gate_failure(
                             side=trade_side,
@@ -2115,8 +2153,28 @@ async def scan_and_trade(
                                 one_contract_fits_cash=one_cost is not None and one_cost <= float(balance) + 1e-9,
                             )
                             quantity = sized
-                            if size_tag == "blend_floor":
-                                kelly_sizing_tag = size_tag
+                            if size_tag not in ("", "quarter_kelly") and size_tag != kelly_sizing_tag:
+                                kelly_sizing_tag = size_tag or kelly_sizing_tag
+                            if quantity >= 1 and not order_covers_model_cost(
+                                fee_inclusive_ev_dollars(
+                                    float(blend["win_probability"]),
+                                    float(trade_price),
+                                    int(quantity),
+                                    fee_multiplier=_fee.get("fee_multiplier"),
+                                    fee_type=_fee.get("fee_type"),
+                                ),
+                                expected_model_cost,
+                            ):
+                                quantity = 0
+                                kelly_sizing_tag = "model_cost"
+                                action_taken = {
+                                    "status": "no_trade",
+                                    "summary": (
+                                        "Skipped — this size does not cover the expected model cost "
+                                        f"(${expected_model_cost:.4f} per filled buy)"
+                                    ),
+                                    "signal": signal,
+                                }
                             if quantity < 1 and blend_ev_gate:
                                 action_taken = {
                                     "status": "no_trade",
@@ -2130,7 +2188,10 @@ async def scan_and_trade(
                                 }
                             if quantity < 1 and not (
                                 isinstance(action_taken, dict)
-                                and "expected value" in str(action_taken.get("summary") or "")
+                                and (
+                                    "expected value" in str(action_taken.get("summary") or "")
+                                    or "model cost" in str(action_taken.get("summary") or "")
+                                )
                             ):
                                 kelly_skip = kelly_order_skip_summary(
                                     float(balance),
@@ -2212,7 +2273,60 @@ async def scan_and_trade(
                                             "signal": signal,
                                         }
                                     else:
-                                        order_intent_id = persist_order_intent(
+                                        from src.bot.book_walk import (
+                                            ask_levels_for_side,
+                                            largest_qualifying_buy,
+                                            quote_is_stale,
+                                        )
+
+                                        captured = market.get("_quote_captured_at")
+                                        age_sec = None
+                                        cap_dt = ensure_utc(captured) if captured is not None else None
+                                        if cap_dt is not None:
+                                            age_sec = (utc_now() - cap_dt).total_seconds()
+                                        seconds_left, _why = _seconds_until_buy_horizon(market, now=utc_now())
+                                        quote_blocked = False
+                                        if quote_is_stale(age_sec, seconds_left):
+                                            fresh_market = await kalshi_client.get_market(ticker_clean)
+                                            book = await kalshi_client.get_market_orderbook_fp(ticker_clean)
+                                            if isinstance(fresh_market, dict):
+                                                market = {**market, **fresh_market, "_quote_captured_at": utc_now()}
+                                            levels = ask_levels_for_side(book, trade_side)
+
+                                            def _qualifies(qty, limit):
+                                                from src.bot.buy_retry import gates_still_pass_at_ask
+
+                                                if float(getattr(settings, "local_min_residual_payoff", 0) or 0) > 1e-12:
+                                                    if (1.0 - float(limit)) + 1e-12 < float(settings.local_min_residual_payoff):
+                                                        return False
+                                                yes_now = float(limit) if trade_side == "YES" else float(market.get("yes_ask") or 0)
+                                                no_now = float(limit) if trade_side == "NO" else float(market.get("no_ask") or 0)
+                                                return gates_still_pass_at_ask(
+                                                    side=trade_side,
+                                                    ai_yes_pct=ai_yes,
+                                                    ask=float(limit),
+                                                    yes_ask=yes_now,
+                                                    no_ask=no_now,
+                                                    min_edge=float(eff_min_edge),
+                                                    min_ai=int(eff_min_ai),
+                                                    fee_multiplier=_fee.get("fee_multiplier"),
+                                                    fee_type=_fee.get("fee_type"),
+                                                    blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
+                                                )
+
+                                            new_qty, new_limit = largest_qualifying_buy(levels, int(quantity), _qualifies)
+                                            if new_qty < 1 or new_limit is None:
+                                                quote_blocked = True
+                                                action_taken = {
+                                                    "status": "no_trade",
+                                                    "summary": "Skipped — fresh book no longer passes the raw gates",
+                                                    "signal": signal,
+                                                }
+                                            else:
+                                                quantity = int(new_qty)
+                                                ioc_limit_dollars = float(new_limit)
+                                                trade_price = float(new_limit)
+                                        order_intent_id = None if quote_blocked else persist_order_intent(
                                             {
                                                 "market_id": ticker_clean,
                                                 "event_ticker": _pos_et_val,
@@ -2231,7 +2345,7 @@ async def scan_and_trade(
                                                 "edge_pct": float(decision.get("edge_pct") or 0.0),
                                                 "sizing_tag": kelly_sizing_tag or None,
                                                 "kelly_contracts": int(quantity),
-                                                "detail": "IOC buy intent",
+                                                "detail": "FOK buy intent",
                                                 **quote_snapshot(market),
                                             }
                                         )
@@ -2442,6 +2556,21 @@ async def scan_and_trade(
                                                 )
                                     else:
                                         result = {"error": "order not sent", "order_not_sent": True}
+                                    from src.bot.book_walk import is_insufficient_resting_volume
+
+                                    volume_miss = bool(
+                                        result.get("error")
+                                        and is_insufficient_resting_volume(
+                                            result.get("error"), result.get("status_code")
+                                        )
+                                    )
+                                    if volume_miss:
+                                        result = {
+                                            "status": "canceled",
+                                            "fill_count_fp": "0.00",
+                                            "client_order_id": order_intent_id,
+                                            "missed_volume": True,
+                                        }
                                     if result.get("order_not_sent"):
                                         pass
                                     elif result.get("error"):
@@ -2608,9 +2737,13 @@ async def scan_and_trade(
                                                     )
                                             if qty_int < 1:
                                                 summary = (
-                                                    "Missed buy. Price gap "
-                                                    f"{gap:+.2f} after one reprice. "
-                                                    "The market is on the short watch list."
+                                                    "Missed - price moved"
+                                                    if volume_miss
+                                                    else (
+                                                        "Missed buy. Price gap "
+                                                        f"{gap:+.2f} after one reprice. "
+                                                        "The market is on the short watch list."
+                                                    )
                                                 )
                                                 logger.warning(
                                                     "Live buy had no whole-contract fill — %s %s gap=%+.4f status=%s",
@@ -2678,7 +2811,7 @@ async def scan_and_trade(
                                                 "price": avg_px,
                                                 "cost": round(fill_notional + buy_fees, 6),
                                                 "at": utc_iso_z(traded_at),
-                                                "execution": "ioc_limit",
+                                                "execution": "fok",
                                                 "ioc_limit_dollars": round(ioc_limit_dollars, 4),
                                                 }
                                                 executed_trade = True
@@ -2701,7 +2834,11 @@ async def scan_and_trade(
                             reason=str((action_taken or {}).get("summary") or taken or "skipped"),
                             edge_pct=float(decision.get("edge_pct") or 0.0),
                             ai_yes_pct=int(decision.get("ai_probability_yes_pct") or 0),
-                            ask=float(yes_price if held == "YES" else no_price or 0.0),
+                            ask=float(
+                                executable_buy_best_ask_dollars(market, held)
+                                or (yes_price if held == "YES" else no_price)
+                                or 0.0
+                            ),
                             blended_side_pct=blob.get("blended_side_pct") if isinstance(blob, dict) else None,
                         )
                     except Exception:

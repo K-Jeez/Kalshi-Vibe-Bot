@@ -53,16 +53,22 @@ def _settlement_by_ticker(rows: list) -> dict[str, dict]:
 
 
 def plan_repairs(positions: list[dict], fills: list, settlements: list) -> list[dict]:
-    """One plan per closed position. Fills for a ticker are shared, not copied onto each row."""
+    """One plan per closed position, plus an open row Kalshi has already settled.
+
+    Fills for a ticker are shared, not copied onto each row.
+    """
     grouped = _group_fills(fills)
     settled = _settlement_by_ticker(settlements)
     buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for pos in positions:
-        if str(pos.get("status") or "") != "closed":
+        status = str(pos.get("status") or "")
+        if status not in ("closed", "open"):
             continue
         ticker = str(pos.get("market_id") or "").strip().upper()
         side = str(pos.get("side") or "").strip().upper()
         if not ticker or side not in ("YES", "NO"):
+            continue
+        if status == "open" and ticker not in settled:
             continue
         buckets[(ticker, side)].append(pos)
     plans = []
@@ -107,8 +113,12 @@ def plan_repairs(positions: list[dict], fills: list, settlements: list) -> list[
             share = weight / total
             old_reason = str(pos.get("exit_reason") or "")
             new_reason = old_reason
-            if cash["closed_by_sell"] and old_reason == "settlement":
+            was_open = str(pos.get("status") or "") == "open"
+            if cash["closed_by_sell"] and old_reason in ("", "settlement"):
                 new_reason = "stop_loss"
+            elif was_open and not new_reason:
+                new_reason = "settlement"
+            note = "close locally open settled row" if was_open else ""
             plans.append(
                 {
                     "id": pos.get("id"),
@@ -121,7 +131,7 @@ def plan_repairs(positions: list[dict], fills: list, settlements: list) -> list[
                     "old_exit_reason": old_reason,
                     "new_exit_reason": new_reason,
                     "write": True,
-                    "note": "",
+                    "note": note,
                 }
             )
     return plans
@@ -196,13 +206,18 @@ def apply_plans(database: Path, plans: list[dict]) -> int:
             changed += conn.execute(
                 """
                 UPDATE positions
-                   SET realized_pnl = ?, fees_paid = ?, exit_reason = ?
+                   SET realized_pnl = ?,
+                       fees_paid = ?,
+                       exit_reason = ?,
+                       status = 'closed',
+                       closed_at = COALESCE(closed_at, ?)
                  WHERE id = ?
                 """,
                 (
                     plan["new_realized_pnl"],
                     plan["new_fees_paid"],
                     plan["new_exit_reason"],
+                    datetime.now(timezone.utc).isoformat(),
                     plan["id"],
                 ),
             ).rowcount
@@ -236,7 +251,7 @@ def load_closed_positions(database: Path) -> list[dict]:
             """
             SELECT id, market_id, side, status, quantity, realized_pnl, fees_paid, exit_reason
               FROM positions
-             WHERE status = 'closed'
+             WHERE status IN ('closed', 'open')
             """
         ).fetchall()
         return [dict(row) for row in rows]

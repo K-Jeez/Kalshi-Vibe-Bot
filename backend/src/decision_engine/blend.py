@@ -98,14 +98,13 @@ def quantity_after_blend(
     """
     kelly = max(0, int(kelly_quantity))
     cap = max(0, int(cap_contracts))
+    del one_contract_fits_cash
     if blend_ev_gate:
         if blended_ev is None or blended_ev <= 0 or kelly < 1:
             return 0, "blend_ev"
         return min(kelly, cap), "quarter_kelly"
-    if kelly >= 1:
+    if kelly >= 1 and cap >= 1:
         return min(kelly, cap), "quarter_kelly"
-    if cap >= 1 and one_contract_fits_cash:
-        return 1, "blend_floor"
     return 0, "none"
 
 

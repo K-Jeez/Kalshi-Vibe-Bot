@@ -81,11 +81,22 @@ export function analysisOutcomeBadge(a: DecisionAnalysis): AnalysisOutcomeBadge 
   const status = at?.status
   if (status === 'executed' && at?.status === 'executed') {
     const side = _filledSide(at.side)
-    return { label: side ? `Bought ${side}` : 'Bought', tone: 'green', modelLean: lean }
+    return {
+      label: side ? `Bought ${side}` : 'Bought',
+      tone: side === 'NO' ? 'red' : 'green',
+      modelLean: lean,
+    }
   }
   if (status === 'partial' && at?.status === 'partial') {
     const side = _filledSide(at.side)
-    return { label: side ? `Partial ${side}` : 'Partial', tone: 'green', modelLean: lean }
+    return {
+      label: side ? `Partial ${side}` : 'Partial',
+      tone: side === 'NO' ? 'red' : 'green',
+      modelLean: lean,
+    }
+  }
+  if (status === 'missed_fill' || (at && 'summary' in at && String(at.summary || '').startsWith('Missed - price moved'))) {
+    return { label: 'Missed - price moved', tone: 'amber', modelLean: lean }
   }
   if (status === 'rejected') return { label: 'Rejected', tone: 'red', modelLean: lean }
   if (status === 'zero_fill' || status === 'fractional_fill') {

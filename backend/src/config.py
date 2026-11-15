@@ -85,8 +85,8 @@ class Settings(BaseSettings):
     # After a stop-loss exit, skip new entries on that ticker for this many minutes (0 = off).
     reentry_cooldown_minutes: int = 120
     # Min gross upside (1 − native ask) on the purchased leg: scan filter + pre-buy gate (0 disables gate).
-    # When > 0, scan requires at least one leg to be liquid and meet this floor (avoids LLM calls on skewed books).
-    local_min_residual_payoff: float = 0.12
+    # 0.10 allows about a 90¢ entry. Entries between 10¢ and 12¢ of upside are tagged for tracking.
+    local_min_residual_payoff: float = 0.10
     # Series with no usable live feed are skipped before the model. Comma-separated prefixes.
     vibe_live_facts_enabled: bool = True
     vibe_prefilter_series_prefixes: str = (
@@ -95,10 +95,10 @@ class Settings(BaseSettings):
     vibe_numeric_prefilter_series_prefixes: str = "KXSILVER,KXGOLD,KXINX,KXNDX,KXSPX"
 
     # ── Exit hygiene ──────────────────────────────────────────────────────────────
-    # No stop-loss or counter-trend exits until the position is this old (minutes).
-    # Reduces churn from spread / micro noise right after IOC fills.
-    exit_grace_minutes: float = 10.0
-    # Stop-loss: exit when Est. Value has fallen this fraction vs **entry price** per contract (fees excluded). 0.80 = 80% drawdown.
+    # Exit grace is not applied. The field remains so an old .env key is ignored
+    # rather than crashing. Stop-loss can fire as soon as the bid has fallen.
+    exit_grace_minutes: float = 0.0
+    # Stop-loss: exit when the executable best bid has fallen this fraction vs entry (fees excluded). 0.80 = 80%.
     stop_loss_drawdown_pct: float = DEFAULT_STOP_LOSS_DRAWDOWN_PCT
     # When False, the bot never auto-exits for stop-loss (manual sells still allowed). Default off until enabled in Settings.
     stop_loss_selling_enabled: bool = False
@@ -115,9 +115,9 @@ class Settings(BaseSettings):
 
     # ── Server ───────────────────────────────────────────────────────────────────
     port: int = 8000
-    # Localhost only. Set HOST=0.0.0.0 to listen on the network; trading routes still
-    # reject non-local clients unless LOCAL_API_TOKEN is set (see local_guard.py).
-    host: str = "127.0.0.1"
+    # Listen on the LAN so a phone can open the dashboard. Mutating routes accept
+    # loopback and private LAN addresses only (see local_guard.py).
+    host: str = "0.0.0.0"
     # Optional shared secret for non-local state-changing requests. Header: X-Vibe-Bot-Token.
     # Empty means remote mutations are denied. The local dashboard does not send this.
     local_api_token: str = ""

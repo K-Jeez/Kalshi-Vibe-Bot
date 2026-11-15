@@ -1,32 +1,24 @@
 import type { Position } from './api'
 
-function isoStrictlyBefore(a: string, b: string): boolean {
-  const da = Date.parse(a.trim())
-  const db = Date.parse(b.trim())
-  if (Number.isNaN(da) || Number.isNaN(db)) return false
-  return da < db
-}
-
-/** ISO for Ends — mirrors server ``position_display_ends_iso`` (hybrid Option C uses ``nowMs``). */
+/** Trading-closes clock. Contractual ``close_time`` wins. Expected expiration is only a hint. */
 export function positionEndsAtIso(
   p: Pick<Position, 'ends_at' | 'expected_expiration_time' | 'close_time' | 'kalshi_market_status'>,
   nowMs: number = Date.now(),
 ): string | undefined {
-  const st = (p.kalshi_market_status ?? '').trim().toLowerCase()
-  if (st === 'closed' || st === 'determined' || st === 'finalized' || st === 'settled') {
-    const ct = (p.close_time ?? '').trim()
-    if (ct) return ct
-  }
-  const exp = (p.expected_expiration_time ?? '').trim()
+  void nowMs
   const ct = (p.close_time ?? '').trim()
-  const tradeable = st === 'active' || st === 'open'
-  if (tradeable && exp && ct && isoStrictlyBefore(exp, ct)) {
-    const peg = Date.parse(exp)
-    if (!Number.isNaN(peg) && peg <= nowMs) return ct
-  }
-  if (exp) return exp
   if (ct) return ct
+  const exp = (p.expected_expiration_time ?? '').trim()
+  if (exp) return exp
   return (p.ends_at ?? '').trim() || undefined
+}
+
+export function tradingClosesSource(
+  p: Pick<Position, 'close_time' | 'expected_expiration_time'>,
+): 'close_time' | 'expected_expiration_time' | 'unknown' {
+  if ((p.close_time ?? '').trim()) return 'close_time'
+  if ((p.expected_expiration_time ?? '').trim()) return 'expected_expiration_time'
+  return 'unknown'
 }
 
 /** Tradeable row whose Kalshi ``expected_expiration_time`` peg is already in the past (schedule slip / live play). */
@@ -43,15 +35,11 @@ export function tradeableExpectedExpirationPassed(
   return peg <= nowMs
 }
 
-/** Sort key for time-left: delayed tradeable rows use the peg so they sort as near-term, not by far contractual close. */
+/** Sort key uses the same trading-closes clock as the label. */
 export function positionSortEndsAtIso(
   p: Pick<Position, 'ends_at' | 'expected_expiration_time' | 'close_time' | 'kalshi_market_status'>,
   nowMs: number = Date.now(),
 ): string | undefined {
-  if (tradeableExpectedExpirationPassed(p, nowMs)) {
-    const peg = (p.expected_expiration_time ?? '').trim()
-    if (peg) return peg
-  }
   return positionEndsAtIso(p, nowMs)
 }
 

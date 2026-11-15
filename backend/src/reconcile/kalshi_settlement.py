@@ -277,6 +277,26 @@ async def _close_open_position_from_settlement_realized(
         is not None
     )
     if closed_by_our_sell(getattr(pos, "exit_reason", None), has_sell):
+        # A later flat portfolio row must not replace a filled stop or manual
+        # sell with a blank reason and zero P&L.
+        sell = (
+            db.query(Trade)
+            .filter(
+                Trade.market_id == pos.market_id,
+                Trade.action == "sell",
+                Trade.side == pos.side,
+                Trade.trade_mode == trade_mode,
+            )
+            .order_by(Trade.timestamp.desc())
+            .first()
+        )
+        if not str(getattr(pos, "exit_reason", None) or "").strip():
+            pos.exit_reason = "stop_loss"
+        if sell is not None and abs(float(pos.realized_pnl or 0.0)) <= 1e-6:
+            if sell.realized_pnl is not None:
+                pos.realized_pnl = float(sell.realized_pnl)
+        if int(pos.quantity or 0) <= 0 and sell is not None and int(sell.quantity or 0) > 0:
+            pos.quantity = int(sell.quantity)
         stamp_kalshi_resolution_from_settlement_row(pos, settlement_row)
         pos.kalshi_flat_reconcile_pending = False
         pos.kalshi_closure_finalized = True

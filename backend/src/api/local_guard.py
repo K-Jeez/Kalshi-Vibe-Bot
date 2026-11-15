@@ -1,9 +1,8 @@
-"""Block trading and other state-changing routes from non-local clients.
+"""Block trading and other state-changing routes from public clients.
 
-The dashboard on this computer talks to 127.0.0.1 / localhost and needs no token.
-If ``HOST`` is opened to the network, those routes stay denied until
-``LOCAL_API_TOKEN`` is set and the caller sends ``X-Vibe-Bot-Token``.
-Read-only GETs are unchanged so a local UI keeps loading.
+Loopback and private LAN addresses (a phone on the home network) are allowed.
+A public address needs ``LOCAL_API_TOKEN`` and ``X-Vibe-Bot-Token``.
+Read-only GETs are unchanged.
 """
 
 from __future__ import annotations
@@ -35,11 +34,37 @@ _EXACT_MUTATIONS = frozenset(
 )
 
 
+def _private_lan(host: str) -> bool:
+    text = host
+    if text.startswith("::ffff:"):
+        text = text.split("::ffff:", 1)[1]
+    parts = text.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        octets = [int(part) for part in parts]
+    except ValueError:
+        return False
+    if any(part < 0 or part > 255 for part in octets):
+        return False
+    first, second = octets[0], octets[1]
+    if first == 10:
+        return True
+    if first == 192 and second == 168:
+        return True
+    if first == 172 and 16 <= second <= 31:
+        return True
+    return first == 169 and second == 254
+
+
 def client_is_local(host: str | None) -> bool:
+    """Loopback or a private LAN address. Public internet addresses are not local."""
     h = (host or "").strip().lower()
     if h in _LOCAL_HOSTS:
         return True
-    return h.startswith("::ffff:127.0.0.1")
+    if h.startswith("::ffff:127.0.0.1"):
+        return True
+    return _private_lan(h)
 
 
 def path_is_protected(method: str, path: str) -> bool:
@@ -83,9 +108,9 @@ class LocalMutationGuard(BaseHTTPMiddleware):
             status_code=403,
             content={
                 "detail": (
-                    "This action is accepted from this computer without a token. "
-                    "Remote clients need LOCAL_API_TOKEN and the X-Vibe-Bot-Token header. "
-                    "The local dashboard at http://localhost:3000 is unchanged."
+                    "This action is accepted from this computer and from private LAN "
+                    "addresses without a token. A public address needs LOCAL_API_TOKEN "
+                    "and the X-Vibe-Bot-Token header."
                 )
             },
         )

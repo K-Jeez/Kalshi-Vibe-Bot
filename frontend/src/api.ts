@@ -1,7 +1,16 @@
 import axios from 'axios'
 
-/** Override in `.env` as `VITE_API_BASE_URL=http://host:port` when the UI is not on localhost:3000. */
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+/** Same host the page was loaded from, so a phone on the LAN reaches the PC's API. */
+function apiOrigin(port: string): string {
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    const proto = window.location.protocol === 'https:' ? 'https:' : 'http:'
+    return `${proto}//${window.location.hostname}:${port}`
+  }
+  return `http://127.0.0.1:${port}`
+}
+
+/** Override in `.env` as `VITE_API_BASE_URL=http://host:port` when the API is not on port 8000. */
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || apiOrigin('8000')
 
 // ── Interfaces ─────────────────────────────────────────────────────────────────
 
@@ -166,6 +175,7 @@ export type AnalysisActionTaken =
   | { status: 'no_trade'; summary?: string; reason?: string; signal?: string }
   | { status: 'rejected'; summary?: string; signal?: string; error_class?: string }
   | { status: 'zero_fill'; summary?: string; signal?: string; filled_fp?: number }
+  | { status: 'missed_fill'; summary?: string; signal?: string; filled_fp?: number; price_gap?: number }
   | { status: 'fractional_fill'; summary?: string; signal?: string; filled_fp?: number }
   | { status: 'partial'; side?: string; summary?: string; signal?: string }
   | { status: 'executed'; side: string; quantity: number; price: number; cost: number; at: string }

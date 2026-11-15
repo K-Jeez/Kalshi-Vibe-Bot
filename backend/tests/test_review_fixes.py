@@ -81,7 +81,7 @@ def test_two_positions_on_one_ticker_are_not_both_given_the_full_pnl():
     assert plans[0]["new_realized_pnl"] != plans[1]["new_realized_pnl"]
 
 
-def test_blend_gate_off_floors_at_one_and_on_can_skip():
+def test_blend_gate_off_does_not_force_one_contract():
     assert Settings().vibe_blend_ev_gate is False
     floor, tag = quantity_after_blend(
         blend_ev_gate=False,
@@ -90,7 +90,7 @@ def test_blend_gate_off_floors_at_one_and_on_can_skip():
         cap_contracts=2,
         one_contract_fits_cash=True,
     )
-    assert (floor, tag) == (1, "blend_floor")
+    assert (floor, tag) == (0, "none")
     blocked, blocked_tag = quantity_after_blend(
         blend_ev_gate=True,
         kelly_quantity=3,

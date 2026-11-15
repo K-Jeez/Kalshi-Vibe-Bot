@@ -42,23 +42,37 @@ def _snap(raw: float) -> float:
     return max(FLOOR_CAP, min(CEILING_CAP, round(snapped, 4)))
 
 
-def cap_fraction_for_return(realized_pnl: float, cost: float, n: int) -> float:
-    """Cap for one bucket. Fewer than eight closes stays at 2.5%."""
+def cap_fraction_for_return(
+    realized_pnl: float,
+    cost: float,
+    n: int,
+    *,
+    model_cost: float = 0.0,
+) -> float:
+    """Cap for one bucket. Fewer than eight closes stays at 2.5%.
+
+    Net of the estimated model cost. A winning bucket moves toward 5% twice
+    as fast as a one-for-one ROI step. A losing bucket moves toward 1% the
+    same way.
+    """
     if int(n) < MIN_SAMPLE or float(cost) <= 1e-9:
         return BASE_CAP
-    roi = float(realized_pnl) / float(cost)
+    net = float(realized_pnl) - max(0.0, float(model_cost or 0.0))
+    basis = float(cost) + max(0.0, float(model_cost or 0.0))
+    roi = net / basis if basis > 1e-9 else 0.0
     if not math.isfinite(roi):
         return BASE_CAP
-    if roi >= 0:
-        raw = BASE_CAP + min(1.0, roi) * (CEILING_CAP - BASE_CAP)
+    scaled = max(-1.0, min(1.0, roi * 2.0))
+    if scaled >= 0:
+        raw = BASE_CAP + scaled * (CEILING_CAP - BASE_CAP)
     else:
-        raw = BASE_CAP + max(-1.0, roi) * (BASE_CAP - FLOOR_CAP)
+        raw = BASE_CAP + scaled * (BASE_CAP - FLOOR_CAP)
     return _snap(raw)
 
 
 def caps_from_closed(rows: list[dict]) -> list[dict]:
     """``rows`` are closed positions with ``edge``, ``realized_pnl``, and ``cost``."""
-    grouped = {name: {"n": 0, "realized": 0.0, "cost": 0.0} for name in BUCKETS}
+    grouped = {name: {"n": 0, "realized": 0.0, "cost": 0.0, "model_cost": 0.0} for name in BUCKETS}
     for row in rows or []:
         name = edge_bucket(float(row.get("edge") or 0.0))
         if name is None:
@@ -66,10 +80,15 @@ def caps_from_closed(rows: list[dict]) -> list[dict]:
         grouped[name]["n"] += 1
         grouped[name]["realized"] += float(row.get("realized_pnl") or 0.0)
         grouped[name]["cost"] += max(0.0, float(row.get("cost") or 0.0))
+        grouped[name]["model_cost"] = grouped[name].get("model_cost", 0.0) + max(
+            0.0, float(row.get("model_cost") or 0.0)
+        )
     out = []
     for name in BUCKETS:
         item = grouped[name]
-        cap = cap_fraction_for_return(item["realized"], item["cost"], item["n"])
+        cap = cap_fraction_for_return(
+            item["realized"], item["cost"], item["n"], model_cost=item.get("model_cost") or 0.0
+        )
         roi = None
         if item["n"] >= MIN_SAMPLE and item["cost"] > 1e-9:
             roi = round(item["realized"] / item["cost"], 4)
