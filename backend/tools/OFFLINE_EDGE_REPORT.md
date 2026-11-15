@@ -4,7 +4,7 @@ Charts and the summary table for this write-up are in `offline_edge_outputs/` be
 
 **Short answer:** This repository cannot show that it does. The bot’s real forecasts and results were cleared and are not in git. A seeded synthetic stress test of the corrected buy rules is not a substitute for those records.
 
-The live sizing after this study is quarter Kelly, a 2.5% all-in entry estimate, and a maximum of 12 open positions. This write-up was not rerun under those rules. The 5% cap and 30-position notes below describe the study, not the current order path.
+The live bot now uses quarter Kelly with no one-contract floor, a per-edge cash cap that starts at 2.5%, fill-or-kill orders, edge 4, and a 55% AI win floor. There is no max-open-positions cap and no exit grace. This write-up was not rerun under those rules. The 5 point / 60% gates, IOC misses, 5% cap, and 30-position notes below describe the study, not the current order path.
 
 Reviewed code: safety commit `c2994d3144da55e985505274711d5d98bd191d50`. The strategy files were not changed for this study. No Kalshi or xAI call was made. Passing unit tests are not performance evidence.
 

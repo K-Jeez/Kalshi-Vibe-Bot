@@ -2287,24 +2287,30 @@ async def scan_and_trade(
                                         seconds_left, _why = _seconds_until_buy_horizon(market, now=utc_now())
                                         quote_blocked = False
                                         if quote_is_stale(age_sec, seconds_left):
+                                            from src.bot.book_walk import size_still_fits
+
                                             fresh_market = await kalshi_client.get_market(ticker_clean)
                                             book = await kalshi_client.get_market_orderbook_fp(ticker_clean)
                                             if isinstance(fresh_market, dict):
                                                 market = {**market, **fresh_market, "_quote_captured_at": utc_now()}
                                             levels = ask_levels_for_side(book, trade_side)
+                                            event_open = 0.0
+                                            for open_row in db.query(Position).filter(
+                                                Position.status == "open",
+                                                Position.trade_mode == TRADE_MODE,
+                                                Position.event_ticker == _pos_et_val,
+                                            ).all():
+                                                event_open += float(open_row.entry_cost or 0.0)
+                                                event_open += float(getattr(open_row, "fees_paid", 0) or 0.0)
 
                                             def _qualifies(qty, limit):
-                                                from src.bot.buy_retry import gates_still_pass_at_ask
-
-                                                if float(getattr(settings, "local_min_residual_payoff", 0) or 0) > 1e-12:
-                                                    if (1.0 - float(limit)) + 1e-12 < float(settings.local_min_residual_payoff):
-                                                        return False
                                                 yes_now = float(limit) if trade_side == "YES" else float(market.get("yes_ask") or 0)
                                                 no_now = float(limit) if trade_side == "NO" else float(market.get("no_ask") or 0)
-                                                return gates_still_pass_at_ask(
+                                                return size_still_fits(
+                                                    quantity=int(qty),
+                                                    limit=float(limit),
                                                     side=trade_side,
                                                     ai_yes_pct=ai_yes,
-                                                    ask=float(limit),
                                                     yes_ask=yes_now,
                                                     no_ask=no_now,
                                                     min_edge=float(eff_min_edge),
@@ -2312,6 +2318,14 @@ async def scan_and_trade(
                                                     fee_multiplier=_fee.get("fee_multiplier"),
                                                     fee_type=_fee.get("fee_type"),
                                                     blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
+                                                    balance=float(balance),
+                                                    cap_fraction=float(entry_cap),
+                                                    win_probability=float(blend["win_probability"]),
+                                                    model_cost=float(expected_model_cost),
+                                                    equity=float(total_portfolio_value),
+                                                    open_event_cost=event_open,
+                                                    event_reserve=0.0,
+                                                    min_gross=float(getattr(settings, "local_min_residual_payoff", 0) or 0),
                                                 )
 
                                             new_qty, new_limit = largest_qualifying_buy(levels, int(quantity), _qualifies)
@@ -2349,7 +2363,7 @@ async def scan_and_trade(
                                                 **quote_snapshot(market),
                                             }
                                         )
-                                        if not order_intent_id:
+                                        if not order_intent_id and not quote_blocked:
                                             action_taken = {
                                                 "status": "no_trade",
                                                 "summary": (
@@ -2673,14 +2687,19 @@ async def scan_and_trade(
                                                 quantity=int(quantity),
                                                 original_ask=float(ioc_limit_dollars),
                                                 ai_yes_pct=int(decision.get("ai_probability_yes_pct") or 0),
-                                                min_edge=float(getattr(settings, "min_edge_to_buy_pct", 4) or 4),
-                                                min_ai=int(getattr(settings, "min_ai_win_prob_buy_side_pct", 55) or 55),
+                                                min_edge=float(eff_min_edge),
+                                                min_ai=int(eff_min_ai),
                                                 fee_multiplier=_fee.get("fee_multiplier"),
                                                 fee_type=_fee.get("fee_type"),
                                                 exchange_index=shard_index,
                                                 balance=float(balance),
                                                 cap_fraction=entry_cap,
                                                 blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
+                                                win_probability=float(blend["win_probability"]),
+                                                model_cost=float(expected_model_cost),
+                                                event_equity=float(total_portfolio_value),
+                                                event_open_cost=float(open_basis),
+                                                event_reserve=float(exposure.get("reserve_dollars") or 0.0),
                                                 persist_intent=lambda limit, qty: persist_order_intent(
                                                     {
                                                         "market_id": ticker_clean,

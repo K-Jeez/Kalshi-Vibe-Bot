@@ -130,6 +130,7 @@ def plan_repairs(positions: list[dict], fills: list, settlements: list) -> list[
                     "new_fees_paid": float(cash["fees_paid"]) * share,
                     "old_exit_reason": old_reason,
                     "new_exit_reason": new_reason,
+                    "closed_at": str((raw_settlement or {}).get("settled_time") or "") if was_open else "",
                     "write": True,
                     "note": note,
                 }
@@ -217,7 +218,7 @@ def apply_plans(database: Path, plans: list[dict]) -> int:
                     plan["new_realized_pnl"],
                     plan["new_fees_paid"],
                     plan["new_exit_reason"],
-                    datetime.now(timezone.utc).isoformat(),
+                    plan.get("closed_at") or datetime.now(timezone.utc).isoformat(),
                     plan["id"],
                 ),
             ).rowcount

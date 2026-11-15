@@ -102,3 +102,95 @@ def largest_qualifying_buy(
         if qualifies(qty, float(limit)):
             return qty, float(limit)
     return 0, None
+
+
+def size_still_fits(
+    *,
+    quantity: int,
+    limit: float,
+    side: str,
+    ai_yes_pct: int,
+    yes_ask: float,
+    no_ask: float,
+    min_edge: float,
+    min_ai: int,
+    fee_multiplier,
+    fee_type,
+    blend_ev_gate: bool,
+    balance: float,
+    cap_fraction: float,
+    win_probability: float,
+    model_cost: float,
+    equity: float,
+    open_event_cost: float,
+    event_reserve: float,
+    min_gross: float,
+) -> bool:
+    """True when this whole size at this fresh limit still clears the live gates.
+
+    Quarter Kelly, the bucket cash cap, the event cap, and the model-cost
+    check are all recomputed at ``limit``. A higher ask must size down.
+    """
+    from src.bot.buy_retry import gates_still_pass_at_ask
+    from src.decision_engine.history_sizing import order_covers_model_cost
+    from src.decision_engine.strategy_gates import (
+        all_in_entry_dollars,
+        event_exposure_room,
+        fee_inclusive_ev_dollars,
+        kelly_contract_cap_for_bankroll,
+    )
+    from src.decision_engine.strategy_math import kelly_contracts_for_order
+
+    qty = int(quantity)
+    px = float(limit)
+    if qty < 1 or px <= 0 or px >= 1:
+        return False
+    if float(min_gross or 0) > 1e-12 and (1.0 - px) + 1e-12 < float(min_gross):
+        return False
+    if not gates_still_pass_at_ask(
+        side=side,
+        ai_yes_pct=int(ai_yes_pct),
+        ask=px,
+        yes_ask=float(yes_ask),
+        no_ask=float(no_ask),
+        min_edge=float(min_edge),
+        min_ai=int(min_ai),
+        fee_multiplier=fee_multiplier,
+        fee_type=fee_type,
+        blend_ev_gate=blend_ev_gate,
+    ):
+        return False
+    cap_contracts = kelly_contract_cap_for_bankroll(
+        float(balance),
+        px,
+        fee_multiplier=fee_multiplier,
+        fee_type=fee_type,
+        bankroll_fraction=float(cap_fraction),
+    )
+    kelly_qty, _tag = kelly_contracts_for_order(
+        float(balance),
+        side,
+        int(ai_yes_pct),
+        float(yes_ask),
+        float(no_ask),
+        float(yes_ask),
+        float(no_ask),
+        per_contract_premium=px,
+        max_kelly_contracts=cap_contracts,
+        win_probability=float(win_probability),
+    )
+    if qty > int(kelly_qty):
+        return False
+    all_in = all_in_entry_dollars(qty, px, fee_multiplier=fee_multiplier, fee_type=fee_type)
+    if all_in is None or all_in > float(balance) + 1e-9:
+        return False
+    if not event_exposure_room(float(equity), float(open_event_cost), float(event_reserve), float(all_in)):
+        return False
+    ev = fee_inclusive_ev_dollars(
+        float(win_probability),
+        px,
+        qty,
+        fee_multiplier=fee_multiplier,
+        fee_type=fee_type,
+    )
+    return order_covers_model_cost(ev, float(model_cost or 0.0))

@@ -13,6 +13,23 @@ from typing import Optional
 from src.decision_engine.bucket_caps import MIN_SAMPLE, edge_bucket
 
 PRIOR_BLEND_WEIGHT = 0.25
+# A floor at or above the bucket's top would stop that bucket from ever trading again.
+_BUCKET_TOP = {"4-6": 6.0, "6-8": 8.0, "8-10": 10.0, "10-13": 13.0}
+
+
+def market_yes_probability(implied_pct: float, side: str) -> float:
+    """YES probability from a buy-side implied percent.
+
+    ``market_implied_probability_pct`` is the purchased side. A NO buy at 70
+    is a YES price of 0.30, not 0.70.
+    """
+    raw = float(implied_pct)
+    unit = raw / 100.0 if raw > 1.0 else raw
+    unit = max(0.0, min(1.0, unit))
+    held = str(side or "").upper()
+    if held in ("NO", "BUY_NO"):
+        return 1.0 - unit
+    return unit
 
 
 def calibrated_blend_weight(rows: list[dict], *, prior: float = PRIOR_BLEND_WEIGHT, min_sample: int = MIN_SAMPLE) -> float:
@@ -59,12 +76,13 @@ def effective_edge_floor(
     model_cost: float,
     n: int,
     min_sample: int = MIN_SAMPLE,
+    bucket: Optional[str] = None,
 ) -> float:
-    """Owner floor, plus one point per 25% of stake lost after fees and model cost.
+    """Owner floor, plus one point per full 25% of stake lost.
 
-    A non-negative net, or fewer than ``min_sample`` closes, returns ``base_floor``.
-    The add-on never exceeds the owner's own floor, and it disappears when the
-    bucket recovers.
+    A loss smaller than 25% of stake does not move the floor. The add-on is at
+    most the owner's floor. It also stays below the bucket's top edge, so the
+    top of a losing bucket can still trade and the floor can fall back.
     """
     base = max(0.0, float(base_floor))
     if int(n) < int(min_sample) or float(cost) <= 1e-9:
@@ -75,8 +93,12 @@ def effective_edge_floor(
     roi = net / float(cost)
     if not math.isfinite(roi) or roi >= 0:
         return base
-    steps = min(int(math.floor(base)) if base >= 1 else 0, int(math.ceil(abs(roi) / 0.25)))
-    return base + float(max(0, steps))
+    steps = min(int(math.floor(base)) if base >= 1 else 0, int(math.floor(abs(roi) / 0.25 + 1e-12)))
+    floor = base + float(max(0, steps))
+    top = _BUCKET_TOP.get(str(bucket or ""))
+    if top is not None:
+        floor = min(floor, float(top) - 0.05)
+    return max(base, floor)
 
 
 def floors_from_closed(rows: list[dict], base_floor: float) -> list[dict]:
@@ -97,6 +119,7 @@ def floors_from_closed(rows: list[dict], base_floor: float) -> list[dict]:
             cost=item["cost"],
             model_cost=item["model_cost"],
             n=item["n"],
+            bucket=name,
         )
         out.append({"bucket": name, "edge_floor": floor, "n": item["n"]})
     return out
@@ -180,10 +203,11 @@ def load_settled_calibration(db) -> list[dict]:
         market = getattr(decision, "market_implied_probability_pct", None)
         if model is None or market is None:
             continue
+        side = str(getattr(decision, "decision", "") or "")
         rows.append(
             {
                 "model_yes": float(model) / 100.0,
-                "market_yes": float(market) / 100.0,
+                "market_yes": market_yes_probability(float(market), side),
                 "outcome_yes": 1.0 if outcome == "yes" else 0.0,
                 "edge": float(getattr(decision, "edge", 0.0) or 0.0),
             }
@@ -191,35 +215,65 @@ def load_settled_calibration(db) -> list[dict]:
     return rows
 
 
-def load_model_spend(db) -> tuple[list[float], int]:
-    """Estimated model dollars and how many of those decisions filled."""
+def _analysis_cost(raw_analysis) -> float:
     import json
 
+    try:
+        analysis = json.loads(raw_analysis) if isinstance(raw_analysis, str) else (raw_analysis or {})
+    except (TypeError, ValueError):
+        return 0.0
+    usage = analysis.get("usage") if isinstance(analysis, dict) and isinstance(analysis.get("usage"), dict) else {}
+    try:
+        return max(0.0, float(usage.get("estimated_usd") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _filled_buy(raw_action) -> bool:
+    import json
+
+    try:
+        action = json.loads(raw_action) if isinstance(raw_action, str) else (raw_action or {})
+    except (TypeError, ValueError):
+        return False
+    return isinstance(action, dict) and action.get("status") in ("executed", "partial")
+
+
+def load_model_spend(db) -> tuple[list[float], int]:
+    """Recent estimated model dollars and the filled buys in that same window.
+
+    The newest logs are the ones that record ``usage.estimated_usd``. An
+    unordered read returns the oldest rows, which have no cost, and the
+    per-buy estimate stays zero.
+    """
     from src.database.models import DecisionLog
 
-    costs: list[float] = []
-    buys = 0
     try:
-        found = db.query(DecisionLog.xai_analysis, DecisionLog.action_taken).limit(500).all()
+        found = (
+            db.query(DecisionLog.xai_analysis, DecisionLog.action_taken, DecisionLog.timestamp)
+            .order_by(DecisionLog.timestamp.desc())
+            .limit(2000)
+            .all()
+        )
     except Exception:
         return [], 0
-    for raw_analysis, raw_action in found:
-        try:
-            analysis = json.loads(raw_analysis) if isinstance(raw_analysis, str) else (raw_analysis or {})
-        except (TypeError, ValueError):
-            analysis = {}
-        usage = analysis.get("usage") if isinstance(analysis, dict) and isinstance(analysis.get("usage"), dict) else {}
-        try:
-            estimate = float(usage.get("estimated_usd") or 0.0)
-        except (TypeError, ValueError):
-            estimate = 0.0
-        if estimate > 0:
-            costs.append(estimate)
-        try:
-            action = json.loads(raw_action) if isinstance(raw_action, str) else (raw_action or {})
-        except (TypeError, ValueError):
-            action = {}
-        if isinstance(action, dict) and action.get("status") in ("executed", "partial"):
+    parsed = []
+    oldest_cost = None
+    for raw_analysis, raw_action, stamp in found:
+        cost = _analysis_cost(raw_analysis)
+        parsed.append((cost, _filled_buy(raw_action), stamp))
+        if cost > 0 and (oldest_cost is None or (stamp is not None and stamp < oldest_cost)):
+            oldest_cost = stamp
+    if oldest_cost is None:
+        return [], 0
+    costs: list[float] = []
+    buys = 0
+    for cost, bought, stamp in parsed:
+        if stamp is not None and stamp < oldest_cost:
+            continue
+        if cost > 0:
+            costs.append(cost)
+        if bought:
             buys += 1
     return costs, buys
 

@@ -57,6 +57,16 @@ def _private_lan(host: str) -> bool:
     return first == 169 and second == 254
 
 
+def _ipv6_private(host: str) -> bool:
+    """Unique-local (fc00::/7) and link-local (fe80::/10), including a zone id."""
+    text = host.split("%", 1)[0]
+    if text.startswith("::ffff:"):
+        return _private_lan(text.split("::ffff:", 1)[1])
+    if text.startswith("fe80:"):
+        return True
+    return text.startswith("fc") or text.startswith("fd")
+
+
 def client_is_local(host: str | None) -> bool:
     """Loopback or a private LAN address. Public internet addresses are not local."""
     h = (host or "").strip().lower()
@@ -64,7 +74,9 @@ def client_is_local(host: str | None) -> bool:
         return True
     if h.startswith("::ffff:127.0.0.1"):
         return True
-    return _private_lan(h)
+    if _private_lan(h):
+        return True
+    return _ipv6_private(h)
 
 
 def path_is_protected(method: str, path: str) -> bool:

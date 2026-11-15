@@ -228,6 +228,32 @@ def settlement_exit_price_and_cash_usd(
     return (px, cash)
 
 
+def _recorded_sell_reason(db: Session, pos: Position) -> str:
+    """Exit reason already written on the sell activity, not a guessed stop."""
+    from src.database.models import ActivityEvent
+
+    try:
+        rows = (
+            db.query(ActivityEvent)
+            .filter(
+                ActivityEvent.market_id == pos.market_id,
+                ActivityEvent.action == "sell",
+            )
+            .order_by(ActivityEvent.ts_utc.desc())
+            .limit(8)
+            .all()
+        )
+    except Exception:
+        return ""
+    for row in rows:
+        detail = str(getattr(row, "detail", "") or "").lower()
+        if "manual" in detail:
+            return "manual"
+        if "stop_loss" in detail or "stop-loss" in detail or "stop loss" in detail:
+            return "stop_loss"
+    return ""
+
+
 def preserve_exit_reason(current: object, default: str = "settlement") -> str:
     """Keep a stop or manual reason. Settlement is only the reason when none was stored."""
     text = str(current or "").strip()
@@ -279,7 +305,7 @@ async def _close_open_position_from_settlement_realized(
     if closed_by_our_sell(getattr(pos, "exit_reason", None), has_sell):
         # A later flat portfolio row must not replace a filled stop or manual
         # sell with a blank reason and zero P&L.
-        sell = (
+        sells = (
             db.query(Trade)
             .filter(
                 Trade.market_id == pos.market_id,
@@ -288,15 +314,17 @@ async def _close_open_position_from_settlement_realized(
                 Trade.trade_mode == trade_mode,
             )
             .order_by(Trade.timestamp.desc())
-            .first()
+            .all()
         )
         if not str(getattr(pos, "exit_reason", None) or "").strip():
-            pos.exit_reason = "stop_loss"
-        if sell is not None and abs(float(pos.realized_pnl or 0.0)) <= 1e-6:
-            if sell.realized_pnl is not None:
-                pos.realized_pnl = float(sell.realized_pnl)
-        if int(pos.quantity or 0) <= 0 and sell is not None and int(sell.quantity or 0) > 0:
-            pos.quantity = int(sell.quantity)
+            recorded = _recorded_sell_reason(db, pos)
+            if recorded:
+                pos.exit_reason = recorded
+        if sells and abs(float(pos.realized_pnl or 0.0)) <= 1e-6:
+            pos.realized_pnl = float(sum(float(row.realized_pnl or 0.0) for row in sells))
+        sold_qty = sum(int(row.quantity or 0) for row in sells)
+        if int(pos.quantity or 0) <= 0 and sold_qty > 0:
+            pos.quantity = int(sold_qty)
         stamp_kalshi_resolution_from_settlement_row(pos, settlement_row)
         pos.kalshi_flat_reconcile_pending = False
         pos.kalshi_closure_finalized = True

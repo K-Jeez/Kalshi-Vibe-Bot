@@ -19,12 +19,16 @@ from src.bot.book_walk import (
     quote_is_stale,
 )
 from src.config import Settings
-from src.database.models import Base, Position, Trade
+from src.database.models import ActivityEvent, Base, DecisionLog, Position, Trade
 from src.decision_engine.bucket_caps import cap_fraction_for_return
+from src.bot.book_walk import size_still_fits
 from src.decision_engine.history_sizing import (
     calibrated_blend_weight,
     effective_edge_floor,
     expected_xai_cost_per_buy,
+    load_model_spend,
+    load_settled_calibration,
+    market_yes_probability,
     order_covers_model_cost,
 )
 from src.decision_engine.strategy_math import kelly_contracts_for_order
@@ -64,12 +68,38 @@ def test_stop_sell_is_not_replaced_by_a_flat_portfolio_row():
             market_title="t",
             action="sell",
             side="YES",
-            quantity=4,
+            quantity=2,
             price=0.09,
-            total_cost=0.36,
-            realized_pnl=-1.6529,
+            total_cost=0.18,
+            realized_pnl=-0.80,
             trade_mode="live",
             timestamp=now,
+        )
+    )
+    db.add(
+        Trade(
+            id="sell-stop-2",
+            market_id="SYN-STOP",
+            market_title="t",
+            action="sell",
+            side="YES",
+            quantity=2,
+            price=0.09,
+            total_cost=0.18,
+            realized_pnl=-0.8529,
+            trade_mode="live",
+            timestamp=now,
+        )
+    )
+    db.add(
+        ActivityEvent(
+            id="act-stop",
+            seq=1,
+            run_id="test",
+            event_type="order",
+            market_id="SYN-STOP",
+            action="sell",
+            detail="auto-exit stop_loss",
         )
     )
     db.commit()
@@ -87,6 +117,67 @@ def test_stop_sell_is_not_replaced_by_a_flat_portfolio_row():
     assert pos.status == "closed"
     assert pos.exit_reason == "stop_loss"
     assert abs(float(pos.realized_pnl) - (-1.6529)) < 1e-6
+
+
+def test_manual_sell_is_not_relabeled_as_a_stop():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = utc_now()
+    db.add(
+        Position(
+            id="man",
+            market_id="SYN-MAN",
+            market_title="t",
+            side="YES",
+            quantity=1,
+            entry_price=0.40,
+            entry_cost=0.40,
+            current_price=0.20,
+            status="open",
+            trade_mode="live",
+            realized_pnl=0.0,
+        )
+    )
+    db.add(
+        Trade(
+            id="sell-man",
+            market_id="SYN-MAN",
+            market_title="t",
+            action="sell",
+            side="YES",
+            quantity=1,
+            price=0.20,
+            total_cost=0.20,
+            realized_pnl=-0.20,
+            trade_mode="live",
+            timestamp=now,
+        )
+    )
+    db.add(
+        ActivityEvent(
+            id="act-man",
+            seq=1,
+            run_id="test",
+            event_type="order",
+            market_id="SYN-MAN",
+            action="sell",
+            detail="manual close",
+        )
+    )
+    db.commit()
+    asyncio.run(
+        apply_kalshi_settlement_closes(
+            db,
+            trade_mode="live",
+            api_rows=[{"ticker": "SYN-MAN", "position_fp": "0.00", "realized_pnl_dollars": "0.00"}],
+            broadcast_fn=None,
+            kalshi_client=None,
+        )
+    )
+    pos = db.query(Position).one()
+    assert pos.exit_reason == "manual"
+    assert abs(float(pos.realized_pnl) - (-0.20)) < 1e-9
 
 
 def test_repair_matches_synthetic_round_totals_and_closes_an_open_settlement():
@@ -222,10 +313,11 @@ def test_repair_matches_synthetic_round_totals_and_closes_an_open_settlement():
             }
         ],
         [{"ticker": "OPEN", "action": "buy", "side": "yes", "count_fp": "3", "yes_price": "0.57", "fee": "0.0515"}],
-        [{"ticker": "OPEN", "market_result": "yes", "revenue": 300}],
+        [{"ticker": "OPEN", "market_result": "yes", "revenue": 300, "settled_time": "2026-11-12T22:01:24Z"}],
     )
     assert open_settled[0]["write"] is True
     assert open_settled[0]["note"] == "close locally open settled row"
+    assert open_settled[0]["closed_at"] == "2026-11-12T22:01:24Z"
     assert abs(open_settled[0]["new_realized_pnl"] - (3.0 - 1.71 - 0.0515)) < 1e-6
     assert open_settled[0]["new_exit_reason"] == "settlement"
 
@@ -241,6 +333,17 @@ def test_sizing_uses_history_and_does_not_force_one_contract():
     assert effective_edge_floor(4, realized_pnl=1, cost=10, model_cost=0, n=8) == 4
     raised = effective_edge_floor(4, realized_pnl=-5, cost=10, model_cost=1, n=8)
     assert raised > 4
+    assert effective_edge_floor(4, realized_pnl=-0.10, cost=10, model_cost=0, n=8) == 4
+    capped = effective_edge_floor(4, realized_pnl=-10, cost=10, model_cost=0, n=8, bucket="4-6")
+    assert capped < 6
+    assert abs(market_yes_probability(70, "NO") - 0.30) < 1e-9
+    assert abs(market_yes_probability(70, "YES") - 0.70) < 1e-9
+    no_rows = [
+        {"model_yes": 0.40, "market_yes": market_yes_probability(70, "NO"), "outcome_yes": 0.0}
+        for _ in range(8)
+    ]
+    wrong_rows = [{"model_yes": 0.40, "market_yes": 0.70, "outcome_yes": 0.0} for _ in range(8)]
+    assert calibrated_blend_weight(no_rows, prior=0.25) < calibrated_blend_weight(wrong_rows, prior=0.25)
     assert effective_edge_floor(4, realized_pnl=-5, cost=10, model_cost=1, n=3) == 4
     assert expected_xai_cost_per_buy([0.2, 0.2], 4) == 0.1
     assert expected_xai_cost_per_buy([0.2], 2) == 0.0
@@ -299,6 +402,119 @@ def test_stop_ignores_last_trade_and_a_closed_market():
 def test_private_lan_can_mutate_and_public_internet_cannot():
     assert client_is_local("192.168.0.12")
     assert client_is_local("172.16.5.5")
+    assert client_is_local("169.254.1.1")
+    assert client_is_local("fd12::1")
+    assert client_is_local("fe80::1")
     assert not client_is_local("1.2.3.4")
+    assert not client_is_local("2001:db8::1")
     assert mutation_is_allowed(host="192.168.0.12", headers={}, configured_token="")
+    assert mutation_is_allowed(host="fd00::5", headers={}, configured_token="")
     assert not mutation_is_allowed(host="1.2.3.4", headers={}, configured_token="")
+
+
+def test_no_buy_calibration_and_recent_model_cost_and_resized_limit():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = utc_now()
+    db.add(
+        DecisionLog(
+            id="d-no",
+            market_id="NOLEG",
+            market_title="t",
+            decision="BUY_NO",
+            confidence=0.6,
+            ai_probability_yes_pct=40,
+            market_implied_probability_pct=70,
+            edge=10,
+        )
+    )
+    db.add(
+        Position(
+            id="p-no",
+            market_id="NOLEG",
+            market_title="t",
+            side="NO",
+            quantity=1,
+            entry_price=0.70,
+            entry_cost=0.70,
+            current_price=1.0,
+            status="closed",
+            trade_mode="live",
+            entry_decision_log_id="d-no",
+            kalshi_market_result="no",
+        )
+    )
+    old = now.replace(year=2020)
+    db.add(
+        DecisionLog(
+            id="old",
+            market_id="OLD",
+            market_title="t",
+            decision="BUY_YES",
+            confidence=0.5,
+            timestamp=old,
+            action_taken='{"status":"executed"}',
+            xai_analysis="{}",
+        )
+    )
+    db.add(
+        DecisionLog(
+            id="new",
+            market_id="NEW",
+            market_title="t",
+            decision="BUY_YES",
+            confidence=0.5,
+            timestamp=now,
+            action_taken='{"status":"executed"}',
+            xai_analysis='{"usage":{"estimated_usd":0.067}}',
+        )
+    )
+    db.commit()
+    calibrated = load_settled_calibration(db)
+    assert abs(calibrated[0]["market_yes"] - 0.30) < 1e-9
+    costs, buys = load_model_spend(db)
+    assert costs == [0.067]
+    assert buys == 1
+    assert size_still_fits(
+        quantity=10,
+        limit=0.70,
+        side="YES",
+        ai_yes_pct=85,
+        yes_ask=0.70,
+        no_ask=0.30,
+        min_edge=4,
+        min_ai=55,
+        fee_multiplier=1,
+        fee_type="quadratic",
+        blend_ev_gate=False,
+        balance=100,
+        cap_fraction=0.025,
+        win_probability=0.85,
+        model_cost=0,
+        equity=100,
+        open_event_cost=0,
+        event_reserve=0,
+        min_gross=0.10,
+    ) is False
+    assert size_still_fits(
+        quantity=2,
+        limit=0.70,
+        side="YES",
+        ai_yes_pct=85,
+        yes_ask=0.70,
+        no_ask=0.30,
+        min_edge=4,
+        min_ai=55,
+        fee_multiplier=1,
+        fee_type="quadratic",
+        blend_ev_gate=False,
+        balance=100,
+        cap_fraction=0.025,
+        win_probability=0.85,
+        model_cost=0,
+        equity=100,
+        open_event_cost=0,
+        event_reserve=0,
+        min_gross=0.10,
+    ) is True

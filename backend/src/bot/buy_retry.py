@@ -115,6 +115,11 @@ async def retry_buy_once(
     balance: Optional[float] = None,
     cap_fraction: Optional[float] = None,
     blend_ev_gate: bool = False,
+    win_probability: Optional[float] = None,
+    model_cost: float = 0.0,
+    event_equity: Optional[float] = None,
+    event_open_cost: float = 0.0,
+    event_reserve: float = 0.0,
     persist_intent=None,
     fund=None,
     acknowledge=None,
@@ -122,8 +127,12 @@ async def retry_buy_once(
     """Re-read the book and send one fill-or-kill if the gates still pass.
 
     Returns ``(order_or_none, price_gap)``. A miss is remembered on the watch list.
+    The size is walked down the live depth and rechecked against the stricter
+    edge, the bucket cap, and the event cap.
     """
+    from src.bot.book_walk import ask_levels_for_side, largest_qualifying_buy, size_still_fits
     from src.clients.kalshi_client import executable_buy_best_ask_dollars
+    from src.decision_engine.strategy_gates import all_in_entry_dollars
 
     fresh = await client.get_market(market_id)
     book = fresh if isinstance(fresh, dict) else {}
@@ -132,49 +141,74 @@ async def retry_buy_once(
         remember_miss(market_id)
         return None, 0.0
     gap = price_gap(original_ask, float(ask))
-    limit = retry_limit(original_ask, float(ask))
-    yes_ask = float(ask) if str(side).upper() == "YES" else float(book.get("yes_ask") or book.get("yes_price") or 0)
-    no_ask = float(ask) if str(side).upper() == "NO" else float(book.get("no_ask") or book.get("no_price") or 0)
-    if limit is None or not gates_still_pass_at_ask(
-        side=side,
-        ai_yes_pct=ai_yes_pct,
-        ask=float(limit),
-        yes_ask=yes_ask,
-        no_ask=no_ask,
-        min_edge=min_edge,
-        min_ai=min_ai,
-        fee_multiplier=fee_multiplier,
-        fee_type=fee_type,
-        blend_ev_gate=blend_ev_gate,
-    ):
+    depth = None
+    getter = getattr(client, "get_market_orderbook_fp", None)
+    if getter is not None:
+        depth = await getter(market_id)
+    levels = ask_levels_for_side(depth, side)
+    if not levels:
+        levels = [(float(ask), float(max(1, int(quantity))))]
+    held = str(side or "").upper()
+
+    def _fits(qty, limit):
+        if float(limit) > float(original_ask) + MAX_RETRY_SLIPPAGE + 1e-9:
+            return False
+        yes_ask = float(limit) if held == "YES" else float(book.get("yes_ask") or book.get("yes_price") or 0)
+        no_ask = float(limit) if held == "NO" else float(book.get("no_ask") or book.get("no_price") or 0)
+        if balance is None:
+            return gates_still_pass_at_ask(
+                side=side,
+                ai_yes_pct=ai_yes_pct,
+                ask=float(limit),
+                yes_ask=yes_ask,
+                no_ask=no_ask,
+                min_edge=min_edge,
+                min_ai=min_ai,
+                fee_multiplier=fee_multiplier,
+                fee_type=fee_type,
+                blend_ev_gate=blend_ev_gate,
+            )
+        return size_still_fits(
+            quantity=int(qty),
+            limit=float(limit),
+            side=side,
+            ai_yes_pct=int(ai_yes_pct),
+            yes_ask=yes_ask,
+            no_ask=no_ask,
+            min_edge=float(min_edge),
+            min_ai=int(min_ai),
+            fee_multiplier=fee_multiplier,
+            fee_type=fee_type,
+            blend_ev_gate=blend_ev_gate,
+            balance=float(balance),
+            cap_fraction=float(cap_fraction if cap_fraction is not None else 0.025),
+            win_probability=float(win_probability if win_probability is not None else 0.0),
+            model_cost=float(model_cost or 0.0),
+            equity=float(event_equity if event_equity is not None else balance),
+            open_event_cost=float(event_open_cost or 0.0),
+            event_reserve=float(event_reserve or 0.0),
+            min_gross=0.0,
+        )
+
+    send_qty, limit = largest_qualifying_buy(levels, int(quantity), _fits)
+    if send_qty < 1 or limit is None:
         remember_miss(market_id)
         return None, gap
-    send_qty = int(quantity)
-    if balance is not None:
-        from src.decision_engine.strategy_gates import all_in_entry_dollars, kelly_contract_cap_for_bankroll
-
-        allowed = kelly_contract_cap_for_bankroll(
-            float(balance),
-            float(limit),
-            fee_multiplier=fee_multiplier,
-            fee_type=fee_type,
-            bankroll_fraction=cap_fraction,
+    if fund is not None:
+        funded = await fund(
+            float(
+                all_in_entry_dollars(
+                    send_qty,
+                    float(limit),
+                    fee_multiplier=fee_multiplier,
+                    fee_type=fee_type,
+                )
+                or 0.0
+            )
         )
-        cost = all_in_entry_dollars(
-            1,
-            float(limit),
-            fee_multiplier=fee_multiplier,
-            fee_type=fee_type,
-        )
-        if allowed < 1 or cost is None or cost > float(balance) + 1e-9:
+        if not funded or not funded.get("ok"):
             remember_miss(market_id)
             return None, gap
-        send_qty = min(send_qty, allowed)
-        if fund is not None:
-            funded = await fund(float(all_in_entry_dollars(send_qty, float(limit), fee_multiplier=fee_multiplier, fee_type=fee_type) or cost))
-            if not funded or not funded.get("ok"):
-                remember_miss(market_id)
-                return None, gap
     order_id = client_order_id
     if persist_intent is not None:
         order_id = persist_intent(float(limit), send_qty)
