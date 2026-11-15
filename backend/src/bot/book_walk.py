@@ -104,6 +104,162 @@ def largest_qualifying_buy(
     return 0, None
 
 
+def quote_blockers(
+    *,
+    quantity: int,
+    limit: float,
+    side: str,
+    ai_yes_pct: int,
+    yes_ask: float,
+    no_ask: float,
+    min_edge: float,
+    min_ai: int,
+    fee_multiplier,
+    fee_type,
+    blend_ev_gate: bool,
+    balance: float,
+    cap_fraction: float,
+    win_probability: float,
+    model_cost: float,
+    equity: float,
+    open_event_cost: float,
+    event_reserve: float,
+    min_gross: float,
+    original_ask: Optional[float] = None,
+) -> list[str]:
+    """Names of the checks this size fails at this fresh limit.
+
+    Names stay stable so a skip can be counted from the activity log:
+    raw edge, AI win, Kelly, model cost, bucket cap, event cap, price moved.
+    """
+    from src.bot.buy_retry import gates_still_pass_at_ask
+    from src.decision_engine.history_sizing import order_covers_model_cost
+    from src.decision_engine.strategy_gates import (
+        all_in_entry_dollars,
+        autonomous_buy_gate_failure,
+        event_exposure_room,
+        fee_inclusive_ev_dollars,
+        kelly_contract_cap_for_bankroll,
+    )
+    from src.decision_engine.strategy_math import (
+        ai_win_prob_pct_on_buy_side,
+        edge_pct_for_side,
+        kelly_contracts_for_order,
+    )
+
+    reasons: list[str] = []
+    qty = int(quantity)
+    px = float(limit)
+    if qty < 1 or not (0.0 < px < 1.0):
+        reasons.append("empty/thin book")
+        return reasons
+    edge = edge_pct_for_side(side, int(ai_yes_pct), float(yes_ask), float(no_ask), float(yes_ask), float(no_ask))
+    if edge + 1e-9 < float(min_edge):
+        reasons.append("raw edge")
+    if ai_win_prob_pct_on_buy_side(side, int(ai_yes_pct)) < int(min_ai):
+        reasons.append("AI win")
+    if float(min_gross or 0) > 1e-12 and (1.0 - px) + 1e-12 < float(min_gross):
+        reasons.append("raw edge")
+    gate = autonomous_buy_gate_failure(
+        side=side,
+        ai_yes_pct=int(ai_yes_pct),
+        edge_pct=float(edge),
+        entry_price_dollars=px,
+    )
+    if gate and "calibration" in gate.lower() and "calibration" not in reasons:
+        reasons.append("calibration")
+    elif gate and "raw edge" not in reasons and "AI win" not in reasons:
+        reasons.append("raw edge")
+    if not gates_still_pass_at_ask(
+        side=side,
+        ai_yes_pct=int(ai_yes_pct),
+        ask=px,
+        yes_ask=float(yes_ask),
+        no_ask=float(no_ask),
+        min_edge=float(min_edge),
+        min_ai=int(min_ai),
+        fee_multiplier=fee_multiplier,
+        fee_type=fee_type,
+        blend_ev_gate=blend_ev_gate,
+    ) and not reasons:
+        reasons.append("raw edge")
+    cap_contracts = kelly_contract_cap_for_bankroll(
+        float(balance),
+        px,
+        fee_multiplier=fee_multiplier,
+        fee_type=fee_type,
+        bankroll_fraction=float(cap_fraction),
+    )
+    kelly_qty, _tag = kelly_contracts_for_order(
+        float(balance),
+        side,
+        int(ai_yes_pct),
+        float(yes_ask),
+        float(no_ask),
+        float(yes_ask),
+        float(no_ask),
+        per_contract_premium=px,
+        max_kelly_contracts=cap_contracts,
+        win_probability=float(win_probability),
+    )
+    if int(kelly_qty) < 1:
+        reasons.append("Kelly")
+    elif qty > int(kelly_qty):
+        reasons.append("Kelly")
+    if int(cap_contracts) < 1:
+        reasons.append("bucket cap")
+    elif qty > int(cap_contracts):
+        reasons.append("bucket cap")
+    all_in = all_in_entry_dollars(qty, px, fee_multiplier=fee_multiplier, fee_type=fee_type)
+    if all_in is None or all_in > float(balance) + 1e-9:
+        if "bucket cap" not in reasons:
+            reasons.append("bucket cap")
+    elif not event_exposure_room(float(equity), float(open_event_cost), float(event_reserve), float(all_in)):
+        reasons.append("event cap")
+    ev = fee_inclusive_ev_dollars(
+        float(win_probability),
+        px,
+        max(qty, 1),
+        fee_multiplier=fee_multiplier,
+        fee_type=fee_type,
+    )
+    if ev is None or ev <= 0 or not order_covers_model_cost(ev, float(model_cost or 0.0)):
+        reasons.append("model cost")
+    if (
+        original_ask is not None
+        and abs(px - float(original_ask)) >= 0.01
+        and reasons
+        and "price moved" not in reasons
+    ):
+        reasons.append("price moved")
+    unique: list[str] = []
+    for name in reasons:
+        if name not in unique:
+            unique.append(name)
+    return unique
+
+
+def fresh_quote_skip_reasons(
+    levels: list[tuple[float, float]],
+    *,
+    original_ask: Optional[float] = None,
+    **kwargs,
+) -> list[str]:
+    """Why even one contract cannot be sent after a re-quote."""
+    limit = limit_for_quantity(levels, 1)
+    if limit is None:
+        return ["empty/thin book"]
+    side = str(kwargs.get("side") or "").upper()
+    if side == "YES":
+        kwargs["yes_ask"] = float(limit)
+    elif side == "NO":
+        kwargs["no_ask"] = float(limit)
+    reasons = quote_blockers(quantity=1, limit=float(limit), original_ask=original_ask, **kwargs)
+    if not reasons:
+        return ["empty/thin book"]
+    return reasons
+
+
 def size_still_fits(
     *,
     quantity: int,
@@ -129,68 +285,27 @@ def size_still_fits(
     """True when this whole size at this fresh limit still clears the live gates.
 
     Quarter Kelly, the bucket cash cap, the event cap, and the model-cost
-    check are all recomputed at ``limit``. A higher ask must size down.
+    check are all recomputed at ``limit``. A higher ask sizes down; it does
+    not by itself cancel a buy the raw gates still allow.
     """
-    from src.bot.buy_retry import gates_still_pass_at_ask
-    from src.decision_engine.history_sizing import order_covers_model_cost
-    from src.decision_engine.strategy_gates import (
-        all_in_entry_dollars,
-        event_exposure_room,
-        fee_inclusive_ev_dollars,
-        kelly_contract_cap_for_bankroll,
-    )
-    from src.decision_engine.strategy_math import kelly_contracts_for_order
-
-    qty = int(quantity)
-    px = float(limit)
-    if qty < 1 or px <= 0 or px >= 1:
-        return False
-    if float(min_gross or 0) > 1e-12 and (1.0 - px) + 1e-12 < float(min_gross):
-        return False
-    if not gates_still_pass_at_ask(
+    return not quote_blockers(
+        quantity=quantity,
+        limit=limit,
         side=side,
-        ai_yes_pct=int(ai_yes_pct),
-        ask=px,
-        yes_ask=float(yes_ask),
-        no_ask=float(no_ask),
-        min_edge=float(min_edge),
-        min_ai=int(min_ai),
+        ai_yes_pct=ai_yes_pct,
+        yes_ask=yes_ask,
+        no_ask=no_ask,
+        min_edge=min_edge,
+        min_ai=min_ai,
         fee_multiplier=fee_multiplier,
         fee_type=fee_type,
         blend_ev_gate=blend_ev_gate,
-    ):
-        return False
-    cap_contracts = kelly_contract_cap_for_bankroll(
-        float(balance),
-        px,
-        fee_multiplier=fee_multiplier,
-        fee_type=fee_type,
-        bankroll_fraction=float(cap_fraction),
+        balance=balance,
+        cap_fraction=cap_fraction,
+        win_probability=win_probability,
+        model_cost=model_cost,
+        equity=equity,
+        open_event_cost=open_event_cost,
+        event_reserve=event_reserve,
+        min_gross=min_gross,
     )
-    kelly_qty, _tag = kelly_contracts_for_order(
-        float(balance),
-        side,
-        int(ai_yes_pct),
-        float(yes_ask),
-        float(no_ask),
-        float(yes_ask),
-        float(no_ask),
-        per_contract_premium=px,
-        max_kelly_contracts=cap_contracts,
-        win_probability=float(win_probability),
-    )
-    if qty > int(kelly_qty):
-        return False
-    all_in = all_in_entry_dollars(qty, px, fee_multiplier=fee_multiplier, fee_type=fee_type)
-    if all_in is None or all_in > float(balance) + 1e-9:
-        return False
-    if not event_exposure_room(float(equity), float(open_event_cost), float(event_reserve), float(all_in)):
-        return False
-    ev = fee_inclusive_ev_dollars(
-        float(win_probability),
-        px,
-        qty,
-        fee_multiplier=fee_multiplier,
-        fee_type=fee_type,
-    )
-    return order_covers_model_cost(ev, float(model_cost or 0.0))

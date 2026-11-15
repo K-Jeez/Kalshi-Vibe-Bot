@@ -211,7 +211,7 @@ def kelly_order_skip_summary(
         ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
         if _kelly_fraction(float(win_probability), price) <= 1e-12:
             return (
-                f"Skipped — blended win probability {float(win_probability) * 100:.1f}% "
+                f"Skipped — sizing probability {float(win_probability) * 100:.1f}% "
                 f"is not above the ask ({ask_c}¢), so quarter Kelly is zero"
             )
 
@@ -228,16 +228,20 @@ def kelly_order_skip_summary(
 
     ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
     deploy = float(bankroll)
-    if max_kelly_contracts is not None and int(max_kelly_contracts) < 1 and max_whole_contracts_for_cash(
-        deploy, per_contract_premium
-    ) >= 1:
+    cash_can_buy = max_whole_contracts_for_cash(deploy, per_contract_premium) >= 1
+    if max_kelly_contracts is not None and int(max_kelly_contracts) < 1 and cash_can_buy:
         return (
             "Skipped — stake cap cannot fund one whole contract at the ask "
             f"({ask_c}¢ on ${deploy:.2f} deployable). The order is not enlarged to full cash."
         )
+    if not cash_can_buy:
+        return (
+            "Skipped — available cash cannot buy a whole contract "
+            f"at {ask_c}¢ (deployable ${deploy:.2f})"
+        )
     return (
-        "Skipped — Kelly size is zero and available cash cannot buy "
-        f"a whole contract at current prices (deployable ${deploy:.2f}, ask {ask_c}¢)"
+        "Skipped — quarter Kelly is below one contract "
+        f"(deployable ${deploy:.2f} can buy at {ask_c}¢; size is not raised to one)"
     )
 
 

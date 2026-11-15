@@ -62,9 +62,11 @@ class Settings(BaseSettings):
     min_edge_to_buy_pct: int = DEFAULT_MIN_EDGE_TO_BUY_PCT
     # Minimum AI win probability (0–100) on the **purchased** side before a buy (clamped 51–99).
     min_ai_win_prob_buy_side_pct: int = DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
-    # Share of the raw model in sizing: p = w*model + (1-w)*fee-free mid. Gates stay on the raw model.
+    # Kept so an older .env still loads. Order size does not read this value.
+    # Size uses the raw model unless settled Brier skill is significantly negative.
     vibe_model_blend_weight: float = 0.25
-    # When false, raw edge and win-prob gates decide the buy. Blended probability only sizes it.
+    # When false, raw edge and win-prob gates decide the buy. Size uses the model
+    # (or the evidence-shrunk probability). When true, that probability's EV must be positive.
     vibe_blend_ev_gate: bool = False
 
     # ── Bot scan configuration ───────────────────────────────────────────────────

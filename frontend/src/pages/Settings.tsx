@@ -219,7 +219,8 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Position size uses <strong className="text-white">quarter Kelly</strong> from a blend of Grok and the market.
+            Position size uses <strong className="text-white">quarter Kelly</strong> on the model probability that passed the gates.
+            It shrinks toward the market only when settled trades show the model is significantly worse.
             There is no one-contract minimum. The cash cap starts at <strong className="text-white">2.5% of available cash</strong> and moves between 1% and 5% from settled results.
             The 0.07 coefficient is used only when the series fee type is quadratic and its fee multiplier is known. That figure is an estimate, rounded up to the next cent. It is not the billed fee. If the series schedule is missing, the bot does not treat expected value as proven positive and does not treat the 2.5% cap as satisfied. The exchange fill fee is stored when the order response includes it.
             Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:

@@ -1,11 +1,9 @@
-"""Shrink the model toward the market for size and expected value only.
+"""Size from the raw model unless settled trades say it is worse.
 
 The market number is the fee-free mid: the average of the YES bid and YES ask.
-A missing bid uses the executable ask (ask-implied). The NO probability is one
-minus that YES mid, so both sides share one number.
-
-``p_blend = w * p_model + (1 - w) * p_market`` with ``w`` from
-``VIBE_MODEL_BLEND_WEIGHT`` (default 0.25). Entry gates keep the raw model.
+A missing bid uses the executable ask. ``w`` is 1 until calibration shows a
+significant negative Brier skill. Entry gates keep the raw model either way.
+``VIBE_MODEL_BLEND_WEIGHT`` is not applied.
 """
 
 from __future__ import annotations
@@ -90,11 +88,10 @@ def quantity_after_blend(
     cap_contracts: int,
     one_contract_fits_cash: bool,
 ) -> tuple[int, str]:
-    """Size after the raw gates have already passed.
+    """Cap quarter Kelly after the raw gates have passed.
 
-    The blend gate, when on, requires positive blended EV. When off, quarter
-    Kelly still uses the blend, and a non-positive Kelly becomes one contract
-    if the cap and cash allow it.
+    There is no one-contract floor. When the blend gate is on, expected value
+    at the sizing probability must be positive.
     """
     kelly = max(0, int(kelly_quantity))
     cap = max(0, int(cap_contracts))

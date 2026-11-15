@@ -103,7 +103,7 @@ class TestStrategyMath(unittest.TestCase):
             per_contract_premium=0.50,
         )
         self.assertIsNotNone(msg)
-        self.assertIn("Kelly size is zero", msg)
+        self.assertIn("cannot buy a whole contract", msg)
         self.assertNotIn("no edge at ask", msg)
 
     def test_single_contract_retry_respects_zero_cap(self):

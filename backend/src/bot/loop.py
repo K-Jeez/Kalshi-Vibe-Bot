@@ -2330,10 +2330,33 @@ async def scan_and_trade(
 
                                             new_qty, new_limit = largest_qualifying_buy(levels, int(quantity), _qualifies)
                                             if new_qty < 1 or new_limit is None:
+                                                from src.bot.book_walk import fresh_quote_skip_reasons
+
+                                                reasons = fresh_quote_skip_reasons(
+                                                    levels,
+                                                    original_ask=float(trade_price),
+                                                    side=trade_side,
+                                                    ai_yes_pct=ai_yes,
+                                                    yes_ask=float(market.get("yes_ask") or 0),
+                                                    no_ask=float(market.get("no_ask") or 0),
+                                                    min_edge=float(eff_min_edge),
+                                                    min_ai=int(eff_min_ai),
+                                                    fee_multiplier=_fee.get("fee_multiplier"),
+                                                    fee_type=_fee.get("fee_type"),
+                                                    blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
+                                                    balance=float(balance),
+                                                    cap_fraction=float(entry_cap),
+                                                    win_probability=float(blend["win_probability"]),
+                                                    model_cost=float(expected_model_cost),
+                                                    equity=float(total_portfolio_value),
+                                                    open_event_cost=event_open,
+                                                    event_reserve=0.0,
+                                                    min_gross=float(getattr(settings, "local_min_residual_payoff", 0) or 0),
+                                                )
                                                 quote_blocked = True
                                                 action_taken = {
                                                     "status": "no_trade",
-                                                    "summary": "Skipped — fresh book no longer passes the raw gates",
+                                                    "summary": "Skipped — fresh quote: " + ", ".join(reasons),
                                                     "signal": signal,
                                                 }
                                             else:

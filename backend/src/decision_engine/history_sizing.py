@@ -32,14 +32,16 @@ def market_yes_probability(implied_pct: float, side: str) -> float:
     return unit
 
 
-def calibrated_blend_weight(rows: list[dict], *, prior: float = PRIOR_BLEND_WEIGHT, min_sample: int = MIN_SAMPLE) -> float:
-    """Trust the model more when its YES Brier beats the fee-free mid.
+def brier_skill(rows: list[dict]) -> tuple[float, float, int]:
+    """Return ``(skill, t_stat, n)`` for model-versus-market YES Brier.
 
-    ``rows`` need ``model_yes``, ``market_yes`` (0–1) and ``outcome_yes`` (0 or 1).
-    Fewer than ``min_sample`` rows keeps ``prior`` (the configured blend weight).
+    Skill is ``(market − model) / market``. Negative means the model is worse.
+    ``t_stat`` is the paired difference of squared errors (positive when the
+    model is worse) divided by its standard error. ``n`` is the usable count.
     """
-    start = max(0.0, min(1.0, float(prior)))
-    usable = []
+    diffs: list[float] = []
+    model_brier = 0.0
+    market_brier = 0.0
     for row in rows or []:
         try:
             model = float(row.get("model_yes"))
@@ -49,23 +51,52 @@ def calibrated_blend_weight(rows: list[dict], *, prior: float = PRIOR_BLEND_WEIG
             continue
         if not all(math.isfinite(v) for v in (model, market, outcome)):
             continue
-        usable.append((max(0.0, min(1.0, model)), max(0.0, min(1.0, market)), 1.0 if outcome >= 0.5 else 0.0))
-    if len(usable) < int(min_sample):
-        return start
-    model_brier = sum((m - y) ** 2 for m, _k, y in usable) / len(usable)
-    market_brier = sum((k - y) ** 2 for _m, k, y in usable) / len(usable)
-    if market_brier <= 1e-12:
-        return start
-    skill = (market_brier - model_brier) / market_brier
-    if not math.isfinite(skill):
-        return start
-    # Skill 0 keeps the prior. Skill 1 moves the rest of the way to the model.
-    # A model that loses to the market shrinks the weight toward 0.
-    if skill >= 0:
-        weight = start + min(1.0, skill) * (1.0 - start)
+        model = max(0.0, min(1.0, model))
+        market = max(0.0, min(1.0, market))
+        y = 1.0 if outcome >= 0.5 else 0.0
+        model_se = (model - y) ** 2
+        market_se = (market - y) ** 2
+        model_brier += model_se
+        market_brier += market_se
+        diffs.append(model_se - market_se)
+    n = len(diffs)
+    if n < 1:
+        return 0.0, 0.0, 0
+    model_brier /= n
+    market_brier /= n
+    skill = 0.0 if market_brier <= 1e-12 else (market_brier - model_brier) / market_brier
+    mean = sum(diffs) / n
+    if n < 2:
+        return float(skill), 0.0, n
+    var = sum((item - mean) ** 2 for item in diffs) / (n - 1)
+    se = math.sqrt(var / n) if var > 0 else 0.0
+    if se <= 1e-12:
+        t_stat = math.inf if mean > 1e-12 else 0.0
     else:
-        weight = start * max(0.0, 1.0 + skill)
-    return max(0.0, min(1.0, weight))
+        t_stat = mean / se
+    return float(skill), float(t_stat), n
+
+
+def sizing_model_weight(rows: list[dict], *, min_sample: int = MIN_SAMPLE) -> float:
+    """Share of the raw model used for size. Gates stay on the raw model.
+
+    The weight is 1 until settled trades show the model is significantly worse
+    than the market (paired Brier t above 2, and at least ``min_sample``
+    rows). The shrink is the skill itself, so a skill of about −0.04 stays
+    near 1 and a large negative skill moves size toward the fee-free mid.
+    """
+    skill, t_stat, n = brier_skill(rows)
+    if n < int(min_sample) or skill >= -1e-12:
+        return 1.0
+    if math.isfinite(t_stat) and t_stat <= 2.0:
+        return 1.0
+    return max(0.0, min(1.0, 1.0 + float(skill)))
+
+
+def calibrated_blend_weight(rows: list[dict], *, prior: float = PRIOR_BLEND_WEIGHT, min_sample: int = MIN_SAMPLE) -> float:
+    """Sizing weight. ``prior`` is ignored; evidence decides any shrink."""
+    del prior
+    return sizing_model_weight(rows, min_sample=min_sample)
 
 
 def effective_edge_floor(

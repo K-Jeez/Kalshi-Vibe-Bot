@@ -323,12 +323,11 @@ def test_repair_matches_synthetic_round_totals_and_closes_an_open_settlement():
 
 
 def test_sizing_uses_history_and_does_not_force_one_contract():
-    prior = calibrated_blend_weight([], prior=0.25)
-    assert prior == 0.25
+    assert calibrated_blend_weight([], prior=0.25) == 1.0
     rows = [{"model_yes": 0.70, "market_yes": 0.50, "outcome_yes": 1.0} for _ in range(8)]
-    assert calibrated_blend_weight(rows, prior=0.25) > 0.25
+    assert calibrated_blend_weight(rows, prior=0.25) == 1.0
     weak = [{"model_yes": 0.20, "market_yes": 0.80, "outcome_yes": 1.0} for _ in range(8)]
-    assert calibrated_blend_weight(weak, prior=0.25) < 0.25
+    assert calibrated_blend_weight(weak, prior=0.25) == 0.0
     assert cap_fraction_for_return(1, 10, 8) > cap_fraction_for_return(1, 10, 8, model_cost=5)
     assert effective_edge_floor(4, realized_pnl=1, cost=10, model_cost=0, n=8) == 4
     raised = effective_edge_floor(4, realized_pnl=-5, cost=10, model_cost=1, n=8)
@@ -397,6 +396,93 @@ def test_stop_ignores_last_trade_and_a_closed_market():
     assert stop_loss_triggered_from_position(pos, stop_loss_drawdown_pct=0.80) is True
     pos.kalshi_market_status = "finalized"
     assert stop_loss_triggered_from_position(pos, stop_loss_drawdown_pct=0.80) is False
+
+
+def test_model_size_keeps_small_edges_and_requote_names_the_failure():
+    from src.bot.book_walk import fresh_quote_skip_reasons, largest_qualifying_buy
+    from src.decision_engine.history_sizing import brier_skill, sizing_model_weight
+    from src.decision_engine.strategy_gates import kelly_contract_cap_for_bankroll
+    from src.decision_engine.strategy_math import kelly_order_skip_summary
+
+    mild = [{"model_yes": 0.62, "market_yes": 0.58, "outcome_yes": 1.0 if i % 2 == 0 else 0.0} for i in range(64)]
+    skill, t_stat, n = brier_skill(mild)
+    assert n == 64 and skill < 0 and t_stat < 2
+    assert sizing_model_weight(mild) == 1.0
+
+    cap = kelly_contract_cap_for_bankroll(96, 0.60, fee_multiplier=1, fee_type="quadratic", bankroll_fraction=0.025)
+    espen_raw, _tag = kelly_contracts_for_order(
+        96, "YES", 68, 0.60, 0.40, 0.60, 0.40,
+        per_contract_premium=0.60, max_kelly_contracts=cap, win_probability=0.68,
+    )
+    espen_blend, _old = kelly_contracts_for_order(
+        96, "YES", 68, 0.60, 0.40, 0.60, 0.40,
+        per_contract_premium=0.60, max_kelly_contracts=cap,
+        win_probability=0.2407 * 0.68 + (1 - 0.2407) * 0.58,
+    )
+    assert espen_raw >= 1
+    assert espen_blend == 0
+
+    mhu_cap = kelly_contract_cap_for_bankroll(96, 0.54, fee_multiplier=1, fee_type="quadratic", bankroll_fraction=0.025)
+    mhu_raw, _tag = kelly_contracts_for_order(
+        96, "YES", 71, 0.54, 0.46, 0.48, 0.52,
+        per_contract_premium=0.54, max_kelly_contracts=mhu_cap, win_probability=0.71,
+    )
+    mhu_blend, _old = kelly_contracts_for_order(
+        96, "YES", 71, 0.54, 0.46, 0.48, 0.52,
+        per_contract_premium=0.54, max_kelly_contracts=mhu_cap,
+        win_probability=0.2407 * 0.71 + (1 - 0.2407) * 0.48,
+    )
+    assert mhu_raw >= 1
+    assert mhu_blend == 0
+
+    wording = kelly_order_skip_summary(
+        96, "YES", 51, 0.50, 0.50, 0.50, 0.50,
+        per_contract_premium=0.50, win_probability=0.51,
+    )
+    assert wording is not None
+    assert "below one contract" in wording
+    assert "cannot buy" not in wording
+
+    common = dict(
+        side="YES",
+        ai_yes_pct=68,
+        min_edge=4,
+        min_ai=55,
+        fee_multiplier=1,
+        fee_type="quadratic",
+        blend_ev_gate=False,
+        balance=96,
+        cap_fraction=0.025,
+        win_probability=0.68,
+        model_cost=0.0846,
+        equity=96,
+        open_event_cost=0,
+        event_reserve=0,
+        min_gross=0.10,
+    )
+
+    def _ok(qty, limit):
+        return size_still_fits(
+            quantity=qty,
+            limit=limit,
+            yes_ask=limit,
+            no_ask=1.0 - limit,
+            **common,
+        )
+
+    qty, limit = largest_qualifying_buy([(0.60, 20.0)], 8, _ok)
+    assert qty >= 1 and abs(limit - 0.60) < 1e-9
+    assert _ok(1, 0.60) is False
+    moved = fresh_quote_skip_reasons(
+        [(0.80, 10.0)],
+        original_ask=0.60,
+        yes_ask=0.80,
+        no_ask=0.20,
+        **common,
+    )
+    assert "raw edge" in moved
+    assert "price moved" in moved
+    assert fresh_quote_skip_reasons([], original_ask=0.60, yes_ask=0.60, no_ask=0.40, **common) == ["empty/thin book"]
 
 
 def test_private_lan_can_mutate_and_public_internet_cannot():
