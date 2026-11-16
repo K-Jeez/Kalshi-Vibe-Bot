@@ -1261,6 +1261,9 @@ async def scan_and_trade(
 
     db = db_factory()
     ai_log = ai_provider_log_label()
+    from src.clients.xai_client import begin_live_lookup_scan
+
+    begin_live_lookup_scan()
     try:
         from src.database.models import get_vault_balance
 
@@ -2914,6 +2917,9 @@ async def scan_and_trade(
             decision["volume"] = _snap["volume"]
             decision["expires_in_days"] = _snap["expires_in_days"]
 
+            from src.event_live_lookup import attach_lookup_cost
+
+            attach_lookup_cost(decision, str(market.get("event_ticker") or market.get("id") or ""))
             db.add(DecisionLog(
                 id=decision_log_row_id,
                 market_id=ticker_clean,
@@ -3040,6 +3046,9 @@ async def scan_and_trade(
             len(scan_queue),
             time.monotonic() - _sweep_started,
         )
+        from src.event_live_lookup import flush_unbilled_lookups
+
+        flush_unbilled_lookups(db)
 
     except Exception as e:
         logger.exception("Error in scan_and_trade: %s", scrub_text(e))
@@ -3051,6 +3060,12 @@ async def scan_and_trade(
             }
         )
         db.rollback()
+        try:
+            from src.event_live_lookup import flush_unbilled_lookups
+
+            flush_unbilled_lookups(db)
+        except Exception:
+            pass
     finally:
         db.close()
 

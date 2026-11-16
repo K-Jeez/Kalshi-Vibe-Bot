@@ -15,7 +15,7 @@ import json
 import random
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
@@ -33,14 +33,38 @@ _UNCERTAINTY_LEVELS = {"low", "medium", "high", "abstain"}
 _EMPTY_FACTS = {"", "none", "none found", "n/a", "unknown", "no facts"}
 
 
-def live_search_parameters(max_results: int = 4) -> dict:
-    """Bounded web and X search for one in-play lookup. Chat completions use this field."""
-    return {
-        "mode": "on",
-        "return_citations": False,
-        "max_search_results": max(1, min(8, int(max_results))),
-        "sources": [{"type": "web"}, {"type": "x"}],
-    }
+# One short score lookup. The Responses tools have no result-count field.
+_LIVE_LOOKUP_MAX_OUTPUT_TOKENS = 200
+_scan_logged_client_errors: Set[int] = set()
+_scan_client_error: Optional[int] = None
+
+
+def begin_live_lookup_scan() -> None:
+    """Allow one loud client-error log per scan, then try the endpoint again next scan."""
+    global _scan_client_error
+    _scan_logged_client_errors.clear()
+    _scan_client_error = None
+
+
+def live_lookup_tools(today) -> List[dict]:
+    """Web search plus X posts from today UTC through tomorrow UTC. Dates are YYYY-MM-DD.
+
+    Image and video understanding are left off. ``to_date`` is exclusive, so tomorrow
+    covers the rest of today.
+    """
+    start = today.isoformat() if hasattr(today, "isoformat") else str(today)
+    if hasattr(today, "isoformat") and not isinstance(today, str):
+        end = (today + timedelta(days=1)).isoformat()
+    else:
+        end = start
+    return [
+        {"type": "web_search"},
+        {"type": "x_search", "from_date": start, "to_date": end},
+    ]
+
+
+def live_lookup_max_tool_calls(value: int) -> int:
+    return max(1, min(8, int(value)))
 
 
 def _facts_from_search(content: str) -> str:
@@ -165,6 +189,79 @@ async def _post_xai_chat_with_retries(
             _logger.error("xAI error for '%s': %s", log_label[:80], e)
             return ("err", str(e))
     return ("err", last_msg)
+
+
+def _note_live_lookup_client_error(status: int, snippet: str) -> None:
+    """Log a 4xx once per scan. Later lookups in that scan do not call the endpoint."""
+    global _scan_client_error
+    code = int(status)
+    _scan_client_error = code
+    if code in _scan_logged_client_errors:
+        return
+    _scan_logged_client_errors.add(code)
+    _logger.error("xAI live lookup HTTP %s: %s", code, (snippet or "")[:300])
+
+
+def output_text_from_response(data: dict) -> str:
+    """Final assistant text. Tool-call items and citations are not part of the answer."""
+    output = data.get("output") if isinstance(data, dict) else None
+    if isinstance(output, list):
+        texts: List[str] = []
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and content.strip():
+                texts.append(content.strip())
+                continue
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    if part["text"].strip():
+                        texts.append(part["text"].strip())
+        if texts:
+            return texts[-1]
+    direct = data.get("output_text") if isinstance(data, dict) else None
+    return direct.strip() if isinstance(direct, str) else ""
+
+
+async def _post_xai_responses(
+    *,
+    api_key: str,
+    payload: dict,
+    timeout_sec: float,
+    log_label: str,
+) -> Tuple[Any, ...]:
+    """POST ``/responses``. ``("ok", body)``, ``("client", status, snippet)``, or ``("transient", message)``."""
+    url = f"{XAI_BASE_URL}/responses"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    last_msg = "Request failed"
+    http = _xai_http()
+    for attempt in range(2):
+        try:
+            resp = await http.post(url, json=payload, headers=headers, timeout=timeout_sec)
+            if resp.is_success:
+                body = resp.json()
+                return ("ok", body if isinstance(body, dict) else {})
+            code = resp.status_code
+            snippet = (resp.text or "")[:300]
+            if code in _RETRYABLE_XAI_HTTP and attempt == 0:
+                await asyncio.sleep(_xai_retry_delay_seconds(attempt))
+                last_msg = f"HTTP {code}"
+                continue
+            if 400 <= code < 500 and code not in (408, 429):
+                return ("client", code, snippet)
+            return ("transient", f"HTTP {code} {snippet}")
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_msg = "Request timed out" if isinstance(exc, httpx.TimeoutException) else str(exc)
+            if attempt == 0:
+                await asyncio.sleep(_xai_retry_delay_seconds(attempt))
+                continue
+            return ("transient", last_msg)
+        except Exception as exc:
+            return ("transient", str(exc))
+    return ("transient", last_msg)
 
 
 def _xai_money_object_cents(obj: object) -> Optional[float]:
@@ -501,44 +598,60 @@ class XAIClient:
             _logger.error("xAI error for '%s': %s", market_title[:60], e)
             return _error_response(str(e))
 
-    async def search_event_facts(self, title: str, *, max_results: int = 4) -> Optional[str]:
-        """One short live web+X lookup. None means the call failed. Empty means nothing usable."""
+    async def search_event_facts(self, title: str, *, max_tool_calls: int = 3) -> dict:
+        """One Responses API web+X lookup.
+
+        ``facts`` is text, ``""`` when the model found nothing, or None when the call
+        did not succeed. ``client_error`` is an HTTP 4xx status. A 5xx or timeout
+        leaves both empty so the caller can still run the model.
+        """
+        global _scan_client_error
+        if _scan_client_error is not None:
+            return {"facts": None, "client_error": _scan_client_error, "usage": None}
+        today = datetime.now(timezone.utc).date()
         payload: dict = {
             "model": self.model,
-            "messages": [
+            "input": [
                 {
                     "role": "system",
                     "content": (
-                        'Reply with JSON only: {"facts":"<current score or status and the source time, '
-                        'or empty if you cannot find one>"}.'
+                        'Reply with JSON only: {"facts":"<current score, clock, and key player stats, '
+                        'or empty if you cannot find them>"}. Do not describe images or video.'
                     ),
                 },
-                {"role": "user", "content": f"Current score and status for: {title}"},
+                {"role": "user", "content": f"Current score, clock, and key player stats for: {title}"},
             ],
-            "temperature": 0.01,
-            "max_tokens": 160,
-            "response_format": {"type": "json_object"},
-            "search_parameters": live_search_parameters(max_results),
+            "tools": live_lookup_tools(today),
+            "max_tool_calls": live_lookup_max_tool_calls(max_tool_calls),
+            "max_output_tokens": _LIVE_LOOKUP_MAX_OUTPUT_TOKENS,
+            "temperature": 0,
         }
         try:
-            outcome, resp_or_msg = await _post_xai_chat_with_retries(
+            outcome = await _post_xai_responses(
                 api_key=self.api_key,
                 payload=payload,
                 timeout_sec=_XAI_CHAT_TIMEOUT_SEC,
                 log_label=f"live {title}",
-                max_attempts=2,
             )
         except Exception as exc:
-            _logger.warning("live search failed for '%s': %s", title[:80], exc)
-            return None
-        if outcome != "ok":
-            return None
-        try:
-            data = resp_or_msg.json()
-            content = data["choices"][0]["message"]["content"]
-        except Exception:
-            return None
-        return _facts_from_search(content)
+            _logger.warning("live lookup failed for '%s': %s", title[:80], exc)
+            return {"facts": None, "client_error": None, "usage": None}
+        kind = outcome[0]
+        if kind == "client":
+            status = int(outcome[1])
+            _note_live_lookup_client_error(status, str(outcome[2] if len(outcome) > 2 else ""))
+            return {"facts": None, "client_error": status, "usage": None}
+        if kind != "ok":
+            _logger.warning("live lookup unavailable for '%s': %s", title[:80], outcome[-1])
+            return {"facts": None, "client_error": None, "usage": None}
+        data = outcome[1] if isinstance(outcome[1], dict) else {}
+        recorded: dict = {}
+        attach_model_usage(recorded, data, started=time.perf_counter())
+        return {
+            "facts": _facts_from_search(output_text_from_response(data)),
+            "client_error": None,
+            "usage": recorded.get("usage"),
+        }
 
     async def analyze_event_best_trade(
         self,
@@ -939,14 +1052,10 @@ def uncertainty_from_result(result: dict) -> dict:
 
 def attach_model_usage(result: dict, data: dict, *, started: float) -> None:
     """Attach token counts and cost labels. Does not copy prompt or completion text."""
-    from src.model_usage import estimate_usd, prompt_fingerprint, usage_from_response
+    from src.model_usage import estimate_with_tools, prompt_fingerprint, usage_from_response
 
     usage = usage_from_response(data if isinstance(data, dict) else {})
-    usage["estimated_usd"] = estimate_usd(
-        usage.get("input_tokens"),
-        usage.get("output_tokens"),
-        usage.get("cached_input_tokens"),
-    )
+    usage["estimated_usd"] = estimate_with_tools(usage)
     usage["duration_sec"] = round(max(0.0, time.perf_counter() - float(started)), 3)
     usage["estimate_is_not_a_bill"] = usage.get("actual_usd") is None
     usage["cost_label"] = "provider_reported" if usage.get("actual_usd") is not None else "list_price_estimate"

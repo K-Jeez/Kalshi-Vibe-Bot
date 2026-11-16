@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
 
-from src.clients.xai_client import XAIClient, live_search_parameters
+from src.clients.xai_client import XAIClient, begin_live_lookup_scan, live_lookup_tools
 from src.decision_engine.analyzer import DecisionEngine
 from src.decision_engine.strategy_math import derive_buy_side
-from src.event_live_lookup import clear_event_search_cache, context_for_market
+from src.event_live_lookup import attach_lookup_cost, clear_event_search_cache, context_for_market
+from src.model_usage import tool_invocation_usd
 
 
 def test_side_follows_the_larger_executable_edge():
@@ -97,9 +100,8 @@ class _Search:
         self.facts = facts
         self.calls = 0
 
-    async def search_event_facts(self, _title, *, max_results=4):
+    async def search_event_facts(self, _title, **_kwargs):
         self.calls += 1
-        assert max_results == 4
         return self.facts
 
 
@@ -197,22 +199,150 @@ def test_a_live_feed_or_a_search_error_does_not_add_a_lookup():
     assert failed.calls == 1
 
 
-def test_search_payload_uses_web_and_x_only(monkeypatch):
+def _responses_payload():
+    answer = '{"facts":"Home 21, away 18, 3:12 left in Q2. Smith 12 pts."}'
+    return {
+        "output_text": answer,
+        "output": [
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "status": "completed",
+                "arguments": '{"facts":"WRONG"}',
+            },
+            {"type": "custom_tool_call", "name": "x_keyword_search", "id": "xs_1"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": answer,
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://example.com/game", "title": "Box score"}
+                        ],
+                    }
+                ],
+            },
+        ],
+        "usage": {
+            "input_tokens": 200,
+            "output_tokens": 40,
+            "server_side_tool_usage_details": {
+                "web_search_calls": 1,
+                "x_search_calls": 1,
+                "x_posts_fetched": 4,
+                "x_users_fetched": 0,
+            },
+        },
+    }
+
+
+def test_responses_lookup_parses_output_text_and_prices_tools(monkeypatch):
     captured = {}
 
     async def fake_post(**kwargs):
         captured.update(kwargs["payload"])
+        return ("ok", _responses_payload())
 
-        class Response:
-            def json(self):
-                return {"choices": [{"message": {"content": '{"facts":"none found"}'}}]}
+    monkeypatch.setattr("src.clients.xai_client._post_xai_responses", fake_post)
+    begin_live_lookup_scan()
+    result = asyncio.run(XAIClient(api_key="x", model="grok-4.3").search_event_facts("Game", max_tool_calls=99))
+    assert result["facts"].startswith("Home 21")
+    assert "WRONG" not in result["facts"]
+    assert result["client_error"] is None
+    assert captured["model"] == "grok-4.3"
+    assert "search_parameters" not in captured
+    assert captured["max_output_tokens"] == 200
+    assert captured["max_tool_calls"] == 8
+    today = datetime.now(timezone.utc).date()
+    assert captured["tools"] == live_lookup_tools(today)
+    assert captured["tools"][1]["from_date"] == today.isoformat()
+    assert captured["tools"][1]["to_date"] == (today + timedelta(days=1)).isoformat()
+    blob = str(captured["tools"])
+    assert "enable_image" not in blob
+    assert "enable_video" not in blob
+    usage = result["usage"]
+    assert usage["web_search_calls"] == 1
+    assert usage["x_posts_fetched"] == 4
+    tool_usd = tool_invocation_usd(web_search_calls=1, x_posts_fetched=4)
+    assert tool_usd == 0.025
+    assert usage["estimated_usd"] >= tool_usd
+    clear_event_search_cache()
+    decision = {"xai_analysis": {"usage": {"estimated_usd": 0.01, "input_tokens": 100}}}
+    # The HTTP result is not in the unbilled list until lookup_event_facts records it.
+    recorded = asyncio.run(
+        context_for_market(
+            market={"id": "P", "event_ticker": "EVT"},
+            fact={"skip": False, "context": "", "reason": ""},
+            client=XAIClient(api_key="x", model="grok-4.3"),
+            seconds_until=600,
+            title="Game",
+        )
+    )
+    assert recorded[0].startswith("Home 21")
+    attach_lookup_cost(decision, "EVT")
+    merged = decision["xai_analysis"]["usage"]
+    assert merged["estimated_usd"] == round(0.01 + usage["estimated_usd"], 6)
+    assert merged["web_search_calls"] == 1
+    assert merged["lookup_usd"] == usage["estimated_usd"]
 
-        return "ok", Response()
 
-    monkeypatch.setattr("src.clients.xai_client._post_xai_chat_with_retries", fake_post)
-    text = asyncio.run(XAIClient(api_key="x", model="grok-4.3").search_event_facts("Game", max_results=99))
-    assert text == ""
-    assert captured["search_parameters"] == live_search_parameters(99)
-    assert captured["search_parameters"]["sources"] == [{"type": "web"}, {"type": "x"}]
-    assert captured["search_parameters"]["max_search_results"] == 8
-    assert "search_parameters" not in captured["messages"][0]
+def test_lookup_410_is_logged_once_and_does_not_fall_through(monkeypatch, caplog):
+    calls = {"n": 0}
+
+    async def fake_post(**_kwargs):
+        calls["n"] += 1
+        return ("client", 410, "Live search is deprecated. Please switch to the Agent Tools API.")
+
+    monkeypatch.setattr("src.clients.xai_client._post_xai_responses", fake_post)
+    begin_live_lookup_scan()
+    clear_event_search_cache()
+    client = XAIClient(api_key="x", model="grok-4.3")
+    with caplog.at_level(logging.ERROR, logger="xai_client"):
+        first = asyncio.run(
+            context_for_market(
+                market={"id": "A", "event_ticker": "EA"},
+                fact={"skip": False, "context": "", "reason": ""},
+                client=client,
+                seconds_until=300,
+                title="Game A",
+            )
+        )
+        second = asyncio.run(
+            context_for_market(
+                market={"id": "B", "event_ticker": "EB"},
+                fact={"skip": False, "context": "", "reason": ""},
+                client=client,
+                seconds_until=300,
+                title="Game B",
+            )
+        )
+    errors = [rec for rec in caplog.records if rec.levelno >= logging.ERROR and "410" in rec.message]
+    assert len(errors) == 1
+    assert "HTTP 410" in errors[0].message
+    assert calls["n"] == 1
+    assert "skipped before the model" in first[1]
+    assert "410" in first[1]
+    assert "skipped before the model" in second[1]
+
+    async def down(**_kwargs):
+        return ("transient", "HTTP 503")
+
+    monkeypatch.setattr("src.clients.xai_client._post_xai_responses", down)
+    begin_live_lookup_scan()
+    clear_event_search_cache()
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="xai_client"):
+        opened = asyncio.run(
+            context_for_market(
+                market={"id": "C", "event_ticker": "EC"},
+                fact={"skip": False, "context": "", "reason": ""},
+                client=client,
+                seconds_until=300,
+                title="Game C",
+            )
+        )
+    assert opened == ("", "")
+    assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
