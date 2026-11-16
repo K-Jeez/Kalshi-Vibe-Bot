@@ -113,31 +113,27 @@ class TestIsTradeableMarket(unittest.TestCase):
         m["no_ask_size"] = 500.0
         ok, reason = is_tradeable_market(m, max_hours=48, min_residual_payoff=0.10)
         self.assertFalse(ok)
-        self.assertIn("no_buy_meets_residual_floor", reason)
+        self.assertEqual(reason, "no_buyable_leg")
 
     def test_healthy_book_passes_with_residual_floor_enabled(self):
         ok, reason = is_tradeable_market(self._base(), max_hours=48, min_residual_payoff=0.10)
         self.assertTrue(ok, reason)
 
-    def test_extreme_yes_favorite_snapshot_skew_rejected(self):
+    def test_both_asks_outside_the_buy_window_are_not_sent_to_the_model(self):
+        m = self._base()
+        m["yes_ask"] = 0.11
+        m["yes_bid"] = 0.08
+        m["yes_spread"] = 0.03
+        m["no_ask"] = 0.93
+        m["no_bid"] = 0.88
+        m["no_spread"] = 0.05
+        ok, reason = is_tradeable_market(m, max_hours=48, min_residual_payoff=0.10)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "no_buyable_leg")
+
+    def test_a_liquid_side_inside_the_window_passes(self):
         m = self._base()
         m["yes_price"] = 0.94
         m["no_price"] = 0.08
-        ok, reason = is_tradeable_market(m, max_hours=48)
-        self.assertFalse(ok)
-        self.assertEqual(reason, "extreme_binary_snapshot_skew")
-
-    def test_extreme_no_favorite_snapshot_skew_rejected(self):
-        m = self._base()
-        m["yes_price"] = 0.06
-        m["no_price"] = 0.95
-        ok, reason = is_tradeable_market(m, max_hours=48)
-        self.assertFalse(ok)
-        self.assertEqual(reason, "extreme_binary_snapshot_skew")
-
-    def test_high_yes_without_low_no_not_skew_blocked(self):
-        m = self._base()
-        m["yes_price"] = 0.94
-        m["no_price"] = 0.25
-        ok, reason = is_tradeable_market(m, max_hours=48)
+        ok, reason = is_tradeable_market(m, max_hours=48, min_residual_payoff=0.10)
         self.assertTrue(ok, reason)

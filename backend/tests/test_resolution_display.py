@@ -176,8 +176,8 @@ class TestResolutionDisplay(unittest.TestCase):
             kalshi_market_result=None,
             close_time="2020-01-01T00:00:00Z",
         )
-        self.assertIsNone(display_estimated_price_optional(p_pending))
-        self.assertIsNone(unrealized_pnl_display_optional(p_pending))
+        self.assertAlmostEqual(display_estimated_price_optional(p_pending), 0.66)
+        self.assertIsNotNone(unrealized_pnl_display_optional(p_pending))
 
     def test_display_ends_iso_uses_close_when_closed_even_if_expected_later(self):
         """Regression: illiquid closed rows must not count down from far ``expected_expiration_time``."""

@@ -260,15 +260,12 @@ def display_estimated_price_optional(pos: Position) -> Optional[float]:
     intrinsic ``0`` or ``1`` **even if** contractual ``close_time`` is still in the future (common for
     sports props where the event resolves before the series contractual end).
 
-    Otherwise, after the display **Ends** instant has passed: ``None`` until an official ``yes``/``no``
-    is available (outcome pending). Before that: Kalshi **last trade** on YES (stored ``estimated_price``)
-    or bid/current.
+    Until that official result exists, keep the live last trade (or bid). A closed
+    trading window does not blank the estimate.
     """
     intrinsic = resolution_intrinsic_mark_dollars(pos)
     if intrinsic is not None:
         return float(intrinsic)
-    if position_market_close_time_passed(pos):
-        return None
     ep = getattr(pos, "estimated_price", None)
     if ep is not None:
         return max(0.0, min(1.0, float(ep)))
@@ -291,9 +288,6 @@ def unrealized_pnl_display_optional(pos: Position) -> Optional[float]:
             entry_price=ep,
             fees_paid=fp,
         )
-    if position_market_close_time_passed(pos):
-        return None
-
     mark_live = display_estimated_price_optional(pos)
     assert mark_live is not None
     return unrealized_pnl_from_executable_mark_dollars(
@@ -365,12 +359,26 @@ def stop_loss_mark_drawdown_fraction(
     return (entry_px - est_px) / entry_px
 
 
+def market_trading_closed(pos: Position) -> bool:
+    """True once Kalshi has closed, determined, or finalized the market."""
+    status = str(getattr(pos, "kalshi_market_status", None) or "").strip().lower()
+    return status in {"closed", "determined", "finalized", "settled"}
+
+
 def stop_loss_triggered_from_position(pos: Position, *, stop_loss_drawdown_pct: float) -> bool:
-    """Stop-loss auto-exit: **entry price** vs display **Est. Value** (per contract, fees excluded)."""
-    est = display_estimated_price_optional(pos)
+    """Stop-loss auto-exit from the executable best bid, not the last trade.
+
+    A missing or zero bid does not fall back to last trade. A market that has
+    already stopped trading is not a sell target.
+    """
+    if market_trading_closed(pos):
+        return False
+    bid = getattr(pos, "bid_price", None)
+    if bid is None:
+        return False
     return stop_loss_value_drawdown_triggered(
         entry_price_per_contract=stop_loss_entry_price_per_contract(pos),
-        estimated_price_per_contract=float(est) if est is not None else None,
+        estimated_price_per_contract=float(bid),
         stop_loss_drawdown_pct=stop_loss_drawdown_pct,
     )
 

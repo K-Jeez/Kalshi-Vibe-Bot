@@ -140,6 +140,25 @@ class DecisionLog(Base):
     trade_mode          = Column(String, default="live")  # historical column; app is live-only
 
 
+class ShadowBuy(Base):
+    """A BUY the bot did not fill, kept so the outcome can be scored later."""
+
+    __tablename__ = "shadow_buys"
+
+    id = Column(String, primary_key=True)
+    market_id = Column(String, nullable=False)
+    side = Column(String, nullable=False)
+    reason = Column(String, nullable=True)
+    edge_pct = Column(Float, default=0.0)
+    ai_yes_pct = Column(Integer, nullable=True)
+    ask = Column(Float, nullable=False)
+    blended_side_pct = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    resolved_result = Column(String, nullable=True)
+    hypothetical_pnl = Column(Float, nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class EventSeriesLock(Base):
     """Once a market inside an event series is chosen for entry, lock the series to prevent contradictory sibling trades."""
 
@@ -254,8 +273,11 @@ class ActivityEvent(Base):
     limit_price = Column(Float, nullable=True)
     fill_price = Column(Float, nullable=True)
     fill_qty = Column(Float, nullable=True)
+    fill_count_fp = Column(String, nullable=True)
     fees_dollars = Column(Float, nullable=True)
     client_order_id = Column(String, nullable=True, index=True)
+    exchange_order_id = Column(String, nullable=True)
+    fee_kind = Column(String, nullable=True)
     order_status = Column(String, nullable=True)
     quote_captured_at = Column(String, nullable=True)
     quote_age_ms = Column(Integer, nullable=True)
@@ -272,6 +294,18 @@ class ActivityEvent(Base):
 
 _engine: Optional[Engine] = None
 _session_factory = None
+
+
+def release_sqlite_write(db) -> None:
+    """End the current transaction before a network call.
+
+    A flushed SQLite write stays locked until commit. Reconcile must not keep
+    that lock while it waits on Kalshi.
+    """
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 def _sqlite_on_connect(dbapi_conn, _connection_record) -> None:
@@ -375,6 +409,9 @@ def init_db():
         _ensure_tuning_row(db)
         _ensure_vault_row(db)
         _purge_paper_trade_mode_rows(engine)
+        from src.policy_migration import migrate_database_url
+
+        migrate_database_url(settings.database_url)
         _force_tuning_ai_provider_xai(engine)
         app_logger.info("Database initialized: %s", settings.database_url)
     finally:
@@ -522,6 +559,9 @@ def _run_migrations(engine):
         ("decision_logs", "ai_probability_yes_pct", "INTEGER"),
         ("decision_logs", "market_implied_probability_pct", "INTEGER"),
         ("decision_logs", "kelly_contracts", "INTEGER"),
+        ("activity_events", "exchange_order_id", "TEXT"),
+        ("activity_events", "fee_kind", "TEXT"),
+        ("activity_events", "fill_count_fp", "TEXT"),
     ]
     with engine.connect() as conn:
         _ensure_kalshi_reconcile_cursor_table(conn)
@@ -556,7 +596,7 @@ def _ensure_tuning_row(db) -> None:
         stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
         min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
         min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
-        max_open_positions=int(settings.bot_max_open_positions),
+        max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),
         ai_provider=AI_PROVIDER,
     )
     db.add(row)
@@ -681,7 +721,7 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
             stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
             min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
             min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
-            max_open_positions=int(settings.bot_max_open_positions),
+            max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),
             ai_provider=AI_PROVIDER,
         )
         db.add(row)

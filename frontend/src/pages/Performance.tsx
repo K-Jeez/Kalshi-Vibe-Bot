@@ -160,8 +160,8 @@ export const Performance: React.FC = () => {
             }
             detail={
               closedPositions === 0
-                ? 'No closed positions yet'
-                : `${closedPositions} closed position${closedPositions === 1 ? '' : 's'}`
+                ? 'No closed positions yet. Fill rows in the trade ledger are a different count.'
+                : `${closedPositions} closed position${closedPositions === 1 ? '' : 's'} in this database. Fill rows are counted separately (${stats.fills_total}).`
             }
             color={
               closedPositions === 0
@@ -184,7 +184,10 @@ export const Performance: React.FC = () => {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="ui-surface-sm p-5">
           <h2 className="text-base font-semibold text-white mb-1">P&amp;L over time</h2>
-          <p className="text-xs text-white mb-4">Cumulative realized P&amp;L by close date (closed positions).</p>
+          <p className="text-xs text-white mb-4">
+            Realized P&amp;L for each America/Denver calendar day. This is that day only, not a running total,
+            and it counts closed positions in this database, not every historical exchange fill.
+          </p>
           {stats && stats.daily_pnl.length > 0 ? (
             <ResponsiveContainer width="100%" height={240}>
               <LineChart data={stats.daily_pnl}>
@@ -197,7 +200,7 @@ export const Performance: React.FC = () => {
                 />
                 <Tooltip
                   {...tooltipStyle}
-                  formatter={(v: number) => [`$${Number(v).toFixed(2)}`, 'Cumulative realized']}
+                  formatter={(v: number) => [`$${Number(v).toFixed(2)}`, 'Denver day']}
                 />
                 <Line
                   type="monotone" dataKey="pnl" stroke="#3b82f6" strokeWidth={2}
@@ -244,8 +247,9 @@ export const Performance: React.FC = () => {
         <div>
           <h2 className="text-base font-semibold text-white">Closed positions</h2>
           <p className="text-xs text-white mt-0.5">
-            Kalshi-style: Entry / Exit are avg $/contract from fills. Invested $ = open notional + buy fees + sell
-            fees. Net realized = (qty × exit) − invested. % vs invested; hover for vs $1/contract par.
+            Entry / Exit are the average fill price per contract. Invested $ is cash spent
+            (entry premium plus buy fees plus sell fees), not the current mark and not a settlement payout.
+            Net realized = (qty × exit) − that cash spent.
           </p>
         </div>
         <ClosedPositionsTable

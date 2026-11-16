@@ -31,7 +31,7 @@ class TestStrategyMath(unittest.TestCase):
         self.assertEqual(max_whole_contracts_for_cash(13.03, 0.56), 23)
         self.assertEqual(max_whole_contracts_for_cash(0.55, 0.56), 0)
 
-    def test_single_contract_retry_when_kelly_rounds_to_zero_but_edge(self):
+    def test_fractional_kelly_is_not_raised_to_one_contract(self):
         qty, tag = kelly_contracts_for_order(
             12.0,
             "YES",
@@ -42,8 +42,8 @@ class TestStrategyMath(unittest.TestCase):
             0.44,
             per_contract_premium=0.56,
         )
-        self.assertEqual(tag, "single_contract_retry")
-        self.assertEqual(qty, 1)
+        self.assertEqual(tag, "none")
+        self.assertEqual(qty, 0)
 
     def test_order_size_none_when_no_edge(self):
         qty, tag = kelly_contracts_for_order(
@@ -103,7 +103,7 @@ class TestStrategyMath(unittest.TestCase):
             per_contract_premium=0.50,
         )
         self.assertIsNotNone(msg)
-        self.assertIn("Kelly size is zero", msg)
+        self.assertIn("cannot buy a whole contract", msg)
         self.assertNotIn("no edge at ask", msg)
 
     def test_single_contract_retry_respects_zero_cap(self):
@@ -133,8 +133,8 @@ class TestStrategyMath(unittest.TestCase):
             0.50,
             per_contract_premium=0.55,
         )
-        self.assertEqual(tag, "cash_capped")
-        self.assertEqual(qty, 5)
+        self.assertEqual(tag, "quarter_kelly")
+        self.assertEqual(qty, 1)
 
 
 if __name__ == "__main__":

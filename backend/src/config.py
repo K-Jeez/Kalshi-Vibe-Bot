@@ -2,6 +2,8 @@
 Configuration management — loads all settings from the .env file.
 """
 
+import os
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -11,10 +13,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Single source for tuning fallbacks (SQLite NULL / missing ORM attr); keep in sync with ``Settings`` field defaults below.
-DEFAULT_MIN_EDGE_TO_BUY_PCT = 5
-DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 60
+DEFAULT_MIN_EDGE_TO_BUY_PCT = 4
+DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 70
 DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.80
-DEFAULT_MAX_OPEN_POSITIONS = 30
+APPROVED_MAX_OPEN_POSITIONS = 12
+DEFAULT_MAX_OPEN_POSITIONS = APPROVED_MAX_OPEN_POSITIONS
 DEFAULT_AI_PROVIDER = "xai"
 
 # Market analysis uses xAI (Grok) only; persisted ``tuning_state.ai_provider`` is always xai.
@@ -28,7 +31,8 @@ class Settings(BaseSettings):
     """Application settings sourced from backend/.env."""
 
     model_config = SettingsConfigDict(
-        env_file=str(BASE_DIR / ".env"),
+        # Pytest must not read the operator's backend/.env (keys, database path, hours).
+        env_file=None if ("pytest" in sys.modules or os.environ.get("VIBE_UNDER_TEST") == "1") else str(BASE_DIR / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         # Ignore unknown keys (e.g. removed TRADING_MODE / GEMINI_* / hybrid-era vars).
@@ -58,6 +62,19 @@ class Settings(BaseSettings):
     min_edge_to_buy_pct: int = DEFAULT_MIN_EDGE_TO_BUY_PCT
     # Minimum AI win probability (0–100) on the **purchased** side before a buy (clamped 51–99).
     min_ai_win_prob_buy_side_pct: int = DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
+    # Kept so an older .env still loads. Order size does not read this value.
+    # Size uses the raw model unless settled Brier skill is significantly negative.
+    vibe_model_blend_weight: float = 0.25
+    # When false, raw edge and win-prob gates decide the buy. Size uses the model
+    # (or the evidence-shrunk probability). When true, that probability's EV must be positive.
+    vibe_blend_ev_gate: bool = False
+    # Bought side must be inside this window. Replaces the old 26¢ floor.
+    min_entry_price_cents: int = 50
+    max_entry_price_cents: int = 85
+    # Flat dollars per buy. Whole contracts only. A stake that cannot buy one contract is a skip.
+    flat_stake_dollars: float = 3.0
+    # Recorded xAI spend for the Denver day. 0 means no cap. Analysis stops until the next day.
+    daily_xai_budget_usd: float = 3.0
 
     # ── Bot scan configuration ───────────────────────────────────────────────────
     bot_scan_interval: int = 10              # seconds between full market scans
@@ -65,11 +82,11 @@ class Settings(BaseSettings):
     bot_loop_scan_timeout_sec: int = 1800
     # Max AI scan units (batch or single) per play sweep; 0 = no cap. When set, units are ordered by
     # highest 24h volume among member markets so liquid lines are analyzed first; remaining units wait for later sweeps.
-    bot_max_scan_queue_units_per_sweep: int = 0
+    bot_max_scan_queue_units_per_sweep: int = 50
     bot_min_volume: float = 1500.0           # minimum 24h contract volume (tradeability scan; sports uses higher floor in code)
     # Vetting: BUY window prefers ``expected_expiration_time`` (event end); if missing or past, falls back to
     # the soonest future instant among ``vetting_horizon_time`` and contractual ``close_time`` (``BOT_MAX_HOURS``).
-    bot_max_hours: int = 6
+    bot_max_hours: int = 4
     # Kalshi ``GET /markets`` ``max_close_ts`` (contractual close); widen so listings return before vetting.
     bot_markets_fetch_max_close_hours: int = 720
     bot_max_spread: float = 0.15             # max bid/ask spread for YES or NO leg when buying (0.15 = 15¢)
@@ -77,19 +94,31 @@ class Settings(BaseSettings):
     # After a stop-loss exit, skip new entries on that ticker for this many minutes (0 = off).
     reentry_cooldown_minutes: int = 120
     # Min gross upside (1 − native ask) on the purchased leg: scan filter + pre-buy gate (0 disables gate).
-    # When > 0, scan requires at least one leg to be liquid and meet this floor (avoids LLM calls on skewed books).
-    local_min_residual_payoff: float = 0.12
+    # 0.10 allows about a 90¢ entry. Entries between 10¢ and 12¢ of upside are tagged for tracking.
+    local_min_residual_payoff: float = 0.10
+    # Series with no usable live feed are skipped before the model. Comma-separated prefixes.
+    vibe_live_facts_enabled: bool = True
+    vibe_prefilter_series_prefixes: str = (
+        "KXESOCCER,KXCS2,KXCSGO,KXDOTA,KXVALORANT,KXLOL,KXITF,KXCHALLENGER,KXATPCHALLENGER,KXWTACHALLENGER"
+    )
+    vibe_numeric_prefilter_series_prefixes: str = "KXSILVER,KXGOLD,KXINX,KXNDX,KXSPX"
+    # In-play markets with no live feed get one Responses API web+X lookup per event.
+    vibe_live_search_enabled: bool = False
+    # Caps max_tool_calls on that request. These tools have no result-count field.
+    vibe_live_search_max_tool_calls: int = 1
+    vibe_live_search_within_sec: int = 10800
+    vibe_live_search_cache_sec: int = 300
+    # Paid lookups allowed in one sweep. 0 means no cap.
+    vibe_live_search_max_per_sweep: int = 8
 
     # ── Exit hygiene ──────────────────────────────────────────────────────────────
-    # No stop-loss or counter-trend exits until the position is this old (minutes).
-    # Reduces churn from spread / micro noise right after IOC fills.
-    exit_grace_minutes: float = 10.0
-    # Stop-loss: exit when Est. Value has fallen this fraction vs **entry price** per contract (fees excluded). 0.80 = 80% drawdown.
+    # Exit grace is not applied. The field remains so an old .env key is ignored
+    # rather than crashing. Stop-loss can fire as soon as the bid has fallen.
+    exit_grace_minutes: float = 0.0
+    # Stop-loss: exit when the executable best bid has fallen this fraction vs entry (fees excluded). 0.80 = 80%.
     stop_loss_drawdown_pct: float = DEFAULT_STOP_LOSS_DRAWDOWN_PCT
     # When False, the bot never auto-exits for stop-loss (manual sells still allowed). Default off until enabled in Settings.
     stop_loss_selling_enabled: bool = False
-    # Max simultaneous open positions; at or over this, market scan + AI analysis for new entries pauses.
-    bot_max_open_positions: int = DEFAULT_MAX_OPEN_POSITIONS
     # Periodically ``GET /markets`` for recent closed rows missing ``kalshi_market_result`` (0 = disable).
     closed_resolution_refresh_interval_sec: int = 450
     # Max closed rows checked per refresh tick (missing-result filter only when automated).
@@ -103,9 +132,9 @@ class Settings(BaseSettings):
 
     # ── Server ───────────────────────────────────────────────────────────────────
     port: int = 8000
-    # Localhost only. Set HOST=0.0.0.0 to listen on the network; trading routes still
-    # reject non-local clients unless LOCAL_API_TOKEN is set (see local_guard.py).
-    host: str = "127.0.0.1"
+    # Listen on the LAN so a phone can open the dashboard. Mutating routes accept
+    # loopback and private LAN addresses only (see local_guard.py).
+    host: str = "0.0.0.0"
     # Optional shared secret for non-local state-changing requests. Header: X-Vibe-Bot-Token.
     # Empty means remote mutations are denied. The local dashboard does not send this.
     local_api_token: str = ""
@@ -139,10 +168,18 @@ class Settings(BaseSettings):
         self.local_min_residual_payoff = max(0.0, min(0.50, float(self.local_min_residual_payoff)))
         self.min_edge_to_buy_pct = max(0, min(95, int(self.min_edge_to_buy_pct)))
         self.min_ai_win_prob_buy_side_pct = max(51, min(99, int(self.min_ai_win_prob_buy_side_pct)))
-        self.bot_max_open_positions = max(1, min(500, int(self.bot_max_open_positions)))
+        self.vibe_model_blend_weight = max(0.0, min(1.0, float(self.vibe_model_blend_weight)))
         self.exit_grace_minutes = max(0.0, min(1440.0, float(self.exit_grace_minutes)))
         self.stop_loss_drawdown_pct = max(0.01, min(0.90, float(self.stop_loss_drawdown_pct)))
         self.kalshi_markets_page_delay_sec = max(0.0, min(0.5, float(self.kalshi_markets_page_delay_sec)))
+        self.vibe_live_search_max_tool_calls = max(1, min(8, int(self.vibe_live_search_max_tool_calls)))
+        self.vibe_live_search_within_sec = max(60, min(86400, int(self.vibe_live_search_within_sec)))
+        self.vibe_live_search_cache_sec = max(15, min(1800, int(self.vibe_live_search_cache_sec)))
+        self.vibe_live_search_max_per_sweep = max(0, min(100, int(self.vibe_live_search_max_per_sweep)))
+        self.min_entry_price_cents = max(1, min(99, int(self.min_entry_price_cents)))
+        self.max_entry_price_cents = max(self.min_entry_price_cents, min(99, int(self.max_entry_price_cents)))
+        self.flat_stake_dollars = max(0.0, min(1000.0, float(self.flat_stake_dollars)))
+        self.daily_xai_budget_usd = max(0.0, min(500.0, float(self.daily_xai_budget_usd)))
         iv = int(self.closed_resolution_refresh_interval_sec)
         self.closed_resolution_refresh_interval_sec = max(0, min(86400, iv))
         self.closed_resolution_refresh_batch = max(1, min(50, int(self.closed_resolution_refresh_batch)))

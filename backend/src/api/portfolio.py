@@ -1197,8 +1197,9 @@ async def close_position_manual(position_id: str, db: Session = Depends(get_db))
         pos.dead_market = False
 
         synced = await sync_open_position_qty_cost_from_kalshi(kc, pos, db=db)
-        if synced:
-            if int(pos.quantity or 0) <= 0:
+        full_exit = pre_qty > 0 and int(sold_qty_trade) >= int(pre_qty)
+        if synced or full_exit:
+            if int(pos.quantity or 0) <= 0 or full_exit:
                 pos.quantity = int(sold_qty_trade)
                 if pre_entry_price > 1e-12:
                     pos.entry_price = pre_entry_price

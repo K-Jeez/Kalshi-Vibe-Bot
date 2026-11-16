@@ -9,7 +9,7 @@ export const AIAnalysis: React.FC = () => {
   const [analyses, setAnalyses] = useState<DecisionAnalysis[]>([])
   const [analysisStats, setAnalysisStats] = useState<AnalysesStats | null>(null)
 
-  const { data: wsData } = useWebSocket('ws://localhost:8000/ws')
+  const { data: wsData } = useWebSocket('')
 
   const dedupeAnalyses = useCallback((items: DecisionAnalysis[]) => {
     // Keep most recent entry per market_id (initial DB load can include duplicates)

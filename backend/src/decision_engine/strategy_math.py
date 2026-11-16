@@ -1,4 +1,4 @@
-"""Edge and full Kelly sizing for binary Kalshi contracts (prices as 0–1 dollars per $1 payoff)."""
+"""Edge and quarter Kelly sizing for binary Kalshi contracts (prices as 0–1 dollars per $1 payoff)."""
 
 from __future__ import annotations
 
@@ -105,6 +105,16 @@ def kelly_contracts_for_side(
     return int(math.floor(stake / b + 1e-12))
 
 
+def whole_contracts_for_stake(stake_dollars: float, price: float, cash: float) -> int:
+    """How many whole contracts a flat dollar stake buys. Never rounds up to one."""
+    px = float(price)
+    if not math.isfinite(px) or px <= 1e-12:
+        return 0
+    wanted = int(math.floor(float(stake_dollars) / px + 1e-12))
+    affordable = int(math.floor(max(0.0, float(cash)) / px + 1e-12))
+    return max(0, min(wanted, affordable))
+
+
 def max_whole_contracts_for_cash(bankroll: float, per_contract_premium: float) -> int:
     """Largest whole-contract count affordable at ``per_contract_premium`` (premium $/contract, 0–1)."""
     br = float(bankroll)
@@ -112,6 +122,14 @@ def max_whole_contracts_for_cash(bankroll: float, per_contract_premium: float) -
     if not math.isfinite(br) or not math.isfinite(px) or br <= 0 or px <= 1e-12:
         return 0
     return int(math.floor(br / px + 1e-12))
+
+
+def _kelly_fraction(probability: float, price: float) -> float:
+    p = max(0.0, min(1.0, float(probability)))
+    b = max(0.0, min(1.0, float(price)))
+    if b <= 1e-12 or b >= 1.0 - 1e-12 or p <= b + 1e-12:
+        return 0.0
+    return max(0.0, min(1.0, (p - b) / (1.0 - b)))
 
 
 def kelly_contracts_for_order(
@@ -125,16 +143,27 @@ def kelly_contracts_for_order(
     *,
     per_contract_premium: float,
     max_kelly_contracts: Optional[int] = None,
+    win_probability: Optional[float] = None,
 ) -> Tuple[int, str]:
-    """Whole-contract size for a buy: full Kelly (floored), capped by cash at ``per_contract_premium``.
+    """Whole-contract size: quarter Kelly, then the cash cap.
 
-    If Kelly rounds to **zero** contracts but the Kelly fraction is still **positive** (edge at the ask),
-    the bot buys **one** contract when cash can afford it (``single_contract_retry``).
+    A quarter-Kelly fraction that floors to zero contracts is not raised to one.
+    There is no minimum bet size.
 
-    Returns ``(quantity, tag)`` where ``tag`` is ``full_kelly``, ``cash_capped``, ``single_contract_retry``,
-    or ``none`` (no edge at ask and/or cannot afford one contract at ``per_contract_premium``).
+    Returns ``(quantity, tag)`` where ``tag`` is ``quarter_kelly``, ``cash_capped``,
+    or ``none``.
     """
-    k = kelly_contracts_for_side(bankroll, side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    from src.decision_engine.strategy_gates import KELLY_FRACTION
+
+    if win_probability is None:
+        k_full = kelly_contracts_for_side(bankroll, side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    else:
+        ya, na = executable_asks(yes_ask, no_ask, yes_mid, no_mid)
+        price = ya if str(side).upper() == "YES" else na
+        full_f = _kelly_fraction(float(win_probability), price)
+        br = float(bankroll)
+        k_full = int(math.floor(full_f * br / price + 1e-12)) if price > 1e-12 and full_f > 0 and br > 0 else 0
+    k = int(math.floor(float(k_full) * float(KELLY_FRACTION) + 1e-12))
     cap = max_whole_contracts_for_cash(bankroll, per_contract_premium)
     if cap < 1:
         return 0, "none"
@@ -153,14 +182,7 @@ def kelly_contracts_for_order(
         q = _cap(min(int(k), cap))
         if q < 1:
             return 0, "none"
-        return q, "cash_capped" if q < int(k) else "full_kelly"
-
-    f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
-    if f > 1e-12:
-        q = _cap(1)
-        if q < 1:
-            return 0, "none"
-        return q, "single_contract_retry"
+        return q, "cash_capped" if q < int(k) else "quarter_kelly"
     return 0, "none"
 
 
@@ -175,6 +197,7 @@ def kelly_order_skip_summary(
     *,
     per_contract_premium: float,
     max_kelly_contracts: Optional[int] = None,
+    win_probability: Optional[float] = None,
 ) -> Optional[str]:
     """Human-readable skip reason when :func:`kelly_contracts_for_order` returns quantity 0; else ``None``."""
     qty, _tag = kelly_contracts_for_order(
@@ -187,9 +210,20 @@ def kelly_order_skip_summary(
         no_mid,
         per_contract_premium=per_contract_premium,
         max_kelly_contracts=max_kelly_contracts,
+        win_probability=win_probability,
     )
     if qty >= 1:
         return None
+
+    if win_probability is not None:
+        ya, na = executable_asks(yes_ask, no_ask, yes_mid, no_mid)
+        price = ya if str(side).upper() == "YES" else na
+        ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
+        if _kelly_fraction(float(win_probability), price) <= 1e-12:
+            return (
+                f"Skipped — sizing probability {float(win_probability) * 100:.1f}% "
+                f"is not above the ask ({ask_c}¢), so quarter Kelly is zero"
+            )
 
     f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
     if f <= 1e-12:
@@ -204,17 +238,38 @@ def kelly_order_skip_summary(
 
     ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
     deploy = float(bankroll)
-    if max_kelly_contracts is not None and int(max_kelly_contracts) < 1 and max_whole_contracts_for_cash(
-        deploy, per_contract_premium
-    ) >= 1:
+    cash_can_buy = max_whole_contracts_for_cash(deploy, per_contract_premium) >= 1
+    if max_kelly_contracts is not None and int(max_kelly_contracts) < 1 and cash_can_buy:
         return (
             "Skipped — stake cap cannot fund one whole contract at the ask "
             f"({ask_c}¢ on ${deploy:.2f} deployable). The order is not enlarged to full cash."
         )
+    if not cash_can_buy:
+        return (
+            "Skipped — available cash cannot buy a whole contract "
+            f"at {ask_c}¢ (deployable ${deploy:.2f})"
+        )
     return (
-        "Skipped — Kelly size is zero and available cash cannot buy "
-        f"a whole contract at current prices (deployable ${deploy:.2f}, ask {ask_c}¢)"
+        "Skipped — quarter Kelly is below one contract "
+        f"(deployable ${deploy:.2f} can buy at {ask_c}¢; size is not raised to one)"
     )
+
+
+def derive_buy_side(
+    ai_yes_pct: int,
+    yes_ask: Optional[float],
+    no_ask: Optional[float],
+    yes_mid: float,
+    no_mid: float,
+) -> str:
+    """YES or NO from P(YES) versus the executable asks.
+
+    The larger edge wins. A model SKIP is not an input. The server gates
+    still decide whether that side is a buy.
+    """
+    edge_yes = edge_pct_for_side("YES", ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    edge_no = edge_pct_for_side("NO", ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    return "YES" if edge_yes >= edge_no else "NO"
 
 
 def ai_win_prob_pct_on_buy_side(side: str, ai_yes_pct: int) -> int:

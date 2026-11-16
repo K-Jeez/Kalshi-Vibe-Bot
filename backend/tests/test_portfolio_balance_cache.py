@@ -100,10 +100,9 @@ def test_get_portfolio_429_then_success(monkeypatch):
         out = await c.get_portfolio()
         assert out["cash"] == pytest.approx(2.50)
         assert c._http_get_signed.await_count == 2
-        # Delay written in get_portfolio: 0.55 * (attempt + 1) + 0.05 * attempt.
-        # This is the code's own backoff, not a separately verified Kalshi quota.
+        # Base delay is 0.55s on the first retry, plus a small jitter, and never above 2s.
         sleep.assert_awaited_once()
-        assert sleep.await_args.args[0] == pytest.approx(0.55)
+        assert 0.55 <= sleep.await_args.args[0] <= 2
 
     asyncio.run(_run())
 

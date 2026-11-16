@@ -86,7 +86,7 @@ def test_stake_cap_does_not_expand_to_full_cash_and_still_allows_one_contract():
     )
     assert summary is not None and "not enlarged to full cash" in summary
 
-    # When the cap can fund one contract, a positive fractional Kelly still buys one.
+    # A positive fractional Kelly is not raised to one contract.
     qty, tag = kelly_contracts_for_order(
         10.0,
         "YES",
@@ -98,7 +98,7 @@ def test_stake_cap_does_not_expand_to_full_cash_and_still_allows_one_contract():
         per_contract_premium=0.40,
         max_kelly_contracts=1,
     )
-    assert (qty, tag) == (1, "single_contract_retry")
+    assert (qty, tag) == (0, "none")
 
 
 def test_invalid_batch_market_id_does_not_keep_the_side():
@@ -122,8 +122,8 @@ def test_invalid_batch_market_id_does_not_keep_the_side():
     assert "LEG-A" not in parsed["best_market_id"]
 
 
-def test_host_default_is_localhost_only():
-    assert Settings.model_fields["host"].default == "127.0.0.1"
+def test_host_default_listens_on_the_lan():
+    assert Settings.model_fields["host"].default == "0.0.0.0"
 
 
 def test_remote_mutation_requires_token_and_local_dashboard_does_not():
@@ -133,9 +133,13 @@ def test_remote_mutation_requires_token_and_local_dashboard_does_not():
     assert path_is_protected("POST", "/positions/abc/close")
     assert not path_is_protected("GET", "/portfolio")
     assert mutation_is_allowed(host="127.0.0.1", headers={}, configured_token="")
-    assert not mutation_is_allowed(host="192.168.1.20", headers={}, configured_token="")
+    assert client_is_local("192.168.1.20")
+    assert client_is_local("10.1.2.3")
+    assert not client_is_local("8.8.8.8")
+    assert mutation_is_allowed(host="192.168.1.20", headers={}, configured_token="")
+    assert not mutation_is_allowed(host="8.8.8.8", headers={}, configured_token="")
     assert not mutation_is_allowed(
-        host="192.168.1.20",
+        host="8.8.8.8",
         headers={"x-vibe-bot-token": "nope"},
         configured_token="secret-token",
     )

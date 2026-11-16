@@ -142,6 +142,9 @@ async def reconcile_live_positions_from_kalshi(
     n_flat = sync_recent_closed_from_flat_portfolio_rows(
         db, trade_mode=trade_mode, api_rows=api_rows
     )
+    from src.database.models import release_sqlite_write
+
+    release_sqlite_write(db)
     n_fin = await finalize_live_closed_positions_from_kalshi(
         db,
         trade_mode=trade_mode,

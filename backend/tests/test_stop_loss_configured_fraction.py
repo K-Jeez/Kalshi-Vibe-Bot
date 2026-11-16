@@ -86,18 +86,18 @@ def test_eighty_percent_boundary_uses_entry_price_and_ignores_fees():
         stop_loss_drawdown_pct=CONFIGURED_FRACTION,
     )
     # Fees are outside the formula. 0.11 is only a 78% price drop.
-    held = _position(estimated_price=0.11, fees_paid=5.0, entry_cost=3.0)
+    held = _position(estimated_price=0.11, bid_price=0.11, fees_paid=5.0, entry_cost=3.0)
     assert stop_loss_triggered_from_position(held, stop_loss_drawdown_pct=CONFIGURED_FRACTION) is False
-    one_lot = _position(quantity=1, entry_cost=ENTRY, estimated_price=EST_AT_THRESHOLD)
-    many = _position(quantity=7, entry_cost=ENTRY * 7, estimated_price=EST_AT_THRESHOLD)
+    one_lot = _position(quantity=1, entry_cost=ENTRY, estimated_price=EST_AT_THRESHOLD, bid_price=EST_AT_THRESHOLD)
+    many = _position(quantity=7, entry_cost=ENTRY * 7, estimated_price=EST_AT_THRESHOLD, bid_price=EST_AT_THRESHOLD)
     assert stop_loss_triggered_from_position(one_lot, stop_loss_drawdown_pct=CONFIGURED_FRACTION)
     assert stop_loss_triggered_from_position(many, stop_loss_drawdown_pct=CONFIGURED_FRACTION)
 
 
-def test_bid_collapse_does_not_replace_est_value():
+def test_stop_uses_the_executable_bid_not_the_last_trade():
     held = _position(estimated_price=0.40, bid_price=0.01, current_price=0.01)
     assert display_estimated_price_optional(held) == 0.40
-    assert stop_loss_triggered_from_position(held, stop_loss_drawdown_pct=CONFIGURED_FRACTION) is False
+    assert stop_loss_triggered_from_position(held, stop_loss_drawdown_pct=CONFIGURED_FRACTION) is True
 
 
 def test_missing_or_non_finite_est_does_not_trigger():
@@ -118,13 +118,13 @@ def test_missing_or_non_finite_est_does_not_trigger():
         estimated_price=0.01,
         bid_price=0.01,
     )
-    assert display_estimated_price_optional(past_end) is None
+    assert display_estimated_price_optional(past_end) == 0.01
     assert stop_loss_triggered_from_position(past_end, stop_loss_drawdown_pct=CONFIGURED_FRACTION) is False
 
 
 def test_stored_entry_snapshot_is_not_the_live_threshold():
     # 80% drop. A stored 95% rule would not fire. The passed 0.80 rule does.
-    held = _position(estimated_price=EST_AT_THRESHOLD, stop_loss_drawdown_pct_at_entry=0.95)
+    held = _position(estimated_price=EST_AT_THRESHOLD, bid_price=EST_AT_THRESHOLD, stop_loss_drawdown_pct_at_entry=0.95)
     assert stop_loss_triggered_from_position(held, stop_loss_drawdown_pct=CONFIGURED_FRACTION) is True
 
 
@@ -245,15 +245,15 @@ def test_enabled_selling_follows_the_fraction_and_does_not_promise_a_fill(tmp_pa
         assert status == "open"
 
 
-def test_stop_inside_grace_or_bot_stop_does_not_send(tmp_path, monkeypatch):
-    fresh = _position(estimated_price=0.05, opened_at=utc_now())
+def test_fresh_position_can_stop_and_bot_stop_does_not_send(tmp_path, monkeypatch):
+    fresh = _position(estimated_price=0.40, bid_price=0.05, opened_at=utc_now())
     calls, status, _awaiting = _run_monitor(
         tmp_path,
         monkeypatch,
         fresh,
         _monitor_settings(selling=True),
     )
-    assert calls == []
+    assert calls == [("KXTEST-STOP", "YES", 4)]
     assert status == "open"
 
     other = tmp_path / "bot-stopped"
@@ -261,7 +261,7 @@ def test_stop_inside_grace_or_bot_stop_does_not_send(tmp_path, monkeypatch):
     calls, status, _awaiting = _run_monitor(
         other,
         monkeypatch,
-        _position(id="p-stop-2", estimated_price=0.05),
+        _position(id="p-stop-2", estimated_price=0.40, bid_price=0.05),
         _monitor_settings(selling=True),
         allow_exits=False,
     )
@@ -273,7 +273,7 @@ def test_dead_book_records_intent_but_does_not_close(tmp_path, monkeypatch):
     calls, status, awaiting = _run_monitor(
         tmp_path,
         monkeypatch,
-        _position(estimated_price=0.05),
+        _position(estimated_price=0.40, bid_price=0.05),
         _monitor_settings(selling=True),
         sell_result={"skipped_dead_book": True, "status": "skipped_dead_book"},
     )
