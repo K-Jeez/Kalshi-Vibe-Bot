@@ -267,7 +267,8 @@ export const AnalysisDetailBody: React.FC<{
       : yesFromBook != null && yesFromBook > 0
         ? Math.round(yesFromBook * 100)
         : null
-  const impliedLabel = a.decision === 'SKIP' ? 'Market implied (YES ask)' : 'Market implied (buy side)'
+  const impliedLabel = 'Market price of this side'
+  const showBlend = a.blend_weight != null && Number(a.blend_weight) < 0.999 && a.blended_side_pct != null
   const edgePts = a.edge_pct ?? a.edge
   const kelly = a.kelly_contracts ?? 0
   const batchLegId = (a.xai_analysis?.event_batch && String(a.market_id || '').trim()) || ''
@@ -315,11 +316,10 @@ export const AnalysisDetailBody: React.FC<{
             ) : null}
           </p>
           <p className="text-[10px] text-white/60 leading-relaxed">
-            <span className="text-white/75 font-semibold">AI P(YES):</span> Model&apos;s chance this contract{' '}
-            <strong className="text-white/90">settles YES</strong> (one YES figure).
+            <span className="text-white/75 font-semibold">Model’s chance this settles YES.</span>
             <span className="mx-1.5 text-white/35">·</span>
-            <span className="text-white/75 font-semibold">AI P(side):</span> P for the recommended buy side—YES pick ={' '}
-            <strong className="text-white/90">P(YES)</strong>; NO pick = <strong className="text-white/90">100 − P(YES)</strong>
+            <span className="text-white/75 font-semibold">Model’s chance the recommended side wins</span>
+            {' '}(YES uses that chance; NO uses 100 minus it).
             {a.xai_analysis?.event_batch ? (
               <>
                 <span className="mx-1.5 text-white/35">·</span>
@@ -347,7 +347,7 @@ export const AnalysisDetailBody: React.FC<{
                 className="text-[10px] uppercase tracking-wide text-white/65"
                 title="Model’s estimated probability (0–100%) that this contract resolves YES at settlement."
               >
-                AI P(YES)
+                Model’s chance this settles YES
               </p>
               <p className="text-lg font-bold text-sky-300 tabular-nums">{aiYes}%</p>
             </div>
@@ -360,7 +360,7 @@ export const AnalysisDetailBody: React.FC<{
                     : 'If the recommendation is BUY YES, same as P(YES). If BUY NO, equals 100 − P(YES) (probability NO wins).'
                 }
               >
-                AI P(side)
+                Model’s chance the recommended side wins
               </p>
               <p
                 className={`text-lg font-bold tabular-nums ${
@@ -376,14 +376,9 @@ export const AnalysisDetailBody: React.FC<{
                     : `Recommended: ${recSide}`
                   : 'SKIP'}
               </p>
-              {a.blended_side_pct != null ? (
-                <p
-                  className="text-[10px] text-amber-200/90 mt-1"
-                  title="Used for expected value and quarter Kelly. The fee-free mid is (YES bid + YES ask) / 2. Gates still use the raw model."
-                >
-                  Blended P(side) {Number(a.blended_side_pct).toFixed(1)}%
-                  {a.blend_weight != null ? ` · w=${Number(a.blend_weight).toFixed(2)}` : ''}
-                  {a.blend_market ? ` · ${a.blend_market}` : ''}
+              {showBlend ? (
+                <p className="text-[10px] text-amber-200/90 mt-1">
+                  Combined chance (model + market midpoint) {Number(a.blended_side_pct).toFixed(1)}%
                 </p>
               ) : null}
             </div>
@@ -400,7 +395,7 @@ export const AnalysisDetailBody: React.FC<{
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-brand-muted/25 text-xs">
             <div>
-              <span className="text-white/70">Quarter Kelly size </span>
+              <span className="text-white/70">Suggested contracts </span>
               <span className="font-semibold text-amber-300 tabular-nums">{kelly}</span>
               <span className="text-white/70"> contracts</span>
             </div>

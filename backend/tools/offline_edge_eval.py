@@ -138,13 +138,13 @@ def side_from_forecast(model: str, ai_yes_pct: int) -> Optional[str]:
 
 
 def _auto_reason(msg: str) -> str:
-    if "edge" in msg and "autonomous cap" in msg:
+    if "safety cap" in msg or ("edge" in msg and "autonomous cap" in msg):
         return "edge_cap"
     if "AI win prob" in msg and "autonomous cap" in msg:
         return "ai_cap"
-    if "autonomous floor" in msg:
+    if "does not buy under" in msg or "autonomous floor" in msg:
         return "min_entry"
-    if "calibration guard" in msg:
+    if "lost money before" in msg or "calibration guard" in msg:
         return "mid_price_guard"
     return "autonomous_other"
 

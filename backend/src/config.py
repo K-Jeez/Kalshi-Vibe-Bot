@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     bot_loop_scan_timeout_sec: int = 1800
     # Max AI scan units (batch or single) per play sweep; 0 = no cap. When set, units are ordered by
     # highest 24h volume among member markets so liquid lines are analyzed first; remaining units wait for later sweeps.
-    bot_max_scan_queue_units_per_sweep: int = 0
+    bot_max_scan_queue_units_per_sweep: int = 50
     bot_min_volume: float = 1500.0           # minimum 24h contract volume (tradeability scan; sports uses higher floor in code)
     # Vetting: BUY window prefers ``expected_expiration_time`` (event end); if missing or past, falls back to
     # the soonest future instant among ``vetting_horizon_time`` and contractual ``close_time`` (``BOT_MAX_HOURS``).
@@ -98,9 +98,11 @@ class Settings(BaseSettings):
     # In-play markets with no live feed get one Responses API web+X lookup per event.
     vibe_live_search_enabled: bool = True
     # Caps max_tool_calls on that request. These tools have no result-count field.
-    vibe_live_search_max_tool_calls: int = 3
+    vibe_live_search_max_tool_calls: int = 1
     vibe_live_search_within_sec: int = 10800
-    vibe_live_search_cache_sec: int = 90
+    vibe_live_search_cache_sec: int = 300
+    # Paid lookups allowed in one sweep. 0 means no cap.
+    vibe_live_search_max_per_sweep: int = 8
 
     # ── Exit hygiene ──────────────────────────────────────────────────────────────
     # Exit grace is not applied. The field remains so an old .env key is ignored
@@ -165,7 +167,8 @@ class Settings(BaseSettings):
         self.kalshi_markets_page_delay_sec = max(0.0, min(0.5, float(self.kalshi_markets_page_delay_sec)))
         self.vibe_live_search_max_tool_calls = max(1, min(8, int(self.vibe_live_search_max_tool_calls)))
         self.vibe_live_search_within_sec = max(60, min(86400, int(self.vibe_live_search_within_sec)))
-        self.vibe_live_search_cache_sec = max(15, min(600, int(self.vibe_live_search_cache_sec)))
+        self.vibe_live_search_cache_sec = max(15, min(1800, int(self.vibe_live_search_cache_sec)))
+        self.vibe_live_search_max_per_sweep = max(0, min(100, int(self.vibe_live_search_max_per_sweep)))
         iv = int(self.closed_resolution_refresh_interval_sec)
         self.closed_resolution_refresh_interval_sec = max(0, min(86400, iv))
         self.closed_resolution_refresh_batch = max(1, min(50, int(self.closed_resolution_refresh_batch)))

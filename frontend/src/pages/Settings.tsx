@@ -223,13 +223,13 @@ export const Settings: React.FC = () => {
             It shrinks toward the market only when settled trades show the model is significantly worse.
             There is no one-contract minimum. The cash cap starts at <strong className="text-white">2.5% of available cash</strong> and moves between 1% and 5% from settled results.
             The 0.07 coefficient is used only when the series fee type is quadratic and its fee multiplier is known. That figure is an estimate, rounded up to the next cent. It is not the billed fee. If the series schedule is missing, the bot does not treat expected value as proven positive and does not treat the 2.5% cap as satisfied. The exchange fill fee is stored when the order response includes it.
-            Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
-            edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
-            no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
-            Sports markets use a higher volume floor at scan time. Stop-loss compares{' '}
-            <strong className="text-white">entry price</strong> to the{' '}
-            <strong className="text-white">executable best bid</strong> with no wait after entry
-            (sports get +5 minutes). Contrarian longshots still get a fixed stricter edge and AI floor in code.
+            Buys require your minimum edge and minimum model confidence on the purchased side.
+            Built-in limits you do not configure: edge capped at <strong className="text-white">22 points</strong>,
+            no entries below <strong className="text-white">26¢</strong>, a minimum payoff on a win, and a block when the model is very confident on a mid-range price.
+            There is no cap on the model’s own probability. Sports markets use a higher volume floor at scan time.
+            Stop-loss compares <strong className="text-white">entry price</strong> to the{' '}
+            <strong className="text-white">executable best bid</strong> with no wait after entry.
+            A losing edge range can raise its own minimum after enough closed trades.
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
             Numbers here are stored in the <strong className="text-white">database</strong>, not read

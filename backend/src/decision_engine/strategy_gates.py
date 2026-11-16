@@ -10,8 +10,8 @@ from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side, max_w
 
 # Upper/lower bounds applied after user min edge / min AI (Settings + .env).
 MAX_EDGE_TO_BUY_PCT = 22
-# Favorites (e.g. 85% NO at 73¢) are allowed; extreme tail confidence is still blocked.
-MAX_AI_WIN_PROB_BUY_SIDE_PCT = 90
+# Off. A cap belongs on the market price (26¢ floor and the upside floor), not on the model's probability.
+MAX_AI_WIN_PROB_BUY_SIDE_PCT = 100
 MIN_ENTRY_PRICE_CENTS = 26
 # Approved 2026-11-09 bundle. Quarter Kelly is applied in strategy_math.
 # Per-entry cap is 2.5% of available cash including the estimated entry fee.
@@ -324,22 +324,24 @@ def autonomous_buy_gate_failure(
 
     if edge > MAX_EDGE_TO_BUY_PCT + 1e-9:
         return (
-            f"Skipped — edge {edge:.1f} pts exceeds autonomous cap ({MAX_EDGE_TO_BUY_PCT} pts; "
-            "often model overconfidence)"
+            f"Skipped — the model’s edge is {edge:.0f} points, above the "
+            f"{MAX_EDGE_TO_BUY_PCT}-point safety cap"
         )
-    if ai_buy > MAX_AI_WIN_PROB_BUY_SIDE_PCT:
+    if MAX_AI_WIN_PROB_BUY_SIDE_PCT < 100 and ai_buy > MAX_AI_WIN_PROB_BUY_SIDE_PCT:
         return (
-            f"Skipped — AI win prob on buy side {ai_buy}% exceeds autonomous cap "
-            f"({MAX_AI_WIN_PROB_BUY_SIDE_PCT}%)"
+            f"Skipped — the model is {ai_buy}% confident, above the "
+            f"{MAX_AI_WIN_PROB_BUY_SIDE_PCT}% cap"
         )
     if entry_c < MIN_ENTRY_PRICE_CENTS:
-        return f"Skipped — entry {entry_c}¢ below autonomous floor ({MIN_ENTRY_PRICE_CENTS}¢)"
+        return (
+            f"Skipped — price is {entry_c}¢, and the bot does not buy under {MIN_ENTRY_PRICE_CENTS}¢"
+        )
     if (
         ai_buy >= _OVERCONF_AI_MIN_PCT
         and _OVERCONF_ENTRY_CENTS_LO <= entry_c <= _OVERCONF_ENTRY_CENTS_HI
     ):
         return (
-            f"Skipped — calibration guard: AI {ai_buy}% on {entry_c}¢ entry "
-            "(mid-priced high-confidence bucket underperformed historically)"
+            f"Skipped — the model is {ai_buy}% confident on a {entry_c}¢ price, "
+            "and that combination has lost money before"
         )
     return None

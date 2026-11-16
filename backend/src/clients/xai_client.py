@@ -377,7 +377,7 @@ SYSTEM_PROMPT = """You advise an automated trader on Kalshi contracts held to re
 
 Each contract is still a **binary** YES/NO ticket, but some events list **several sibling contracts** where **at most one** YES can win (e.g. soccer **home win / away win / draw**). Then **P(YES)** on one leg is **not** independent of the others: those YES probabilities over the listed outcomes should **partition** ~100% (draw is a first-class outcome; buying NO on \"Team A wins\" is exposure to **both** the other win and a tie).
 
-Goal: estimate **P(YES)** — the probability **this** contract settles YES — using **real-time, horizon-matched** facts and the contract's resolution logic. Always output YES or NO for the side you think wins. The server decides whether that side is a trade.
+Goal: estimate **P(YES)** — the probability **this** contract settles YES — using **real-time, horizon-matched** facts and the contract's resolution logic. Do not name a side. The server compares P(YES) to the asks and decides.
 
 **Threshold vs exact-hit:** Many Kalshi markets (crypto 15m, index levels, weather highs) use a numeric **threshold**: YES if the settlement index is **above** (or below) a stated level at expiration; NO otherwise. Labels like **"Target Price: $X"** are the comparison level — **not** a requirement that the index land exactly on $X. Never assign near-zero P(YES) on a standard above-threshold leg solely because exact equality is unlikely. Follow the **RESOLUTION** block in the user prompt when present.
 
@@ -391,7 +391,7 @@ Do not choose a side mainly because it looks cheap/rich. Never recommend the sid
 
 The server computes edge and quarter-Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks. Keep that field calibrated and honest.
 
-Prompt version decision-2026-11-16. Always output a calibrated ai_probability_yes_pct and direction YES or NO. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable and is never by itself a reason to abstain. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
+Prompt version decision-2026-11-16. Always output a calibrated ai_probability_yes_pct. Do not output a side. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable and is never by itself a reason to abstain. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
 
 USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this contract. Recommend **YES** or **NO** only when that matches your genuine outcome view—not because either side looks under/overpriced.
 
@@ -432,7 +432,6 @@ If recommending YES/NO: include ≥1 **evidence** item that bears on **who wins*
 
 Output strict JSON only:
 {{
-    "direction": "<YES | NO>",
     "ai_probability_yes_pct": <integer 0-100 — your subjective probability YES resolves>,
     "reasoning": "<2-5 sentences>",
     "real_time_context": "<short bullet summary or 'None found'>",
@@ -452,7 +451,7 @@ Output strict JSON only:
     }}
 }}
 
-uncertainty is required. Use abstain only when the contract is unparseable or already expired. Still output direction YES or NO and a probability. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon."""
+uncertainty is required. Use abstain only when the contract is unparseable or already expired. Still output a probability. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon."""
 
 # Line-ladder batches: switch to a sibling leg when its P(YES) beats the model pick by at least this much.
 _LADDER_LIKELIHOOD_OVERRIDE_MIN_GAP_PCT = 5
@@ -471,7 +470,7 @@ Rules: best_market_id must be one from the list. direction is YES or NO for that
 
 The server computes edge and quarter-Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks.
 
-Prompt version decision-2026-11-16. Always output a calibrated ai_probability_yes_pct and direction YES or NO for the chosen contract. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to abstain. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
+Prompt version decision-2026-11-16. Always output a calibrated ai_probability_yes_pct for the chosen contract. Do not output a side. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to abstain. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
 
 EVENT_BATCH_USER_TEMPLATE = """EVENT (shared): {event_title}
 EVENT_TICKER: {event_ticker}
@@ -496,7 +495,6 @@ If you recommend a direction: **evidence** must support **outcome** (which side 
 OUTPUT JSON ONLY:
 {{
   "best_market_id": "<exact market_id from the list above>",
-  "direction": "<YES | NO>",
   "ai_probability_yes_pct": <integer 0-100 for the CHOSEN contract — P(that contract settles YES) at resolution>,
   "outcome_probability_pct_by_market_id": {{ "<market_id_from_list>": <int 0-100>, "...": <int> }},
   "reasoning": "<2-6 sentences: chosen contract, resolution logic, why the chosen side likely wins—avoid framing around mispricing alone>",
@@ -512,7 +510,7 @@ OUTPUT JSON ONLY:
   }}
 }}
 
-uncertainty is required. Use abstain only when the chosen contract is unparseable or already expired. Still output direction YES or NO and a probability. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon.
+uncertainty is required. Use abstain only when the chosen contract is unparseable or already expired. Still output a probability. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon.
 
 Include **outcome_probability_pct_by_market_id** when the legs are **mutually exclusive on YES** (only one can settle YES — e.g. home / away / **draw**). Keys must be **exact** ``market_id`` strings from the list; values are your P(YES) for each; they must **sum to 99–101** across **all listed legs** in that case. Omit this field (or use null) only when legs are clearly **not** such a partition (e.g. unrelated props)."""
 

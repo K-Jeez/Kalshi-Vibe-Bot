@@ -354,7 +354,10 @@ async def get_analyses(limit: int = 50, db: Session = Depends(get_db)):
     try:
         logs = (
             db.query(DecisionLog)
-            .filter(DecisionLog.trade_mode == TRADE_MODE)
+            .filter(
+                DecisionLog.trade_mode == TRADE_MODE,
+                DecisionLog.market_id != "live-lookup",
+            )
             .order_by(DecisionLog.timestamp.desc())
             .limit(limit)
             .all()

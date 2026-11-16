@@ -14,7 +14,7 @@ from src.decision_engine.bucket_caps import MIN_SAMPLE, edge_bucket
 
 PRIOR_BLEND_WEIGHT = 0.25
 # A floor at or above the bucket's top would stop that bucket from ever trading again.
-_BUCKET_TOP = {"4-6": 6.0, "6-8": 8.0, "8-10": 10.0, "10-13": 13.0}
+_BUCKET_TOP = {"4-6": 6.0, "6-8": 8.0, "8-13": 13.0}
 
 
 def market_yes_probability(implied_pct: float, side: str) -> float:
@@ -133,7 +133,7 @@ def effective_edge_floor(
 
 
 def floors_from_closed(rows: list[dict], base_floor: float) -> list[dict]:
-    grouped = {name: {"n": 0, "realized": 0.0, "cost": 0.0, "model_cost": 0.0} for name in ("4-6", "6-8", "8-10", "10-13", "13+")}
+    grouped = {name: {"n": 0, "realized": 0.0, "cost": 0.0, "model_cost": 0.0} for name in ("4-6", "6-8", "8-13", "13+")}
     for row in rows or []:
         name = edge_bucket(float(row.get("edge") or 0.0))
         if name is None or name not in grouped:
@@ -154,6 +154,21 @@ def floors_from_closed(rows: list[dict], base_floor: float) -> list[dict]:
         )
         out.append({"bucket": name, "edge_floor": floor, "n": item["n"]})
     return out
+
+
+def edge_floor_skip_text(edge: float, effective: float, setting: float, bucket: Optional[str]) -> str:
+    """Plain skip line. Names the history add-on when it is above the Settings value."""
+    shown_edge = float(edge)
+    floor = float(effective)
+    base = float(setting)
+    if floor <= base + 1e-9:
+        return f"Skipped — the edge is {shown_edge:.1f} points, below the {floor:.0f}-point minimum"
+    extra = floor - base
+    band = bucket or "that"
+    return (
+        f"Skipped — edge {shown_edge:.1f} below {floor:.1f} — your setting is {base:.0f}, "
+        f"+{extra:.0f} because past {band} point trades lost money"
+    )
 
 
 def floor_for_edge(table: list[dict], edge_pts: float, base_floor: float) -> float:

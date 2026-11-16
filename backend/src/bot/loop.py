@@ -154,21 +154,6 @@ async def _maybe_auto_refresh_closed_resolution(
 
 _CONTAINER_PATTERNS = ("KXMVE", "CROSSCATEGORY", "MULTIGAME")
 
-# Scan: skip LLM escalation when Kalshi YES/NO snapshot mids are both extreme (token waste vs min AI win % gates).
-# ``yes_price`` / ``no_price`` are dollars 0–1 on the normalized market dict.
-_EXTREME_SNAPSHOT_HI = 0.90  # strictly above → >90¢ on that outcome
-_EXTREME_SNAPSHOT_LO = 0.10  # strictly below → <10¢ on that outcome
-
-
-def _extreme_binary_snapshot_skew_rejects(yes_p: float, no_p: float) -> bool:
-    """YES-favorite (YES>90¢ and NO<10¢) or NO-favorite (NO>90¢ and YES<10¢) when both snapshots exist."""
-    if yes_p > _EXTREME_SNAPSHOT_HI and no_p > 0.0 and no_p < _EXTREME_SNAPSHOT_LO:
-        return True
-    if no_p > _EXTREME_SNAPSHOT_HI and yes_p > 0.0 and yes_p < _EXTREME_SNAPSHOT_LO:
-        return True
-    return False
-
-
 def _max_leg_volume_scan_unit(members: List[dict]) -> float:
     """Priority score for a scan unit: max ``volume`` across member markets."""
     best = 0.0
@@ -465,13 +450,10 @@ def is_tradeable_market(
     checks used at execution time, so BUY_NO opportunities are not filtered out solely
     because the YES book is thin.
 
-    When ``min_residual_payoff`` > 0 (``LOCAL_MIN_RESIDUAL_PAYOFF``), at least one leg must
-    also clear the same **gross upside** floor as execution: ``(1 − native ask) ≥ floor`` on
-    that leg. This drops skewed books where only the expensive outcome is liquid (the model would
-    almost always hit the post-analysis residual skip).
-
-    Hardcoded **extreme snapshot** skip: ``yes_price``/``no_price`` in the dust/favorite regime
-    (YES>90¢ and NO<10¢, or NO>90¢ and YES<10¢) to avoid LLM spend the downstream gates would reject.
+    A side is buyable only when it is liquid and its ask is inside the same window
+    the order uses: at least 26¢, and gross upside ``1 − ask`` at least
+    ``min_residual_payoff`` when that floor is on. Markets outside that window
+    are not sent to the model.
     """
     ticker = market.get("id", "").upper()
     if any(pat in ticker for pat in _CONTAINER_PATTERNS):
@@ -485,9 +467,6 @@ def is_tradeable_market(
     yes_price = float(market.get("yes_price") or 0.0)
     if yes_price == 0.0:
         return False, "no_price_data"
-    no_price = float(market.get("no_price") or 0.0)
-    if _extreme_binary_snapshot_skew_rejects(yes_price, no_price):
-        return False, "extreme_binary_snapshot_skew"
 
     # ── Liquidity / spread: YES leg OR NO leg (matches execution paths) ─────
     yes_bid = float(market.get("yes_bid") or 0.0)
@@ -509,14 +488,15 @@ def is_tradeable_market(
     if not yes_ok and not no_ok:
         return False, "illiquid_yes_and_no"
 
-    mr = float(min_residual_payoff or 0.0)
-    if mr > 1e-12:
-        res_yes = (1.0 - yes_ask) if yes_ask > 0.0 else 0.0
-        res_no = (1.0 - no_ask) if no_ask > 0.0 else 0.0
-        viable_yes = yes_ok and res_yes + 1e-12 >= mr
-        viable_no = no_ok and res_no + 1e-12 >= mr
-        if not viable_yes and not viable_no:
-            return False, f"no_buy_meets_residual_floor({mr:.2f})"
+    from src.vetting.screen import buyable_leg
+
+    if not buyable_leg(
+        market,
+        min_upside=float(min_residual_payoff or 0.0),
+        max_spread=float(max_spread),
+        min_top_size=float(min_top_size),
+    ):
+        return False, "no_buyable_leg"
 
     now = datetime.now(timezone.utc)
     sec_until, fail = _seconds_until_buy_horizon(market, now=now)
@@ -1262,8 +1242,10 @@ async def scan_and_trade(
     db = db_factory()
     ai_log = ai_provider_log_label()
     from src.clients.xai_client import begin_live_lookup_scan
+    from src.event_live_lookup import reset_lookup_sweep
 
     begin_live_lookup_scan()
+    reset_lookup_sweep()
     try:
         from src.database.models import get_vault_balance
 
@@ -1399,6 +1381,7 @@ async def scan_and_trade(
             calibrated_blend_weight,
             expected_xai_cost_per_buy,
             floor_for_edge,
+            edge_floor_skip_text,
             load_edge_floors,
             order_covers_model_cost,
             load_model_spend,
@@ -2012,8 +1995,11 @@ async def scan_and_trade(
                         and min_res > 1e-12
                         and gross + 1e-12 < min_res
                     ):
+                        pay_cents = int(round(float(gross) * 100))
+                        floor_cents = int(round(float(min_res) * 100))
                         entry_fail = (
-                            f"Skipped — gross upside ${gross:.2f}/contract below floor ({min_res:.2f})"
+                            f"Skipped — at this price a win would pay only {pay_cents}¢, "
+                            f"below the {floor_cents}¢ minimum"
                         )
                     if gross is not None and 0.10 - 1e-9 <= gross < 0.12 - 1e-9:
                         decision["upside_band"] = "tight_10c"
@@ -2079,7 +2065,7 @@ async def scan_and_trade(
                             float(eff_min_edge),
                             floor_for_edge(edge_floors, edge_now, float(eff_min_edge)),
                         )
-                        risk_note = " (contrarian tier)" if risk_tier else ""
+                        del risk_tier
                         gate_fail = autonomous_buy_gate_failure(
                             side=trade_side,
                             ai_yes_pct=ai_yes,
@@ -2096,17 +2082,21 @@ async def scan_and_trade(
                             action_taken = {
                                 "status": "no_trade",
                                 "summary": (
-                                    f"Skipped — AI win prob on buy side {ai_buy}% < minimum {eff_min_ai}%"
-                                    f"{risk_note}"
+                                    f"Skipped — the model is only {ai_buy}% confident on this side "
+                                    f"(minimum is {eff_min_ai}%)"
                                 ),
                                 "signal": signal,
                             }
                         elif edge_now + 1e-9 < float(eff_min_edge):
+                            from src.decision_engine.bucket_caps import edge_bucket
+
                             action_taken = {
                                 "status": "no_trade",
-                                "summary": (
-                                    f"Skipped — edge {edge_now:.1f} pts < minimum {eff_min_edge:.1f} pts"
-                                    f"{risk_note}"
+                                "summary": edge_floor_skip_text(
+                                    edge_now,
+                                    float(eff_min_edge),
+                                    float(min_edge_base),
+                                    edge_bucket(edge_now),
                                 ),
                                 "signal": signal,
                             }

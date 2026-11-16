@@ -51,8 +51,12 @@ def test_autonomous_passes_high_confidence_favorite():
     )
 
 
-def test_autonomous_blocks_extreme_ai_confidence():
-    assert autonomous_buy_gate_failure(side="NO", ai_yes_pct=5, edge_pct=12.0, entry_price_dollars=0.73)
+def test_ai_probability_cap_is_off():
+    # 95% on the NO side at 73¢ used to hit the 90% cap. The cap is off.
+    assert (
+        autonomous_buy_gate_failure(side="NO", ai_yes_pct=5, edge_pct=12.0, entry_price_dollars=0.73)
+        is None
+    )
 
 
 def test_kelly_contract_cap_scales_with_bankroll():
@@ -63,6 +67,15 @@ def test_kelly_contract_cap_scales_with_bankroll():
 def test_kelly_contract_cap_small_bankroll_skips_instead_of_full_cash():
     # 2.5% of $10.46 cannot buy one contract at 67¢. Do not size up to full cash.
     assert kelly_contract_cap_for_bankroll(10.46, 0.67, fee_multiplier=1, fee_type="quadratic") == 0
+
+
+def test_history_floor_skip_names_the_add_on():
+    from src.decision_engine.history_sizing import edge_floor_skip_text
+
+    text = edge_floor_skip_text(4.0, 5.0, 4.0, "4-6")
+    assert "edge 4.0 below 5.0" in text
+    assert "your setting is 4" in text
+    assert "past 4-6 point trades lost money" in text
 
 
 def test_constants_sane():

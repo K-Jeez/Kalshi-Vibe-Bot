@@ -18,7 +18,9 @@ CEILING_CAP = 0.05
 MIN_SAMPLE = 8
 STEP = 0.0025
 
-BUCKETS = ("4-6", "6-8", "8-10", "10-13", "13+")
+# 8–13 is one band because that range lost money as a group. Splitting it
+# kept each half below the sample needed to shrink the cap.
+BUCKETS = ("4-6", "6-8", "8-13", "13+")
 
 
 def edge_bucket(edge_pts: float) -> Optional[str]:
@@ -29,10 +31,8 @@ def edge_bucket(edge_pts: float) -> Optional[str]:
         return "4-6"
     if edge < 8.0:
         return "6-8"
-    if edge < 10.0:
-        return "8-10"
     if edge < 13.0:
-        return "10-13"
+        return "8-13"
     return "13+"
 
 

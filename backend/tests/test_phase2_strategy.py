@@ -70,7 +70,7 @@ def test_shadow_buy_is_scored_once_when_the_market_resolves():
         db,
         market_id="KXTEST-YES",
         side="YES",
-        reason="Skipped — edge 24.0 pts exceeds autonomous cap (22 pts; often model overconfidence)",
+        reason="Skipped — the model’s edge is 24 points, above the 22-point safety cap",
         edge_pct=24,
         ai_yes_pct=90,
         ask=0.40,

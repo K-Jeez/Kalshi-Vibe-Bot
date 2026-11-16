@@ -12,11 +12,25 @@ from src.config import settings
 _cache: dict[str, tuple[float, Optional[str], bool, Optional[int]]] = {}
 # Lookups whose cost is not yet on a decision row. One entry per HTTP call.
 _unbilled: list[dict] = []
+_sweep_lookups = 0
+
+
+def reset_lookup_sweep() -> None:
+    global _sweep_lookups
+    _sweep_lookups = 0
+
+
+def _sweep_allows_lookup() -> bool:
+    cap = int(getattr(settings, "vibe_live_search_max_per_sweep", 8) or 0)
+    if cap <= 0:
+        return True
+    return _sweep_lookups < cap
 
 
 def clear_event_search_cache() -> None:
     _cache.clear()
     _unbilled.clear()
+    reset_lookup_sweep()
 
 
 def in_play(seconds_until: Optional[float]) -> bool:
@@ -61,14 +75,18 @@ async def lookup_event_facts(client: Any, *, event_key: str, title: str) -> tupl
     if not key:
         return None, False, None
     now = time.monotonic()
-    ttl = float(getattr(settings, "vibe_live_search_cache_sec", 90))
+    ttl = float(getattr(settings, "vibe_live_search_cache_sec", 300))
     hit = _cache.get(key)
     if hit is not None and now - hit[0] < ttl:
         return hit[1], hit[2], hit[3]
+    if not _sweep_allows_lookup():
+        return None, False, None
+    global _sweep_lookups
+    _sweep_lookups += 1
     try:
         raw = await client.search_event_facts(
             title or key,
-            max_tool_calls=int(getattr(settings, "vibe_live_search_max_tool_calls", 3)),
+            max_tool_calls=int(getattr(settings, "vibe_live_search_max_tool_calls", 1)),
         )
     except TypeError:
         raw = await client.search_event_facts(title or key)
