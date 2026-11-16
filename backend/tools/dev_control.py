@@ -443,7 +443,7 @@ class Control:
             str(self.paths.frontend_port),
             "--strictPort",
             "--host",
-            "127.0.0.1",
+            "0.0.0.0",
         ]
         return (
             ("backend", backend, self.paths.backend_dir, self.paths.backend_port),
