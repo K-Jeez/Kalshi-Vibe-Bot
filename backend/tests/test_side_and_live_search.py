@@ -6,6 +6,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from src.clients.xai_client import (
     XAIClient,
     begin_live_lookup_scan,
@@ -16,6 +18,13 @@ from src.decision_engine.analyzer import DecisionEngine
 from src.decision_engine.strategy_math import derive_buy_side
 from src.event_live_lookup import attach_lookup_cost, clear_event_search_cache, context_for_market
 from src.model_usage import tool_invocation_usd
+
+
+@pytest.fixture(autouse=True)
+def _live_search_on(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "vibe_live_search_enabled", True)
 
 
 def test_side_follows_the_larger_executable_edge():

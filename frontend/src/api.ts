@@ -262,6 +262,7 @@ export function analysisAiProviderId(
 export interface BotStateInfo {
   state: 'play' | 'pause' | 'stop'
   updated_at: string
+  daily_ai_note?: string
 }
 
 export interface PerformanceStats {

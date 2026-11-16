@@ -40,7 +40,7 @@ def test_autonomous_overconfidence_mid_chalk():
 
 
 def test_autonomous_passes_sweet_spot():
-    assert autonomous_buy_gate_failure(side="YES", ai_yes_pct=68, edge_pct=12, entry_price_dollars=0.48) is None
+    assert autonomous_buy_gate_failure(side="YES", ai_yes_pct=68, edge_pct=12, entry_price_dollars=0.62) is None
 
 
 def test_autonomous_passes_high_confidence_favorite():

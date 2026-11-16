@@ -105,6 +105,16 @@ def kelly_contracts_for_side(
     return int(math.floor(stake / b + 1e-12))
 
 
+def whole_contracts_for_stake(stake_dollars: float, price: float, cash: float) -> int:
+    """How many whole contracts a flat dollar stake buys. Never rounds up to one."""
+    px = float(price)
+    if not math.isfinite(px) or px <= 1e-12:
+        return 0
+    wanted = int(math.floor(float(stake_dollars) / px + 1e-12))
+    affordable = int(math.floor(max(0.0, float(cash)) / px + 1e-12))
+    return max(0, min(wanted, affordable))
+
+
 def max_whole_contracts_for_cash(bankroll: float, per_contract_premium: float) -> int:
     """Largest whole-contract count affordable at ``per_contract_premium`` (premium $/contract, 0–1)."""
     br = float(bankroll)

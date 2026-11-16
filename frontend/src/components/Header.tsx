@@ -19,6 +19,7 @@ export const Header: React.FC = () => {
   const [botState, setBotState]       = useState<'play' | 'pause' | 'stop'>('stop')
   const [botLoading, setBotLoading]   = useState(false)
   const [localAlert, setLocalAlert]   = useState('')
+  const [budgetNote, setBudgetNote]   = useState('')
   const docVisible = useDocumentVisible()
   const prevVisibleRef = useRef(docVisible)
 
@@ -42,6 +43,7 @@ export const Header: React.FC = () => {
       ])
       setConnected(true)
       setBotState(bot.state ?? 'stop')
+      setBudgetNote(bot.daily_ai_note || '')
       setLocalAlert(ops.alerts?.[0] ?? '')
     } catch {
       setConnected(false)
@@ -73,6 +75,9 @@ export const Header: React.FC = () => {
 
   return (
     <header className="bg-secondary border-b border-brand-muted/45 sticky top-0 z-50 shadow-lg shadow-black/40 backdrop-blur-sm">
+      {budgetNote ? (
+        <p className="bg-amber-500/15 text-amber-100 text-center text-xs py-1.5 px-3">{budgetNote}</p>
+      ) : null}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-14 gap-4">
 

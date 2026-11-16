@@ -451,7 +451,7 @@ def is_tradeable_market(
     because the YES book is thin.
 
     A side is buyable only when it is liquid and its ask is inside the same window
-    the order uses: at least 26¢, and gross upside ``1 − ask`` at least
+    the order uses: ask from 50¢ to 85¢, and gross upside ``1 − ask`` at least
     ``min_residual_payoff`` when that floor is on. Markets outside that window
     are not sent to the model.
     """
@@ -1523,6 +1523,11 @@ async def scan_and_trade(
         _sweep_started = time.monotonic()
         _last_prog_log = _sweep_started
         for i_u, (unit_kind, et_key, members) in enumerate(scan_queue):
+            from src.daily_budget import budget_status
+
+            if budget_status(db)["reached"]:
+                logger.info("Daily AI budget reached. No more model calls until tomorrow.")
+                break
             now_mono = time.monotonic()
             if now_mono - _last_prog_log >= 60.0:
                 logger.info(
@@ -2102,139 +2107,20 @@ async def scan_and_trade(
                             }
                         else:
                             _fee = await ensure_market_fee_schedule(kalshi_client, market)
-                            kelly_cap = kelly_contract_cap_for_bankroll(
-                                float(balance),
-                                float(trade_price),
-                                fee_multiplier=_fee.get("fee_multiplier"),
-                                fee_type=_fee.get("fee_type"),
-                                bankroll_fraction=entry_cap,
-                            )
-                            if not _fee.get("known"):
-                                action_taken = {
-                                    "status": "no_trade",
-                                    "summary": (
-                                        "Skipped — series fee schedule is unknown, so the "
-                                        "2.5% all-in cap and expected value are not proven"
-                                    ),
-                                    "signal": signal,
-                                }
-                                quantity = 0
-                            quantity, kelly_sizing_tag = kelly_contracts_for_order(
-                                float(balance),
-                                trade_side,
-                                ai_yes,
-                                y_ask_f,
-                                n_ask_f,
-                                float(yes_price),
-                                float(no_price),
-                                per_contract_premium=float(trade_price),
-                                max_kelly_contracts=kelly_cap,
-                                win_probability=float(blend["win_probability"]),
-                            )
-                            action_taken = {}
-                            blend_ev_gate = bool(getattr(settings, "vibe_blend_ev_gate", False))
-                            ev_dollars = None
-                            if _fee.get("known"):
-                                ev_dollars = fee_inclusive_ev_dollars(
-                                    float(blend["win_probability"]),
-                                    float(trade_price),
-                                    max(int(quantity), 1),
-                                    fee_multiplier=_fee.get("fee_multiplier"),
-                                    fee_type=_fee.get("fee_type"),
-                                )
-                            from src.decision_engine.blend import quantity_after_blend
-                            from src.decision_engine.strategy_gates import all_in_entry_dollars
+                            from src.decision_engine.strategy_math import whole_contracts_for_stake
 
-                            one_cost = (
-                                all_in_entry_dollars(
-                                    1,
-                                    float(trade_price),
-                                    fee_multiplier=_fee.get("fee_multiplier"),
-                                    fee_type=_fee.get("fee_type"),
-                                )
-                                if _fee.get("known")
-                                else None
-                            )
-                            sized, size_tag = quantity_after_blend(
-                                blend_ev_gate=blend_ev_gate,
-                                kelly_quantity=int(quantity),
-                                blended_ev=ev_dollars,
-                                cap_contracts=int(kelly_cap),
-                                one_contract_fits_cash=one_cost is not None and one_cost <= float(balance) + 1e-9,
-                            )
-                            quantity = sized
-                            if size_tag not in ("", "quarter_kelly") and size_tag != kelly_sizing_tag:
-                                kelly_sizing_tag = size_tag or kelly_sizing_tag
-                            if quantity >= 1 and not order_covers_model_cost(
-                                fee_inclusive_ev_dollars(
-                                    float(blend["win_probability"]),
-                                    float(trade_price),
-                                    int(quantity),
-                                    fee_multiplier=_fee.get("fee_multiplier"),
-                                    fee_type=_fee.get("fee_type"),
-                                ),
-                                expected_model_cost,
-                            ):
-                                quantity = 0
-                                kelly_sizing_tag = "model_cost"
+                            stake = float(getattr(settings, "flat_stake_dollars", 3) or 0)
+                            quantity = whole_contracts_for_stake(stake, float(trade_price), float(balance))
+                            kelly_sizing_tag = "flat_stake"
+                            if quantity < 1:
                                 action_taken = {
                                     "status": "no_trade",
                                     "summary": (
-                                        "Skipped — this size does not cover the expected model cost "
-                                        f"(${expected_model_cost:.4f} per filled buy)"
-                                    ),
-                                    "signal": signal,
-                                }
-                            if quantity < 1 and blend_ev_gate:
-                                action_taken = {
-                                    "status": "no_trade",
-                                    "summary": (
-                                        "Skipped — blended fee-inclusive expected value is not positive "
-                                        f"(w={blend['weight']:.2f}, {blend['market_source']}). "
-                                        "VIBE_BLEND_EV_GATE is on. "
-                                        "That fee is the 0.07 schedule estimate, not the exchange fill fee."
-                                    ),
-                                    "signal": signal,
-                                }
-                            if quantity < 1 and not (
-                                isinstance(action_taken, dict)
-                                and (
-                                    "expected value" in str(action_taken.get("summary") or "")
-                                    or "model cost" in str(action_taken.get("summary") or "")
-                                )
-                            ):
-                                kelly_skip = kelly_order_skip_summary(
-                                    float(balance),
-                                    trade_side,
-                                    ai_yes,
-                                    y_ask_f,
-                                    n_ask_f,
-                                    float(yes_price),
-                                    float(no_price),
-                                    per_contract_premium=float(trade_price),
-                                    max_kelly_contracts=kelly_cap,
-                                    win_probability=float(blend["win_probability"]),
-                                )
-                                action_taken = {
-                                    "status": "no_trade",
-                                    "summary": kelly_skip
-                                    or (
-                                        "Skipped — Kelly size is zero and available cash cannot buy "
-                                        "a whole contract at current prices"
+                                        f"Skipped — a ${stake:.0f} stake cannot buy one whole contract at this price"
                                     ),
                                     "signal": signal,
                                 }
                             else:
-                                if kelly_sizing_tag == "single_contract_retry":
-                                    decision["kelly_single_contract_retry"] = True
-                                    xa = decision.get("xai_analysis")
-                                    if isinstance(xa, dict):
-                                        xa["kelly_single_contract_retry"] = True
-                                elif kelly_sizing_tag == "cash_capped":
-                                    decision["kelly_cash_capped"] = True
-                                    xa = decision.get("xai_analysis")
-                                    if isinstance(xa, dict):
-                                        xa["kelly_cash_capped"] = True
                                 decision["kelly_contracts"] = int(quantity)
                                 traded_at = datetime.now(timezone.utc)
                                 from src.clients.kalshi_client import (

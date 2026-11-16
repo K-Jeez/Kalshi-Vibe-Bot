@@ -36,7 +36,7 @@ export const Settings: React.FC = () => {
     if (!cur) return
     setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 5))))
     setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
-    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 55))))
+    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 70))))
   }, [cur])
 
   useEffect(() => {
@@ -219,17 +219,14 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Position size uses <strong className="text-white">quarter Kelly</strong> on the model probability that passed the gates.
-            It shrinks toward the market only when settled trades show the model is significantly worse.
-            There is no one-contract minimum. The cash cap starts at <strong className="text-white">2.5% of available cash</strong> and moves between 1% and 5% from settled results.
-            The 0.07 coefficient is used only when the series fee type is quadratic and its fee multiplier is known. That figure is an estimate, rounded up to the next cent. It is not the billed fee. If the series schedule is missing, the bot does not treat expected value as proven positive and does not treat the 2.5% cap as satisfied. The exchange fill fee is stored when the order response includes it.
-            Buys require your minimum edge and minimum model confidence on the purchased side.
+            Each buy uses a flat <strong className="text-white">$3</strong> stake, rounded down to whole contracts.
+            If that stake cannot buy one contract, the bot skips it.
+            Buys require your minimum edge and at least 70% model confidence on the purchased side.
             Built-in limits you do not configure: edge capped at <strong className="text-white">22 points</strong>,
-            no entries below <strong className="text-white">26¢</strong>, a minimum payoff on a win, and a block when the model is very confident on a mid-range price.
+            buys only between <strong className="text-white">50¢ and 85¢</strong>, and a block when the model is very confident on a mid-range price.
             There is no cap on the model’s own probability. Sports markets use a higher volume floor at scan time.
-            Stop-loss compares <strong className="text-white">entry price</strong> to the{' '}
-            <strong className="text-white">executable best bid</strong> with no wait after entry.
-            A losing edge range can raise its own minimum after enough closed trades.
+            Stop-loss is off unless you turn on auto sells below. Live web search is off unless <code className="text-cyan-200/90">VIBE_LIVE_SEARCH_ENABLED</code> is true.
+            Analysis stops for the day once recorded AI spend hits the daily budget (default $3).
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
             Numbers here are stored in the <strong className="text-white">database</strong>, not read
@@ -258,7 +255,7 @@ export const Settings: React.FC = () => {
                 </label>
                 <label className="flex min-h-0 flex-col gap-1">
                   <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Min AI win % on buy side (51–99)
+                    Minimum model confidence on the bought side (51–99)
                   </span>
                   <input
                     type="text"
@@ -291,7 +288,7 @@ export const Settings: React.FC = () => {
                 {savingStrategy ? 'Saving…' : 'Save strategy settings'}
               </button>
               <p className="text-[11px] text-white/70">
-                Saved values apply immediately to the running bot. Available cash is the position limit. Restore configuration defaults reloads edge, the 55% win floor, and the stop from <code className="text-cyan-200/90">backend/.env</code>. Editing the file alone does not overwrite the database.
+                Saved values apply immediately. Restore configuration defaults reloads the edge and the 70% confidence floor from <code className="text-cyan-200/90">backend/.env</code>. Editing the file alone does not overwrite the database.
               </p>
               {health?.entry_caps && health.entry_caps.length > 0 ? (
                 <p className="text-[11px] text-white/70">

@@ -10,9 +10,10 @@ from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side, max_w
 
 # Upper/lower bounds applied after user min edge / min AI (Settings + .env).
 MAX_EDGE_TO_BUY_PCT = 22
-# Off. A cap belongs on the market price (26¢ floor and the upside floor), not on the model's probability.
+# Off. A cap belongs on the market price (the 50–85¢ window), not on the model's probability.
 MAX_AI_WIN_PROB_BUY_SIDE_PCT = 100
-MIN_ENTRY_PRICE_CENTS = 26
+MIN_ENTRY_PRICE_CENTS = 50
+MAX_ENTRY_PRICE_CENTS = 85
 # Approved 2026-11-09 bundle. Quarter Kelly is applied in strategy_math.
 # Per-entry cap is 2.5% of available cash including the estimated entry fee.
 # 5-point edge, 60% win probability, and 80% stop-loss are not part of this cap.
@@ -332,9 +333,13 @@ def autonomous_buy_gate_failure(
             f"Skipped — the model is {ai_buy}% confident, above the "
             f"{MAX_AI_WIN_PROB_BUY_SIDE_PCT}% cap"
         )
-    if entry_c < MIN_ENTRY_PRICE_CENTS:
+    from src.config import settings as app_settings
+
+    low = int(getattr(app_settings, "min_entry_price_cents", MIN_ENTRY_PRICE_CENTS))
+    high = int(getattr(app_settings, "max_entry_price_cents", MAX_ENTRY_PRICE_CENTS))
+    if entry_c < low or entry_c > high:
         return (
-            f"Skipped — price is {entry_c}¢, and the bot does not buy under {MIN_ENTRY_PRICE_CENTS}¢"
+            f"Skipped — price is {entry_c}¢. The bot only buys between {low}¢ and {high}¢."
         )
     if (
         ai_buy >= _OVERCONF_AI_MIN_PCT

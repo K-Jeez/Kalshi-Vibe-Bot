@@ -79,6 +79,14 @@ def alerts(*, now: Optional[float] = None, monitor_stale_after: float = 90.0) ->
         out.append(_unresolved_alert)
     if _low_balance_alert:
         out.append(_low_balance_alert)
+    try:
+        from src.daily_budget import current_note
+
+        note = current_note()
+        if note:
+            out.insert(0, note)
+    except Exception:
+        pass
     return out
 
 

@@ -139,12 +139,10 @@ def quote_blockers(
         autonomous_buy_gate_failure,
         event_exposure_room,
         fee_inclusive_ev_dollars,
-        kelly_contract_cap_for_bankroll,
     )
     from src.decision_engine.strategy_math import (
         ai_win_prob_pct_on_buy_side,
         edge_pct_for_side,
-        kelly_contracts_for_order,
     )
 
     reasons: list[str] = []
@@ -183,38 +181,19 @@ def quote_blockers(
         blend_ev_gate=blend_ev_gate,
     ) and not reasons:
         reasons.append("raw edge")
-    cap_contracts = kelly_contract_cap_for_bankroll(
-        float(balance),
-        px,
-        fee_multiplier=fee_multiplier,
-        fee_type=fee_type,
-        bankroll_fraction=float(cap_fraction),
-    )
-    kelly_qty, _tag = kelly_contracts_for_order(
-        float(balance),
-        side,
-        int(ai_yes_pct),
-        float(yes_ask),
-        float(no_ask),
-        float(yes_ask),
-        float(no_ask),
-        per_contract_premium=px,
-        max_kelly_contracts=cap_contracts,
-        win_probability=float(win_probability),
-    )
-    if int(kelly_qty) < 1:
-        reasons.append("Kelly")
-    elif qty > int(kelly_qty):
-        reasons.append("Kelly")
-    if int(cap_contracts) < 1:
-        reasons.append("bucket cap")
-    elif qty > int(cap_contracts):
-        reasons.append("bucket cap")
+    from src.config import settings as app_settings
+    from src.decision_engine.strategy_math import whole_contracts_for_stake
+
+    allowed = whole_contracts_for_stake(float(app_settings.flat_stake_dollars), px, float(balance))
+    if allowed < 1 or qty > allowed:
+        reasons.append("stake")
     all_in = all_in_entry_dollars(qty, px, fee_multiplier=fee_multiplier, fee_type=fee_type)
-    if all_in is None or all_in > float(balance) + 1e-9:
-        if "bucket cap" not in reasons:
-            reasons.append("bucket cap")
-    elif not event_exposure_room(float(equity), float(open_event_cost), float(event_reserve), float(all_in)):
+    cost = float(all_in) if all_in is not None else qty * px
+    if cost > float(balance) + 1e-9:
+        reasons.append("stake")
+    elif all_in is not None and not event_exposure_room(
+        float(equity), float(open_event_cost), float(event_reserve), float(all_in)
+    ):
         reasons.append("event cap")
     ev = fee_inclusive_ev_dollars(
         float(win_probability),

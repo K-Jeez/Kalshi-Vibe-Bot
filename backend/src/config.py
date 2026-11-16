@@ -14,7 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Single source for tuning fallbacks (SQLite NULL / missing ORM attr); keep in sync with ``Settings`` field defaults below.
 DEFAULT_MIN_EDGE_TO_BUY_PCT = 4
-DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 55
+DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 70
 DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.80
 APPROVED_MAX_OPEN_POSITIONS = 12
 DEFAULT_MAX_OPEN_POSITIONS = APPROVED_MAX_OPEN_POSITIONS
@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # When false, raw edge and win-prob gates decide the buy. Size uses the model
     # (or the evidence-shrunk probability). When true, that probability's EV must be positive.
     vibe_blend_ev_gate: bool = False
+    # Bought side must be inside this window. Replaces the old 26¢ floor.
+    min_entry_price_cents: int = 50
+    max_entry_price_cents: int = 85
+    # Flat dollars per buy. Whole contracts only. A stake that cannot buy one contract is a skip.
+    flat_stake_dollars: float = 3.0
+    # Recorded xAI spend for the Denver day. 0 means no cap. Analysis stops until the next day.
+    daily_xai_budget_usd: float = 3.0
 
     # ── Bot scan configuration ───────────────────────────────────────────────────
     bot_scan_interval: int = 10              # seconds between full market scans
@@ -96,7 +103,7 @@ class Settings(BaseSettings):
     )
     vibe_numeric_prefilter_series_prefixes: str = "KXSILVER,KXGOLD,KXINX,KXNDX,KXSPX"
     # In-play markets with no live feed get one Responses API web+X lookup per event.
-    vibe_live_search_enabled: bool = True
+    vibe_live_search_enabled: bool = False
     # Caps max_tool_calls on that request. These tools have no result-count field.
     vibe_live_search_max_tool_calls: int = 1
     vibe_live_search_within_sec: int = 10800
@@ -169,6 +176,10 @@ class Settings(BaseSettings):
         self.vibe_live_search_within_sec = max(60, min(86400, int(self.vibe_live_search_within_sec)))
         self.vibe_live_search_cache_sec = max(15, min(1800, int(self.vibe_live_search_cache_sec)))
         self.vibe_live_search_max_per_sweep = max(0, min(100, int(self.vibe_live_search_max_per_sweep)))
+        self.min_entry_price_cents = max(1, min(99, int(self.min_entry_price_cents)))
+        self.max_entry_price_cents = max(self.min_entry_price_cents, min(99, int(self.max_entry_price_cents)))
+        self.flat_stake_dollars = max(0.0, min(1000.0, float(self.flat_stake_dollars)))
+        self.daily_xai_budget_usd = max(0.0, min(500.0, float(self.daily_xai_budget_usd)))
         iv = int(self.closed_resolution_refresh_interval_sec)
         self.closed_resolution_refresh_interval_sec = max(0, min(86400, iv))
         self.closed_resolution_refresh_batch = max(1, min(50, int(self.closed_resolution_refresh_batch)))

@@ -17,8 +17,10 @@ from urllib.parse import unquote, urlparse
 POLICY_ID = "approved_bundle_2026_11_09_v2"
 GATES_POLICY_ID = "approved_gates_2026_11_09_v1"
 DEFAULTS_POLICY_ID = "operator_defaults_2026_11_11_v1"
+FAVORITES_POLICY_ID = "favorites_flat_2026_11_16_v1"
 OPERATOR_MIN_EDGE = 4
 OPERATOR_MIN_AI_WIN_PROB = 55
+FAVORITES_MIN_AI_WIN_PROB = 70
 OLD_MAX_OPEN = 30
 NEW_MAX_OPEN = 12
 APPROVED_MIN_EDGE = 5
@@ -226,6 +228,28 @@ def migrate_sqlite_file(path: Path, *, backup: bool = True) -> dict:
             except sqlite3.OperationalError:
                 defaults_updated = 0
             conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (DEFAULTS_POLICY_ID,))
+        already_favorites = conn.execute(
+            "SELECT 1 FROM _bot_patches WHERE id = ?",
+            (FAVORITES_POLICY_ID,),
+        ).fetchone()
+        if not already_favorites:
+            try:
+                conn.execute(
+                    """
+                    UPDATE tuning_state
+                       SET min_ai_win_prob_buy_side_pct = ?
+                     WHERE min_ai_win_prob_buy_side_pct = ?
+                    """,
+                    (FAVORITES_MIN_AI_WIN_PROB, OPERATOR_MIN_AI_WIN_PROB),
+                )
+            except sqlite3.OperationalError:
+                pass
+            if "stop_loss_selling_enabled" in _column_names(conn, "tuning_state"):
+                try:
+                    conn.execute("UPDATE tuning_state SET stop_loss_selling_enabled = 0")
+                except sqlite3.OperationalError:
+                    pass
+            conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (FAVORITES_POLICY_ID,))
         conn.commit()
         return {
             "ok": True,
