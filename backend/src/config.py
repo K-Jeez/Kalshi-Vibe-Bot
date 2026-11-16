@@ -95,6 +95,11 @@ class Settings(BaseSettings):
         "KXESOCCER,KXCS2,KXCSGO,KXDOTA,KXVALORANT,KXLOL,KXITF,KXCHALLENGER,KXATPCHALLENGER,KXWTACHALLENGER"
     )
     vibe_numeric_prefilter_series_prefixes: str = "KXSILVER,KXGOLD,KXINX,KXNDX,KXSPX"
+    # In-play markets with no live feed get one web+X lookup per event. Empty result skips the model.
+    vibe_live_search_enabled: bool = True
+    vibe_live_search_max_results: int = 4
+    vibe_live_search_within_sec: int = 10800
+    vibe_live_search_cache_sec: int = 90
 
     # ── Exit hygiene ──────────────────────────────────────────────────────────────
     # Exit grace is not applied. The field remains so an old .env key is ignored
@@ -157,6 +162,9 @@ class Settings(BaseSettings):
         self.exit_grace_minutes = max(0.0, min(1440.0, float(self.exit_grace_minutes)))
         self.stop_loss_drawdown_pct = max(0.01, min(0.90, float(self.stop_loss_drawdown_pct)))
         self.kalshi_markets_page_delay_sec = max(0.0, min(0.5, float(self.kalshi_markets_page_delay_sec)))
+        self.vibe_live_search_max_results = max(1, min(8, int(self.vibe_live_search_max_results)))
+        self.vibe_live_search_within_sec = max(60, min(86400, int(self.vibe_live_search_within_sec)))
+        self.vibe_live_search_cache_sec = max(15, min(600, int(self.vibe_live_search_cache_sec)))
         iv = int(self.closed_resolution_refresh_interval_sec)
         self.closed_resolution_refresh_interval_sec = max(0, min(86400, iv))
         self.closed_resolution_refresh_batch = max(1, min(50, int(self.closed_resolution_refresh_batch)))

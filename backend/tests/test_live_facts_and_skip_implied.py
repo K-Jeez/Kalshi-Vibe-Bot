@@ -22,14 +22,16 @@ def test_missing_model_probability_uses_the_yes_ask():
     assert _parse_ai_yes_pct({}, {"yes": 0.4, "yes_ask": 0.41, "no": 0.6, "no_ask": 0.62}) == 41
 
 
-def test_abstain_skips_without_replacing_a_stated_probability():
+def test_abstain_keeps_the_stated_side_and_probability():
     parsed = _parse_json(
         '{"direction":"YES","ai_probability_yes_pct":73,"uncertainty":{"level":"abstain","missing":["rules"]}}'
     )
-    assert parsed["direction"] == "SKIP"
+    assert parsed["direction"] == "YES"
     assert parsed["ai_probability_yes_pct"] == 73
-    assert PROMPT_VERSION == "decision-2026-11-11"
-    assert "never by itself a reason to SKIP" in SYSTEM_PROMPT
+    assert parsed["uncertainty"]["level"] == "abstain"
+    assert PROMPT_VERSION == "decision-2026-11-16"
+    assert "never by itself a reason to abstain" in SYSTEM_PROMPT
+    assert "Do not withhold a side" in SYSTEM_PROMPT
     assert "Never write 50" in SYSTEM_PROMPT
 
 

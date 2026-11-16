@@ -7,6 +7,7 @@ from src.ai_provider import ai_provider_display_name
 from src.clients.kalshi_client import buy_side_liquidity_skip_summary
 from src.clients.xai_client import XAIClient
 from src.decision_engine.strategy_math import (
+    derive_buy_side,
     edge_pct_for_side,
     full_kelly_fraction_for_side,
     kelly_contracts_for_order,
@@ -235,11 +236,19 @@ class DecisionEngine:
                 ),
             }
 
-        direction = str(ai_result.get("direction", "SKIP") or "SKIP").strip().upper()
-        if direction not in ("YES", "NO", "SKIP"):
-            direction = "SKIP"
-
+        model_direction = str(ai_result.get("direction", "") or "").strip().upper()
         ai_yes = _parse_ai_yes_pct(ai_result, current_prices)
+        y_ask = current_prices.get("yes_ask")
+        n_ask = current_prices.get("no_ask")
+        direction = derive_buy_side(
+            ai_yes,
+            float(y_ask) if y_ask is not None and float(y_ask) > 0 else None,
+            float(n_ask) if n_ask is not None and float(n_ask) > 0 else None,
+            float(current_prices.get("yes", 0.5) or 0.5),
+            float(current_prices.get("no", 0.5) or 0.5),
+        )
+        ai_result["model_direction"] = model_direction
+        ai_result["direction"] = direction
         strat = _enrich_strategy_fields(
             direction=direction,
             ai_yes_pct=ai_yes,
@@ -353,7 +362,7 @@ class DecisionEngine:
             ],
         }
 
-        if "error" in xai_raw:
+        if "error" in xai_raw or xai_raw.get("market_id_rejected"):
             _logger.warning("%s event batch error for %s: %s", provider_label, event_ticker, xai_raw.get("error"))
             return {
                 **base,
@@ -372,33 +381,42 @@ class DecisionEngine:
                 "key_factors": [],
                 "evidence": [],
                 "xai_analysis": xai_analysis,
-                "action_summary": f"Skipped — {provider_label} batch unavailable",
+                "action_summary": (
+                    f"Skipped — {provider_label} batch unavailable"
+                    if "error" in xai_raw
+                    else "Skipped — batch pick was not one of the listed contracts"
+                ),
             }
 
-        direction = str(xai_raw.get("direction", "SKIP") or "SKIP").strip().upper()
-        if direction not in ("YES", "NO", "SKIP"):
-            direction = "SKIP"
-
+        model_direction = str(xai_raw.get("direction", "") or "").strip().upper()
         ai_yes = _parse_ai_yes_pct(xai_raw, cp)
+        y_ask = cp.get("yes_ask")
+        n_ask = cp.get("no_ask")
+        direction = derive_buy_side(
+            ai_yes,
+            float(y_ask) if y_ask is not None and float(y_ask) > 0 else None,
+            float(n_ask) if n_ask is not None and float(n_ask) > 0 else None,
+            float(cp.get("yes", 0.5) or 0.5),
+            float(cp.get("no", 0.5) or 0.5),
+        )
+        xai_raw["model_direction"] = model_direction
+        xai_raw["direction"] = direction
 
         batch_post_gate: Optional[str] = None
         orig_reasoning = str(xai_raw.get("reasoning", "") or "")
-        if direction in ("YES", "NO"):
-            leg_vol = float(chosen.get("volume") or 0.0)
-            if min_24h_volume_contracts > 0 and leg_vol + 1e-9 < float(min_24h_volume_contracts):
-                batch_post_gate = "volume_below_min"
-                direction = "SKIP"
-            else:
-                side = "YES" if direction == "YES" else "NO"
-                liq_fail = buy_side_liquidity_skip_summary(
-                    _leg_book_as_market(chosen),
-                    side,
-                    max_spread=float(max_spread),
-                    min_top_size=float(min_top_ask_contracts),
-                )
-                if liq_fail:
-                    batch_post_gate = "buy_side_liquidity"
-                    direction = "SKIP"
+        leg_vol = float(chosen.get("volume") or 0.0)
+        liq_fail = None
+        if min_24h_volume_contracts > 0 and leg_vol + 1e-9 < float(min_24h_volume_contracts):
+            batch_post_gate = "volume_below_min"
+        else:
+            liq_fail = buy_side_liquidity_skip_summary(
+                _leg_book_as_market(chosen),
+                direction,
+                max_spread=float(max_spread),
+                min_top_size=float(min_top_ask_contracts),
+            )
+            if liq_fail:
+                batch_post_gate = "buy_side_liquidity"
 
         strat = _enrich_strategy_fields(
             direction=direction,

@@ -245,6 +245,23 @@ def kelly_order_skip_summary(
     )
 
 
+def derive_buy_side(
+    ai_yes_pct: int,
+    yes_ask: Optional[float],
+    no_ask: Optional[float],
+    yes_mid: float,
+    no_mid: float,
+) -> str:
+    """YES or NO from P(YES) versus the executable asks.
+
+    The larger edge wins. A model SKIP is not an input. The server gates
+    still decide whether that side is a buy.
+    """
+    edge_yes = edge_pct_for_side("YES", ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    edge_no = edge_pct_for_side("NO", ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
+    return "YES" if edge_yes >= edge_no else "NO"
+
+
 def ai_win_prob_pct_on_buy_side(side: str, ai_yes_pct: int) -> int:
     """AI P(win) for the purchased contract side (YES leg or NO leg), 0–100 integer."""
     y = int(max(0, min(100, int(ai_yes_pct))))

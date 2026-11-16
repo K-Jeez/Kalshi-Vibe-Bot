@@ -28,8 +28,29 @@ from src.reconcile.open_positions import normalize_market_id
 
 _logger = setup_logging("xai_client")
 
-PROMPT_VERSION = "decision-2026-11-11"
+PROMPT_VERSION = "decision-2026-11-16"
 _UNCERTAINTY_LEVELS = {"low", "medium", "high", "abstain"}
+_EMPTY_FACTS = {"", "none", "none found", "n/a", "unknown", "no facts"}
+
+
+def live_search_parameters(max_results: int = 4) -> dict:
+    """Bounded web and X search for one in-play lookup. Chat completions use this field."""
+    return {
+        "mode": "on",
+        "return_citations": False,
+        "max_search_results": max(1, min(8, int(max_results))),
+        "sources": [{"type": "web"}, {"type": "x"}],
+    }
+
+
+def _facts_from_search(content: str) -> str:
+    parsed = loads_json_object(content, log_label="live-search")
+    if not isinstance(parsed, dict):
+        return ""
+    text = str(parsed.get("facts") or "").strip()
+    if text.lower() in _EMPTY_FACTS:
+        return ""
+    return text[:500]
 
 XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_MANAGEMENT_BASE_URL = "https://management-api.x.ai"
@@ -221,21 +242,21 @@ SYSTEM_PROMPT = """You advise an automated trader on Kalshi contracts held to re
 
 Each contract is still a **binary** YES/NO ticket, but some events list **several sibling contracts** where **at most one** YES can win (e.g. soccer **home win / away win / draw**). Then **P(YES)** on one leg is **not** independent of the others: those YES probabilities over the listed outcomes should **partition** ~100% (draw is a first-class outcome; buying NO on \"Team A wins\" is exposure to **both** the other win and a tie).
 
-Goal: estimate **P(YES)** — the probability **this** contract settles YES — using **real-time, horizon-matched** facts and the contract's resolution logic. If unclear or the book/liquidity is poor, output direction SKIP.
+Goal: estimate **P(YES)** — the probability **this** contract settles YES — using **real-time, horizon-matched** facts and the contract's resolution logic. Always output YES or NO for the side you think wins. The server decides whether that side is a trade.
 
 **Threshold vs exact-hit:** Many Kalshi markets (crypto 15m, index levels, weather highs) use a numeric **threshold**: YES if the settlement index is **above** (or below) a stated level at expiration; NO otherwise. Labels like **"Target Price: $X"** are the comparison level — **not** a requirement that the index land exactly on $X. Never assign near-zero P(YES) on a standard above-threshold leg solely because exact equality is unlikely. Follow the **RESOLUTION** block in the user prompt when present.
 
 **Time / clock:** Use the server **CLOCK** block (UTC now, resolution anchor UTC + US/Eastern, **time until resolution**). Trust it over calendar-date guesses. Example: 10:00 PM EDT on May 17 equals 02:00 UTC on May 18 — at 01:44 UTC May 18 there are **16 minutes left**; do **not** treat the event as past just because the UTC date is May 18. While **time until resolution** shows positive minutes, do not claim the contract already expired.
 
-Use quotes/book **secondarily**: they inform whether a trade is worthwhile; poor liquidity can justify SKIP. Treat market-implied odds as informed sentiment; if your view diverges sharply from the market, explain the wedge in **reasoning** or choose **SKIP**.
+Use quotes/book **secondarily**. Treat market-implied odds as informed sentiment. If your view diverges from the market, explain the wedge in **reasoning**. Do not withhold a side because the gap is large, the book is thin, or a live score is missing. The server applies its own edge, fee, and size gates.
 
 Do not choose a side mainly because it looks cheap/rich. Never recommend the side you think is less likely to win.
 
-**Calibration:** If you report **ai_probability_yes_pct** above **75** while the executable ask on your buy side is **40–65¢**, lower your probability or **SKIP** unless you have strong, specific evidence—the market is pricing meaningful risk. Treat implied edge above **~20 percentage points** as a warning sign of overconfidence unless you can defend it point-by-point; otherwise **SKIP**.
+**Calibration:** Keep **ai_probability_yes_pct** honest. A large gap versus the ask is information for the server, not a reason to refuse a probability.
 
-The server computes edge and quarter-Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks (whole contracts, cash-capped; may use exactly **one** contract when quarter Kelly is below one contract but edge at the ask remains). Keep that field calibrated and honest.
+The server computes edge and quarter-Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks. Keep that field calibrated and honest.
 
-Prompt version decision-2026-11-11. Always output a calibrated ai_probability_yes_pct. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable for this strategy and is never by itself a reason to SKIP. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
+Prompt version decision-2026-11-16. Always output a calibrated ai_probability_yes_pct and direction YES or NO. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable and is never by itself a reason to abstain. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
 
 USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this contract. Recommend **YES** or **NO** only when that matches your genuine outcome view—not because either side looks under/overpriced.
 
@@ -251,9 +272,9 @@ CLOCK (server-authoritative — use for before/after resolution; do not infer fr
 MARKET QUOTES — **sentiment baseline** (use with fundamentals; do not flip sides on price alone):
   YES: ${yes_price:.3f}  →  ~{yes_pct:.1f}% market-implied for YES
   NO:  ${no_price:.3f}  →  ~{no_pct:.1f}% market-implied for NO
-  If you recommend buying YES while YES is priced **far below** your P(YES)—or buying NO while NO is priced far below your P(NO)—**reasoning** must explain that wedge or choose **SKIP**.
+  If your P(YES) is far from the YES price, **reasoning** must explain the wedge. Still output the side you think wins.
 
-MARKET MICROSTRUCTURE (**secondary** — can justify **SKIP**; never replace outcome logic):
+MARKET MICROSTRUCTURE (**secondary** — never replace outcome logic, and never a reason to omit a side):
   YES bid/ask: {yes_bid_str} / {yes_ask_str} (top ask size: {yes_ask_size_str})
   NO  bid/ask: {no_bid_str} / {no_ask_str} (top ask size: {no_ask_size_str})
   24h Volume: {volume:.0f} contracts
@@ -268,7 +289,7 @@ LOCAL VETTING NOTES:
 
 Use external context **when temporally relevant**: breaking news and calendars inside the horizon, near-term forecasts, flows/sentiment as weak signals, and analog events with **similar time scale** to time-to-close.
 
-In **reasoning**, briefly show: (1) resolution logic; (2) your P(YES) view **for this horizon**; (3) how **Kalshi-implied odds** compare to your probability—if they diverge a lot, say **why** you still buy that side or why you skip; (4) how **liquidity/spread** affected your decision.
+In **reasoning**, briefly show: (1) resolution logic; (2) your P(YES) view **for this horizon**; (3) how **Kalshi-implied odds** compare to your probability—if they diverge, say why; (4) any live score or status you used.
 
 Fill **real_time_context** with drivers credible **now through close** (approximate timing). Omit stale-era summaries that do not bear on this window (or ``None found``).
 
@@ -276,7 +297,7 @@ If recommending YES/NO: include ≥1 **evidence** item that bears on **who wins*
 
 Output strict JSON only:
 {{
-    "direction": "<YES | NO | SKIP>",
+    "direction": "<YES | NO>",
     "ai_probability_yes_pct": <integer 0-100 — your subjective probability YES resolves>,
     "reasoning": "<2-5 sentences>",
     "real_time_context": "<short bullet summary or 'None found'>",
@@ -296,7 +317,7 @@ Output strict JSON only:
     }}
 }}
 
-uncertainty is required. Use abstain only when the contract is unparseable or already expired; then direction is SKIP. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon."""
+uncertainty is required. Use abstain only when the contract is unparseable or already expired. Still output direction YES or NO and a probability. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon."""
 
 # Line-ladder batches: switch to a sibling leg when its P(YES) beats the model pick by at least this much.
 _LADDER_LIKELIHOOD_OVERRIDE_MIN_GAP_PCT = 5
@@ -309,15 +330,13 @@ When **three or more** legs are listed and they are **mutually exclusive** on th
 
 **Numeric stat thresholds** (e.g. different strikeout **lines** like 5+ vs 7+ Ks) are **not** a single-winner partition: **multiple** YES legs can win together if the stat clears multiple hurdles; different **players** in the same game each have **independent** YES/NO settlements—never force their YES probabilities to sum to ~100% across players.
 
-Use book/quotes/volume secondarily; poor liquidity can justify SKIP. If your pick is a market-priced longshot, justify the wedge concretely or SKIP.
+Use book/quotes/volume secondarily. If your pick disagrees with the market, explain the wedge. Do not omit a side because the gap is large or the book is thin.
 
-**Edge discipline:** If your implied edge on the buy side would exceed **~20 points**, treat that as a red flag—re-check calibration or **SKIP** unless evidence is overwhelming. Do not chase “great value” on unlikely outcomes.
+Rules: best_market_id must be one from the list. direction is YES or NO for that contract. The server applies liquidity and edge gates.
 
-Rules: best_market_id must be one from the list (if SKIP, use the first). direction applies to that contract only. Honor BOT FILTER ALIGNMENT if present.
+The server computes edge and quarter-Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks.
 
-The server computes edge and quarter-Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks (whole contracts, cash-capped; may use exactly **one** contract when quarter Kelly is below one contract but edge at the ask remains).
-
-Prompt version decision-2026-11-11. Always output a calibrated ai_probability_yes_pct for the chosen contract. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to SKIP. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
+Prompt version decision-2026-11-16. Always output a calibrated ai_probability_yes_pct and direction YES or NO for the chosen contract. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to abstain. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
 
 EVENT_BATCH_USER_TEMPLATE = """EVENT (shared): {event_title}
 EVENT_TICKER: {event_ticker}
@@ -333,7 +352,7 @@ NOW (UTC): {now_utc}
 
 Use live/public knowledge where it sharpens the forecast **for this horizon**. Compare strikes only to see **which question** you can forecast best, not which price looks farthest from fair.
 
-For your pick, **real_time_context** should summarize inputs operative **now through that contract’s close**; mention notable **market-structure** factors there if they drove SKIP or a cautious probability.
+For your pick, **real_time_context** should summarize inputs operative **now through that contract’s close**, including any live score or status.
 
 If you recommend a direction: **evidence** must support **outcome** (which side wins); use **key_factors** for liquidity/spread/volume **and**, when relevant, **why Kalshi’s implied odds differ from your view**.
 
@@ -342,7 +361,7 @@ If you recommend a direction: **evidence** must support **outcome** (which side 
 OUTPUT JSON ONLY:
 {{
   "best_market_id": "<exact market_id from the list above>",
-  "direction": "<YES | NO | SKIP>",
+  "direction": "<YES | NO>",
   "ai_probability_yes_pct": <integer 0-100 for the CHOSEN contract — P(that contract settles YES) at resolution>,
   "outcome_probability_pct_by_market_id": {{ "<market_id_from_list>": <int 0-100>, "...": <int> }},
   "reasoning": "<2-6 sentences: chosen contract, resolution logic, why the chosen side likely wins—avoid framing around mispricing alone>",
@@ -358,13 +377,13 @@ OUTPUT JSON ONLY:
   }}
 }}
 
-uncertainty is required. Use abstain only when the chosen contract is unparseable or already expired; then direction is SKIP. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon.
+uncertainty is required. Use abstain only when the chosen contract is unparseable or already expired. Still output direction YES or NO and a probability. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon.
 
 Include **outcome_probability_pct_by_market_id** when the legs are **mutually exclusive on YES** (only one can settle YES — e.g. home / away / **draw**). Keys must be **exact** ``market_id`` strings from the list; values are your P(YES) for each; they must **sum to 99–101** across **all listed legs** in that case. Omit this field (or use null) only when legs are clearly **not** such a partition (e.g. unrelated props)."""
 
 
 class XAIClient:
-    """xAI Grok client: outcome-first P(YES); microstructure informs SKIP."""
+    """xAI Grok client: outcome-first P(YES). The server applies edge and size gates."""
 
     def __init__(self, api_key: str, model: str = "grok-4.3"):
         self.api_key = api_key
@@ -482,6 +501,45 @@ class XAIClient:
             _logger.error("xAI error for '%s': %s", market_title[:60], e)
             return _error_response(str(e))
 
+    async def search_event_facts(self, title: str, *, max_results: int = 4) -> Optional[str]:
+        """One short live web+X lookup. None means the call failed. Empty means nothing usable."""
+        payload: dict = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        'Reply with JSON only: {"facts":"<current score or status and the source time, '
+                        'or empty if you cannot find one>"}.'
+                    ),
+                },
+                {"role": "user", "content": f"Current score and status for: {title}"},
+            ],
+            "temperature": 0.01,
+            "max_tokens": 160,
+            "response_format": {"type": "json_object"},
+            "search_parameters": live_search_parameters(max_results),
+        }
+        try:
+            outcome, resp_or_msg = await _post_xai_chat_with_retries(
+                api_key=self.api_key,
+                payload=payload,
+                timeout_sec=_XAI_CHAT_TIMEOUT_SEC,
+                log_label=f"live {title}",
+                max_attempts=2,
+            )
+        except Exception as exc:
+            _logger.warning("live search failed for '%s': %s", title[:80], exc)
+            return None
+        if outcome != "ok":
+            return None
+        try:
+            data = resp_or_msg.json()
+            content = data["choices"][0]["message"]["content"]
+        except Exception:
+            return None
+        return _facts_from_search(content)
+
     async def analyze_event_best_trade(
         self,
         *,
@@ -510,7 +568,7 @@ class XAIClient:
             batch_config_block = (
                 "BOT FILTER ALIGNMENT (same thresholds the bot's scan uses; your best pick must satisfy these for your direction):\n"
                 + "\n".join(lines_blk)
-                + "\n\nIf no sibling meets both applicable lines for a directional trade, output direction SKIP.\n\n"
+                + "\n\nStill name the most likely side. The server drops a leg that fails these filters.\n\n"
             )
         else:
             batch_config_block = ""
@@ -822,8 +880,6 @@ def _parse_event_batch_json(
 
     reasoning = str(result.get("reasoning", "")).strip()
     uncertainty = uncertainty_from_result(result)
-    if uncertainty.get("level") == "abstain":
-        direction = "SKIP"
     if market_id_rejected:
         reasoning = (
             f"{reasoning} [Rejected: best_market_id is not one of the listed contracts; no order.]"
@@ -831,6 +887,7 @@ def _parse_event_batch_json(
 
     out = {
         "best_market_id": best_out,
+        "market_id_rejected": market_id_rejected,
         "direction": direction,
         "ai_probability_yes_pct": ai_yes,
         "reasoning": reasoning,
@@ -918,9 +975,7 @@ def _parse_json(content: str) -> dict:
     raw_probability = result.get("ai_probability_yes_pct", result.get("confidence_pct"))
     ai_yes = None if raw_probability is None else _extract_ai_probability_yes_pct(result)
     uncertainty = uncertainty_from_result(result)
-    # Abstain means the contract cannot be analysed. It does not replace a stated probability with 50.
-    if uncertainty.get("level") == "abstain":
-        direction = "SKIP"
+    # Abstain is a confidence flag. It does not drop the side or replace a stated probability.
 
     key_factors = result.get("key_factors", [])
     if not isinstance(key_factors, list):

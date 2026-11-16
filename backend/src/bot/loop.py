@@ -1737,27 +1737,35 @@ async def scan_and_trade(
                             "vetting_horizon_time": m.get("vetting_horizon_time"),
                         }
                     )
+                from src.event_live_lookup import context_for_market
                 from src.live_facts import live_fact_for_market, note_live_fact_skip, series_of
 
-                skip_fact = None
-                member_facts = []
-                for member in members:
+                usable = False
+                skip_reason = ""
+                for member, leg in zip(members, legs):
                     fact = await live_fact_for_market(member)
-                    if fact["skip"]:
-                        skip_fact = fact
-                        break
-                    member_facts.append(fact)
-                if skip_fact is not None:
-                    note_live_fact_skip(series_of(members[0]), skip_fact["reason"])
+                    seconds_left, _src = _seconds_until_buy_horizon(member, now=utc_now())
+                    ctx, reason = await context_for_market(
+                        market=member,
+                        fact=fact,
+                        client=getattr(decision_engine, "xai", None),
+                        seconds_until=seconds_left,
+                        title=str(leg.get("market_title") or ""),
+                    )
+                    if ctx:
+                        leg["market_description"] = (
+                            str(leg.get("market_description") or "") + "\n\n" + ctx
+                        ).strip()
+                        usable = True
+                    elif not reason:
+                        usable = True
+                    else:
+                        skip_reason = reason
+                if not usable:
+                    note_live_fact_skip(series_of(members[0]), skip_reason or "no live facts")
                     for xm in members:
                         batch_completed_this_sweep.add(str(xm.get("id") or ""))
                     continue
-                for leg, fact in zip(legs, member_facts):
-                    if not fact["context"]:
-                        continue
-                    leg["market_description"] = (
-                        str(leg.get("market_description") or "") + "\n\n" + fact["context"]
-                    ).strip()
                 try:
                     decision = await decision_engine.analyze_event_batch(
                         event_ticker=et_key,
@@ -1862,14 +1870,23 @@ async def scan_and_trade(
                     description = enrich_ai_market_description(
                         (subtitle or contract_title).strip(), market
                     )
+                    from src.event_live_lookup import context_for_market
                     from src.live_facts import live_fact_for_market, note_live_fact_skip, series_of
 
                     fact = await live_fact_for_market(market)
-                    if fact["skip"]:
-                        note_live_fact_skip(series_of(market), fact["reason"])
+                    seconds_left, _src = _seconds_until_buy_horizon(market, now=utc_now())
+                    ctx, reason = await context_for_market(
+                        market=market,
+                        fact=fact,
+                        client=getattr(decision_engine, "xai", None),
+                        seconds_until=seconds_left,
+                        title=title,
+                    )
+                    if reason and not ctx:
+                        note_live_fact_skip(series_of(market), reason)
                         continue
-                    if fact["context"]:
-                        description = (description + "\n\n" + fact["context"]).strip()
+                    if ctx:
+                        description = (description + "\n\n" + ctx).strip()
                     yes_bid = market.get("yes_bid")
                     yes_ask = market.get("yes_ask")
                     no_bid = market.get("no_bid")
