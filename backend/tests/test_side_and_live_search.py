@@ -6,7 +6,12 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from src.clients.xai_client import XAIClient, begin_live_lookup_scan, live_lookup_tools
+from src.clients.xai_client import (
+    XAIClient,
+    begin_live_lookup_scan,
+    live_lookup_tools,
+    log_live_lookup_summary,
+)
 from src.decision_engine.analyzer import DecisionEngine
 from src.decision_engine.strategy_math import derive_buy_side
 from src.event_live_lookup import attach_lookup_cost, clear_event_search_cache, context_for_market
@@ -202,6 +207,7 @@ def test_a_live_feed_or_a_search_error_does_not_add_a_lookup():
 def _responses_payload():
     answer = '{"facts":"Home 21, away 18, 3:12 left in Q2. Smith 12 pts."}'
     return {
+        "status": "completed",
         "output_text": answer,
         "output": [
             {
@@ -254,7 +260,7 @@ def test_responses_lookup_parses_output_text_and_prices_tools(monkeypatch):
     assert result["client_error"] is None
     assert captured["model"] == "grok-4.3"
     assert "search_parameters" not in captured
-    assert captured["max_output_tokens"] == 200
+    assert captured["max_output_tokens"] == 1500
     assert captured["max_tool_calls"] == 8
     today = datetime.now(timezone.utc).date()
     assert captured["tools"] == live_lookup_tools(today)
@@ -346,3 +352,101 @@ def test_lookup_410_is_logged_once_and_does_not_fall_through(monkeypatch, caplog
         )
     assert opened == ("", "")
     assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
+
+
+def test_incomplete_or_blank_lookup_falls_through_and_is_counted(monkeypatch, caplog):
+    calls = {"n": 0}
+
+    async def fake_post(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return (
+                "ok",
+                {
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "output_text": "",
+                    "output": [],
+                    "usage": {"input_tokens": 20, "output_tokens": 1500},
+                },
+            )
+        if calls["n"] == 2:
+            return ("ok", {"status": "completed", "output_text": "", "output": []})
+        if calls["n"] == 3:
+            return ("ok", {"status": "completed", "output_text": "no score in prose", "output": []})
+        return (
+            "ok",
+            {
+                "status": "completed",
+                "output_text": '{"facts":""}',
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": '{"facts":""}'}]}],
+            },
+        )
+
+    monkeypatch.setattr("src.clients.xai_client._post_xai_responses", fake_post)
+    begin_live_lookup_scan()
+    clear_event_search_cache()
+    client = XAIClient(api_key="x", model="grok-4.3")
+    with caplog.at_level(logging.WARNING, logger="xai_client"):
+        incomplete = asyncio.run(
+            context_for_market(
+                market={"id": "P1", "event_ticker": "INC"},
+                fact={"skip": False, "context": "", "reason": ""},
+                client=client,
+                seconds_until=400,
+                title="Incomplete game",
+            )
+        )
+        shared = asyncio.run(
+            context_for_market(
+                market={"id": "P2", "event_ticker": "INC"},
+                fact={"skip": False, "context": "", "reason": ""},
+                client=client,
+                seconds_until=400,
+                title="Same incomplete game",
+            )
+        )
+        blank = asyncio.run(
+            context_for_market(
+                market={"id": "P3", "event_ticker": "BLANK"},
+                fact={"skip": False, "context": "", "reason": ""},
+                client=client,
+                seconds_until=400,
+                title="Blank game",
+            )
+        )
+        prose = asyncio.run(
+            context_for_market(
+                market={"id": "P4", "event_ticker": "PROSE"},
+                fact={"skip": False, "context": "", "reason": ""},
+                client=client,
+                seconds_until=400,
+                title="Unparseable game",
+            )
+        )
+        explicit = asyncio.run(
+            context_for_market(
+                market={"id": "P5", "event_ticker": "NONE"},
+                fact={"skip": False, "context": "", "reason": ""},
+                client=client,
+                seconds_until=400,
+                title="No data",
+            )
+        )
+    assert incomplete == ("", "")
+    assert shared == ("", "")
+    assert blank == ("", "")
+    assert prose == ("", "")
+    assert "skipped before the model" in explicit[1]
+    assert calls["n"] == 4
+    warnings = [rec.message for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("incomplete" in msg and "max_output_tokens" in msg for msg in warnings)
+    assert any("empty output" in msg for msg in warnings)
+    assert any("unparseable" in msg for msg in warnings)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="xai_client"):
+        log_live_lookup_summary()
+    assert any(
+        "facts=0 confirmed-empty=1 transient=3 client-error=0" in rec.message
+        for rec in caplog.records
+    )

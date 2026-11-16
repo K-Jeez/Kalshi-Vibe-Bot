@@ -33,10 +33,12 @@ _UNCERTAINTY_LEVELS = {"low", "medium", "high", "abstain"}
 _EMPTY_FACTS = {"", "none", "none found", "n/a", "unknown", "no facts"}
 
 
-# One short score lookup. The Responses tools have no result-count field.
-_LIVE_LOOKUP_MAX_OUTPUT_TOKENS = 200
+# Reasoning tokens count against this cap. 200 was small enough to finish as
+# status "incomplete" with no output_text.
+_LIVE_LOOKUP_MAX_OUTPUT_TOKENS = 1500
 _scan_logged_client_errors: Set[int] = set()
 _scan_client_error: Optional[int] = None
+_lookup_tally = {"facts": 0, "confirmed_empty": 0, "transient": 0, "client_error": 0}
 
 
 def begin_live_lookup_scan() -> None:
@@ -44,6 +46,26 @@ def begin_live_lookup_scan() -> None:
     global _scan_client_error
     _scan_logged_client_errors.clear()
     _scan_client_error = None
+    for key in _lookup_tally:
+        _lookup_tally[key] = 0
+
+
+def note_lookup_outcome(outcome: str) -> None:
+    if outcome in _lookup_tally:
+        _lookup_tally[outcome] += 1
+
+
+def log_live_lookup_summary() -> None:
+    """One line per scan: facts, confirmed-empty, transient, client-error."""
+    if sum(_lookup_tally.values()) <= 0:
+        return
+    _logger.info(
+        "Live lookups this scan: facts=%d confirmed-empty=%d transient=%d client-error=%d",
+        _lookup_tally["facts"],
+        _lookup_tally["confirmed_empty"],
+        _lookup_tally["transient"],
+        _lookup_tally["client_error"],
+    )
 
 
 def live_lookup_tools(today) -> List[dict]:
@@ -67,14 +89,30 @@ def live_lookup_max_tool_calls(value: int) -> int:
     return max(1, min(8, int(value)))
 
 
-def _facts_from_search(content: str) -> str:
-    parsed = loads_json_object(content, log_label="live-search")
-    if not isinstance(parsed, dict):
-        return ""
-    text = str(parsed.get("facts") or "").strip()
-    if text.lower() in _EMPTY_FACTS:
-        return ""
-    return text[:500]
+def classify_live_lookup(data: dict) -> Tuple[str, str, str]:
+    """Return ``(outcome, facts, reason)``.
+
+    Confirmed-empty requires ``status == completed`` and JSON that explicitly
+    has no live data. Incomplete, blank, or unparseable output is transient.
+    """
+    status = str((data or {}).get("status") or "").strip().lower()
+    text = output_text_from_response(data or {})
+    if status != "completed":
+        reason = "incomplete" if status == "incomplete" else "status not completed"
+        details = (data or {}).get("incomplete_details")
+        if isinstance(details, dict) and details.get("reason"):
+            reason = f"{reason} {details.get('reason')}"
+        return "transient", "", reason.strip()
+    if not text:
+        return "transient", "", "empty output"
+    parsed = loads_json_object(text, log_label="live-search")
+    if not isinstance(parsed, dict) or "facts" not in parsed:
+        return "transient", "", "unparseable"
+    raw = parsed.get("facts")
+    facts = "" if raw is None else str(raw).strip()
+    if facts.lower() in _EMPTY_FACTS:
+        return "confirmed_empty", "", ""
+    return "facts", facts[:500], ""
 
 XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_MANAGEMENT_BASE_URL = "https://management-api.x.ai"
@@ -601,25 +639,24 @@ class XAIClient:
     async def search_event_facts(self, title: str, *, max_tool_calls: int = 3) -> dict:
         """One Responses API web+X lookup.
 
-        ``facts`` is text, ``""`` when the model found nothing, or None when the call
-        did not succeed. ``client_error`` is an HTTP 4xx status. A 5xx or timeout
-        leaves both empty so the caller can still run the model.
+        ``facts`` is text when a completed response names live data. ``confirmed_empty``
+        is true only when that response's JSON says nothing was found. Anything
+        incomplete, blank, or unparseable is transient and the model still runs.
+        ``client_error`` is an HTTP 4xx status.
         """
         global _scan_client_error
         if _scan_client_error is not None:
-            return {"facts": None, "client_error": _scan_client_error, "usage": None}
+            note_lookup_outcome("client_error")
+            return {"facts": None, "confirmed_empty": False, "client_error": _scan_client_error, "usage": None}
         today = datetime.now(timezone.utc).date()
         payload: dict = {
             "model": self.model,
             "input": [
                 {
                     "role": "system",
-                    "content": (
-                        'Reply with JSON only: {"facts":"<current score, clock, and key player stats, '
-                        'or empty if you cannot find them>"}. Do not describe images or video.'
-                    ),
+                    "content": 'JSON only: {"facts":"<score, clock, key stats, or empty>"}',
                 },
-                {"role": "user", "content": f"Current score, clock, and key player stats for: {title}"},
+                {"role": "user", "content": f"Current score, clock, and key stats: {title}"},
             ],
             "tools": live_lookup_tools(today),
             "max_tool_calls": live_lookup_max_tool_calls(max_tool_calls),
@@ -634,21 +671,29 @@ class XAIClient:
                 log_label=f"live {title}",
             )
         except Exception as exc:
-            _logger.warning("live lookup failed for '%s': %s", title[:80], exc)
-            return {"facts": None, "client_error": None, "usage": None}
+            _logger.warning("live lookup transient for '%s': %s", title[:80], exc)
+            note_lookup_outcome("transient")
+            return {"facts": None, "confirmed_empty": False, "client_error": None, "usage": None}
         kind = outcome[0]
         if kind == "client":
             status = int(outcome[1])
             _note_live_lookup_client_error(status, str(outcome[2] if len(outcome) > 2 else ""))
-            return {"facts": None, "client_error": status, "usage": None}
+            note_lookup_outcome("client_error")
+            return {"facts": None, "confirmed_empty": False, "client_error": status, "usage": None}
         if kind != "ok":
-            _logger.warning("live lookup unavailable for '%s': %s", title[:80], outcome[-1])
-            return {"facts": None, "client_error": None, "usage": None}
+            _logger.warning("live lookup transient for '%s': %s", title[:80], outcome[-1])
+            note_lookup_outcome("transient")
+            return {"facts": None, "confirmed_empty": False, "client_error": None, "usage": None}
         data = outcome[1] if isinstance(outcome[1], dict) else {}
         recorded: dict = {}
         attach_model_usage(recorded, data, started=time.perf_counter())
+        label, facts, reason = classify_live_lookup(data)
+        if label == "transient":
+            _logger.warning("live lookup transient for '%s': %s", title[:80], reason or "unusable")
+        note_lookup_outcome(label)
         return {
-            "facts": _facts_from_search(output_text_from_response(data)),
+            "facts": facts or None,
+            "confirmed_empty": label == "confirmed_empty",
             "client_error": None,
             "usage": recorded.get("usage"),
         }

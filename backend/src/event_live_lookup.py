@@ -29,14 +29,27 @@ def in_play(seconds_until: Optional[float]) -> bool:
 def _coerce_lookup(raw: Any) -> dict:
     if isinstance(raw, dict) and ("facts" in raw or "client_error" in raw or "usage" in raw):
         usage = raw.get("usage")
+        facts = raw.get("facts")
+        if isinstance(facts, str):
+            facts = facts.strip()
+        confirmed = raw.get("confirmed_empty")
+        if confirmed is None:
+            confirmed = facts == ""
         return {
-            "facts": raw.get("facts"),
+            "facts": facts,
+            "confirmed_empty": bool(confirmed) and not raw.get("client_error"),
             "client_error": raw.get("client_error"),
             "usage": usage if isinstance(usage, dict) else None,
         }
     if raw is None or isinstance(raw, str):
-        return {"facts": raw, "client_error": None, "usage": None}
-    return {"facts": None, "client_error": None, "usage": None}
+        text = raw.strip() if isinstance(raw, str) else None
+        return {
+            "facts": text,
+            "confirmed_empty": text == "",
+            "client_error": None,
+            "usage": None,
+        }
+    return {"facts": None, "confirmed_empty": False, "client_error": None, "usage": None}
 
 
 async def lookup_event_facts(client: Any, *, event_key: str, title: str) -> tuple[Optional[str], bool, Optional[int]]:
@@ -64,15 +77,16 @@ async def lookup_event_facts(client: Any, *, event_key: str, title: str) -> tupl
     parsed = _coerce_lookup(raw)
     facts = parsed["facts"]
     if isinstance(facts, str):
-        facts = facts.strip()
+        facts = facts.strip() or None
     client_error = parsed["client_error"]
     try:
         client_error = int(client_error) if client_error is not None else None
     except (TypeError, ValueError):
         client_error = None
-    confirmed = client_error is None and facts == ""
-    if client_error is not None:
-        facts = None
+    confirmed = client_error is None and bool(parsed["confirmed_empty"])
+    if client_error is not None or not confirmed:
+        if not facts:
+            facts = None
     usage = parsed["usage"]
     if isinstance(usage, dict) and usage.get("estimated_usd"):
         _unbilled.append({"event_key": key, "title": title or key, "usage": usage})

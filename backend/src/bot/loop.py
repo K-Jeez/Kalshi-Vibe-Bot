@@ -3067,6 +3067,12 @@ async def scan_and_trade(
         except Exception:
             pass
     finally:
+        try:
+            from src.clients.xai_client import log_live_lookup_summary
+
+            log_live_lookup_summary()
+        except Exception:
+            pass
         db.close()
 
 
