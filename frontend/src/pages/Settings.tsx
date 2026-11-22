@@ -205,9 +205,7 @@ export const Settings: React.FC = () => {
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
             Numbers here are stored in the <strong className="text-white">database</strong>, not read
             live from <code className="text-cyan-200/90">backend/.env</code>. After editing <code className="text-cyan-200/90">.env</code>, use{' '}
-            <strong className="text-white">Restore configuration defaults</strong> below so SQLite matches your file (e.g.{' '}
-            <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT=0.80</code> → <strong className="text-white">80</strong> in this field), or type{' '}
-            <strong className="text-white">85</strong> and <strong className="text-white">Save strategy settings</strong>.
+            <strong className="text-white">Restore configuration defaults</strong> below so SQLite matches your file, or type the numbers and <strong className="text-white">Save strategy settings</strong>.
           </p>
 
           {!cur ? (

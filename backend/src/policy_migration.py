@@ -25,7 +25,6 @@ OLD_MAX_OPEN = 30
 NEW_MAX_OPEN = 12
 APPROVED_MIN_EDGE = 5
 APPROVED_MIN_AI_WIN_PROB = 60
-APPROVED_STOP_LOSS = 0.80
 
 # Columns the activity log can add without rewriting existing rows.
 _ACTIVITY_COLUMNS = (
@@ -135,7 +134,6 @@ def _apply_approved_gates(conn: sqlite3.Connection) -> dict:
     wanted = {
         "min_edge_to_buy_pct": APPROVED_MIN_EDGE,
         "min_ai_win_prob_buy_side_pct": APPROVED_MIN_AI_WIN_PROB,
-        "stop_loss_drawdown_pct": APPROVED_STOP_LOSS,
         "max_open_positions": NEW_MAX_OPEN,
     }
     present = [name for name in wanted if name in columns]
@@ -244,11 +242,6 @@ def migrate_sqlite_file(path: Path, *, backup: bool = True) -> dict:
                 )
             except sqlite3.OperationalError:
                 pass
-            if "stop_loss_selling_enabled" in _column_names(conn, "tuning_state"):
-                try:
-                    conn.execute("UPDATE tuning_state SET stop_loss_selling_enabled = 0")
-                except sqlite3.OperationalError:
-                    pass
             conn.execute("INSERT INTO _bot_patches (id) VALUES (?)", (FAVORITES_POLICY_ID,))
         conn.commit()
         return {
@@ -263,7 +256,6 @@ def migrate_sqlite_file(path: Path, *, backup: bool = True) -> dict:
             "approved_gates": {
                 "min_edge_to_buy_pct": APPROVED_MIN_EDGE,
                 "min_ai_win_prob_buy_side_pct": APPROVED_MIN_AI_WIN_PROB,
-                "stop_loss_drawdown_pct": APPROVED_STOP_LOSS,
                 "max_open_positions": NEW_MAX_OPEN,
             },
             "gates_set": gates.get("set", {}),

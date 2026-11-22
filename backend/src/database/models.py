@@ -70,7 +70,7 @@ class Position(Base):
     bid_price       = Column(Float, nullable=True)   # best bid on held side — liquidation mark (dashboard “Best bid”)
     estimated_price = Column(Float, nullable=True)  # Kalshi YES last trade (NO → 1−YES) — Est. Value + display unrealized only
     entry_best_bid  = Column(Float, nullable=True)  # legacy optional; older rows may have entry bid snapshot (unused for stop-loss)
-    # Unread. Kept so an existing database file still opens.
+    # Unread leftover. Kept so an existing database file still opens.
     stop_loss_drawdown_pct_at_entry = Column(Float, nullable=True)
     current_price   = Column(Float, nullable=False)
     unrealized_pnl  = Column(Float, default=0.0)
@@ -237,9 +237,9 @@ class TuningState(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     trade_mode = Column(String, nullable=False, default="live")  # historical column; app is live-only
 
-    # Unread. Kept so an existing database file still opens.
-    stop_loss_drawdown_pct = Column(Float, default=_LEGACY_STOP_LOSS_COLUMN_DEFAULT)
-    stop_loss_selling_enabled = Column(Boolean, default=False)
+    # Unread leftovers. Nullable so a new row does not invent a stop-loss setting.
+    stop_loss_drawdown_pct = Column(Float, nullable=True)
+    stop_loss_selling_enabled = Column(Boolean, nullable=True)
     min_edge_to_buy_pct = Column(Integer, default=DEFAULT_MIN_EDGE_TO_BUY_PCT)
     min_ai_win_prob_buy_side_pct = Column(Integer, default=DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
     max_open_positions = Column(Integer, default=DEFAULT_MAX_OPEN_POSITIONS)
@@ -596,8 +596,6 @@ def _ensure_tuning_row(db) -> None:
         return
     row = TuningState(
         trade_mode=mode,
-        stop_loss_drawdown_pct=0.80,
-        stop_loss_selling_enabled=False,
         min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
         min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
         max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),
@@ -721,8 +719,6 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
     if not row:
         row = TuningState(
             trade_mode=mode,
-            stop_loss_drawdown_pct=0.80,
-            stop_loss_selling_enabled=False,
             min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
             min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
             max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),

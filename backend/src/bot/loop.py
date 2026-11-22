@@ -665,10 +665,10 @@ async def monitor_positions(
     *,
     bot_state_label: str = "",
 ):
-    """Refresh open positions; optionally exit those hitting an exit condition.
+    """Refresh open positions from Kalshi, including holdings that were never booked locally.
 
-    ``allow_exits`` is False only when ``bot_state`` is ``stop`` (no auto sells); ``bot_state_label``
-    is logged when a would-be exit is suppressed so logs match the DB/UI.
+    The exchange import runs even when this database has no open rows, and it runs in
+    Stop and Pause. ``allow_exits`` is unused; the bot does not sell before settlement.
     """
     from src.database.models import Position, Trade
     from src.reconcile.open_positions import dedupe_open_positions
@@ -681,12 +681,6 @@ async def monitor_positions(
             Position.status == "open",
             Position.trade_mode == TRADE_MODE,
         ).all()
-        if not positions:
-            logger.debug(
-                "monitor_positions: no open rows for trade_mode=%s (skipping Kalshi reconcile)",
-                TRADE_MODE,
-            )
-            return
         prior_marks = {
             pos.id: (float(pos.current_price or 0.0), None if pos.bid_price is None else float(pos.bid_price))
             for pos in positions
@@ -2328,7 +2322,6 @@ async def scan_and_trade(
                                                 market_title=title,
                                                 order=result,
                                                 entry_decision_log_id=decision_log_row_id,
-                                                stop_loss_drawdown_pct_at_entry=None,
                                                 close_time=contractual_close,
                                                 expected_expiration_time=expected_expiration_iso,
                                             )
@@ -2562,8 +2555,8 @@ async def run_bot_loop(
 ):
     """Position checks and the market scan run as two tasks.
 
-    A slow scan no longer delays stop-loss monitoring. Stop still disables
-    automatic exits. Pause still allows them. New buys still require Play.
+    The first thing this does is import any Kalshi holdings that are missing
+    from the database, including while the bot is Stopped. New buys require Play.
     """
     logger.info("Bot loop started (scan_interval=%ds, monitor separate)", settings.bot_scan_interval)
     from src.api.tuning import sync_runtime_from_db
@@ -2634,6 +2627,22 @@ async def run_bot_loop(
             raise
         except Exception as e:
             logger.error("Unhandled error in scan task: %s", e)
+
+    db_boot = db_factory()
+    try:
+        from src.reconcile.kalshi_live_sync import reconcile_live_positions_from_kalshi
+
+        await reconcile_live_positions_from_kalshi(
+            db_boot,
+            trade_mode=TRADE_MODE,
+            kalshi_client=kalshi_client,
+            settlements=True,
+            broadcast_fn=broadcast_fn,
+        )
+    except Exception as exc:
+        logger.warning("Startup Kalshi position import skipped: %s", type(exc).__name__)
+    finally:
+        db_boot.close()
 
     try:
         await run_parallel_cycles(

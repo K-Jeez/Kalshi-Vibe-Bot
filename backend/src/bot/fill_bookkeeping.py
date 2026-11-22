@@ -166,7 +166,6 @@ def apply_cumulative_fill(
     exit_reason: str | None = None,
     fee_kind: str = "exchange_fill",
     entry_decision_log_id: str | None = None,
-    stop_loss_drawdown_pct_at_entry: float | None = None,
     close_time: str | None = None,
     expected_expiration_time: str | None = None,
 ) -> dict:
@@ -246,7 +245,6 @@ def apply_cumulative_fill(
         fee_kind=fee_kind,
         cumulative_qty=target,
         entry_decision_log_id=entry_decision_log_id,
-        stop_loss_drawdown_pct_at_entry=stop_loss_drawdown_pct_at_entry,
         close_time=close_time,
         expected_expiration_time=expected_expiration_time,
     )
@@ -313,7 +311,6 @@ def _apply_buy_delta(
     fee_kind: str,
     cumulative_qty: int,
     entry_decision_log_id: str | None = None,
-    stop_loss_drawdown_pct_at_entry: float | None = None,
     close_time: str | None = None,
     expected_expiration_time: str | None = None,
 ) -> dict:
@@ -334,7 +331,6 @@ def _apply_buy_delta(
                 status="open",
                 trade_mode=TRADE_MODE,
                 entry_decision_log_id=entry_decision_log_id,
-                stop_loss_drawdown_pct_at_entry=stop_loss_drawdown_pct_at_entry,
                 close_time=close_time,
                 expected_expiration_time=expected_expiration_time,
             )

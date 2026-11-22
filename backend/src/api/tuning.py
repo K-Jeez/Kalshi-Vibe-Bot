@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""REST tuning endpoints: stop-loss, minimum edge, and runtime sync for the bot."""
+"""REST tuning endpoints: minimum edge, model confidence, and runtime sync."""
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -10,8 +10,6 @@ from src.ai_provider import normalize_ai_provider
 from src.api.schemas import StrategyKnobsRequest
 from src.config import (
     AI_PROVIDER,
-    APPROVED_MAX_OPEN_POSITIONS,
-    DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
     Settings,
@@ -35,17 +33,6 @@ def _clamp(field: str, raw: float) -> float:
 def _coalesce_int(row, attr: str, default: int) -> int:
     v = getattr(row, attr, None)
     return default if v is None else int(v)
-
-
-def effective_max_open_positions(value) -> int:
-    """Approved ceiling is 12. A stale 30 from an old file cannot raise it."""
-    if value is None:
-        value = DEFAULT_MAX_OPEN_POSITIONS
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = DEFAULT_MAX_OPEN_POSITIONS
-    return max(1, min(APPROVED_MAX_OPEN_POSITIONS, parsed))
 
 
 def _coalesce_ai_provider(row) -> str:
