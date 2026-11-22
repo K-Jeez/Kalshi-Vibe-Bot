@@ -187,9 +187,6 @@ export interface DecisionAnalysis {
   /** Quarter Kelly contract count at analysis time and deployable cash snapshot. */
   kelly_contracts?: number
   /** w*model + (1-w)*fee-free mid, as a YES percent. Gates still use the raw model. */
-  blended_probability_yes_pct?: number | null
-  blended_side_pct?: number | null
-  blend_weight?: number | null
   market_mid_yes_pct?: number | null
   blend_market?: string | null
   yes_confidence: number
@@ -327,7 +324,6 @@ export interface HealthResponse {
   monitor_age_sec?: number | null
   alerts?: string[]
   fee_estimate_note?: string
-  approved_max_open_positions?: number
 }
 
 export const apiClient = {

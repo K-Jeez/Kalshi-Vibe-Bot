@@ -268,7 +268,6 @@ export const AnalysisDetailBody: React.FC<{
         ? Math.round(yesFromBook * 100)
         : null
   const impliedLabel = 'Market price of this side'
-  const showBlend = a.blend_weight != null && Number(a.blend_weight) < 0.999 && a.blended_side_pct != null
   const edgePts = a.edge_pct ?? a.edge
   const contracts = a.kelly_contracts ?? 0
   const batchLegId = (a.xai_analysis?.event_batch && String(a.market_id || '').trim()) || ''
@@ -376,11 +375,6 @@ export const AnalysisDetailBody: React.FC<{
                     : `Recommended: ${recSide}`
                   : 'SKIP'}
               </p>
-              {showBlend ? (
-                <p className="text-[10px] text-amber-200/90 mt-1">
-                  Combined chance (model + market midpoint) {Number(a.blended_side_pct).toFixed(1)}%
-                </p>
-              ) : null}
             </div>
             <div>
               <p className="text-[10px] uppercase tracking-wide text-white/65">Edge</p>

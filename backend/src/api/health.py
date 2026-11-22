@@ -1,7 +1,6 @@
 from fastapi import APIRouter
 
 from src.activity_log import intent_status_summary
-from src.config import APPROVED_MAX_OPEN_POSITIONS
 from src.decision_engine.strategy_gates import FEE_ESTIMATE_NOTE
 from src.ops_status import alerts, monitor_age_sec
 from src.util.datetimes import utc_iso_z, utc_now
@@ -55,7 +54,6 @@ def public_health_body() -> dict:
         "legacy_unresolved_without_client_order_id": legacy_count,
         "outbound_alerts": False,
         "config_source": "database",
-        "approved_max_open_positions": APPROVED_MAX_OPEN_POSITIONS,
         "fee_estimate_note": FEE_ESTIMATE_NOTE,
     }
 
