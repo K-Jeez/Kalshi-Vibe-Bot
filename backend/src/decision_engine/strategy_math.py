@@ -1,17 +1,9 @@
-"""Edge and quarter Kelly sizing for binary Kalshi contracts (prices as 0–1 dollars per $1 payoff)."""
+"""Edge and whole-contract sizing for binary Kalshi contracts (prices as 0–1 dollars)."""
 
 from __future__ import annotations
 
 import math
 from typing import Optional, Tuple
-
-# Baked contrarian buy tier (not configurable): when the book is skeptical of the buy side but
-# Model is much more bullish than the book, require extra edge and a higher AI win-prob floor on that side.
-_CONTRARIAN_IMPLIED_BUY_MAX_PCT = 25
-_CONTRARIAN_AI_OVER_IMPLIED_MIN_GAP_PCT = 15
-_CONTRARIAN_EXTRA_MIN_EDGE_PCT = 5
-_CONTRARIAN_EXTRA_MIN_AI_WIN_PROB_PCT = 4
-
 
 def _clamp_unit(x: float) -> float:
     if not math.isfinite(x):
@@ -60,51 +52,6 @@ def edge_pct_for_side(
     return p_no * 100.0 - na * 100.0
 
 
-def full_kelly_fraction_for_side(
-    side: str,
-    ai_yes_pct: int,
-    yes_ask: Optional[float],
-    no_ask: Optional[float],
-    yes_mid: float,
-    no_mid: float,
-) -> float:
-    """Fraction of bankroll to allocate to premium at the quoted asks (0 when no edge at ask)."""
-    p_yes = ai_yes_probability(ai_yes_pct)
-    ya, na = executable_asks(yes_ask, no_ask, yes_mid, no_mid)
-    if str(side).upper() == "YES":
-        p, b = p_yes, ya
-    else:
-        p, b = (1.0 - p_yes), na
-    if b <= 1e-12 or b >= 1.0 - 1e-12:
-        return 0.0
-    if p <= b + 1e-12:
-        return 0.0
-    f = (p - b) / (1.0 - b)
-    return max(0.0, min(1.0, float(f)))
-
-
-def kelly_contracts_for_side(
-    bankroll: float,
-    side: str,
-    ai_yes_pct: int,
-    yes_ask: Optional[float],
-    no_ask: Optional[float],
-    yes_mid: float,
-    no_mid: float,
-) -> int:
-    """Full Kelly size in whole contracts (rounded down)."""
-    br = float(bankroll)
-    if not math.isfinite(br) or br <= 0:
-        return 0
-    ya, na = executable_asks(yes_ask, no_ask, yes_mid, no_mid)
-    b = ya if str(side).upper() == "YES" else na
-    f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
-    if f <= 0 or b <= 1e-12:
-        return 0
-    stake = f * br
-    return int(math.floor(stake / b + 1e-12))
-
-
 def stake_dollars_for_edge(cash: float, edge_pct: float) -> float:
     """Stake is the edge, in points, as a percent of available cash.
 
@@ -139,137 +86,6 @@ def max_whole_contracts_for_cash(bankroll: float, per_contract_premium: float) -
     return int(math.floor(br / px + 1e-12))
 
 
-def _kelly_fraction(probability: float, price: float) -> float:
-    p = max(0.0, min(1.0, float(probability)))
-    b = max(0.0, min(1.0, float(price)))
-    if b <= 1e-12 or b >= 1.0 - 1e-12 or p <= b + 1e-12:
-        return 0.0
-    return max(0.0, min(1.0, (p - b) / (1.0 - b)))
-
-
-def kelly_contracts_for_order(
-    bankroll: float,
-    side: str,
-    ai_yes_pct: int,
-    yes_ask: Optional[float],
-    no_ask: Optional[float],
-    yes_mid: float,
-    no_mid: float,
-    *,
-    per_contract_premium: float,
-    max_kelly_contracts: Optional[int] = None,
-    win_probability: Optional[float] = None,
-) -> Tuple[int, str]:
-    """Whole-contract size: quarter Kelly, then the cash cap.
-
-    A quarter-Kelly fraction that floors to zero contracts is not raised to one.
-    There is no minimum bet size.
-
-    Returns ``(quantity, tag)`` where ``tag`` is ``quarter_kelly``, ``cash_capped``,
-    or ``none``.
-    """
-    from src.decision_engine.strategy_gates import KELLY_FRACTION
-
-    if win_probability is None:
-        k_full = kelly_contracts_for_side(bankroll, side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
-    else:
-        ya, na = executable_asks(yes_ask, no_ask, yes_mid, no_mid)
-        price = ya if str(side).upper() == "YES" else na
-        full_f = _kelly_fraction(float(win_probability), price)
-        br = float(bankroll)
-        k_full = int(math.floor(full_f * br / price + 1e-12)) if price > 1e-12 and full_f > 0 and br > 0 else 0
-    k = int(math.floor(float(k_full) * float(KELLY_FRACTION) + 1e-12))
-    cap = max_whole_contracts_for_cash(bankroll, per_contract_premium)
-    if cap < 1:
-        return 0, "none"
-    mk: Optional[int]
-    if max_kelly_contracts is not None:
-        mk = max(0, int(max_kelly_contracts))
-    else:
-        mk = None
-
-    def _cap(qty: int) -> int:
-        if mk is None:
-            return int(qty)
-        return min(int(qty), mk)
-
-    if k >= 1:
-        q = _cap(min(int(k), cap))
-        if q < 1:
-            return 0, "none"
-        return q, "cash_capped" if q < int(k) else "quarter_kelly"
-    return 0, "none"
-
-
-def kelly_order_skip_summary(
-    bankroll: float,
-    side: str,
-    ai_yes_pct: int,
-    yes_ask: Optional[float],
-    no_ask: Optional[float],
-    yes_mid: float,
-    no_mid: float,
-    *,
-    per_contract_premium: float,
-    max_kelly_contracts: Optional[int] = None,
-    win_probability: Optional[float] = None,
-) -> Optional[str]:
-    """Human-readable skip reason when :func:`kelly_contracts_for_order` returns quantity 0; else ``None``."""
-    qty, _tag = kelly_contracts_for_order(
-        bankroll,
-        side,
-        ai_yes_pct,
-        yes_ask,
-        no_ask,
-        yes_mid,
-        no_mid,
-        per_contract_premium=per_contract_premium,
-        max_kelly_contracts=max_kelly_contracts,
-        win_probability=win_probability,
-    )
-    if qty >= 1:
-        return None
-
-    if win_probability is not None:
-        ya, na = executable_asks(yes_ask, no_ask, yes_mid, no_mid)
-        price = ya if str(side).upper() == "YES" else na
-        ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
-        if _kelly_fraction(float(win_probability), price) <= 1e-12:
-            return (
-                f"Skipped — sizing probability {float(win_probability) * 100:.1f}% "
-                f"is not above the ask ({ask_c}¢), so quarter Kelly is zero"
-            )
-
-    f = full_kelly_fraction_for_side(side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid)
-    if f <= 1e-12:
-        ai_buy = int(ai_win_prob_pct_on_buy_side(side, ai_yes_pct))
-        ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
-        edge_at_ask = float(ai_buy) - float(ask_c)
-        su = str(side or "").upper()
-        return (
-            f"Skipped — no edge at ask: AI {ai_buy}% on {su} vs ask {ask_c}¢ "
-            f"(edge {edge_at_ask:+.1f} pts at executable price)"
-        )
-
-    ask_c = int(max(0, min(100, round(float(per_contract_premium) * 100.0))))
-    deploy = float(bankroll)
-    cash_can_buy = max_whole_contracts_for_cash(deploy, per_contract_premium) >= 1
-    if max_kelly_contracts is not None and int(max_kelly_contracts) < 1 and cash_can_buy:
-        return (
-            "Skipped — stake cap cannot fund one whole contract at the ask "
-            f"({ask_c}¢ on ${deploy:.2f} deployable). The order is not enlarged to full cash."
-        )
-    if not cash_can_buy:
-        return (
-            "Skipped — available cash cannot buy a whole contract "
-            f"at {ask_c}¢ (deployable ${deploy:.2f})"
-        )
-    return (
-        "Skipped — quarter Kelly is below one contract "
-        f"(deployable ${deploy:.2f} can buy at {ask_c}¢; size is not raised to one)"
-    )
-
-
 def derive_buy_side(
     ai_yes_pct: int,
     yes_ask: Optional[float],
@@ -291,24 +107,6 @@ def ai_win_prob_pct_on_buy_side(side: str, ai_yes_pct: int) -> int:
     """AI P(win) for the purchased contract side (YES leg or NO leg), 0–100 integer."""
     y = int(max(0, min(100, int(ai_yes_pct))))
     return y if str(side).upper() == "YES" else 100 - y
-
-
-def contrarian_buy_tier_active(
-    *,
-    side: str,
-    ai_yes_pct: int,
-    yes_ask: Optional[float],
-    no_ask: Optional[float],
-    yes_mid: float,
-    no_mid: float,
-) -> bool:
-    """True when the market is very skeptical of the buy side but the model is much more bullish (baked thresholds)."""
-    implied = int(market_implied_pct_for_side(side, yes_ask, no_ask, yes_mid, no_mid))
-    ai_buy = int(ai_win_prob_pct_on_buy_side(side, ai_yes_pct))
-    return bool(
-        implied <= _CONTRARIAN_IMPLIED_BUY_MAX_PCT
-        and (ai_buy - implied) >= _CONTRARIAN_AI_OVER_IMPLIED_MIN_GAP_PCT
-    )
 
 
 def effective_buy_gate_thresholds(

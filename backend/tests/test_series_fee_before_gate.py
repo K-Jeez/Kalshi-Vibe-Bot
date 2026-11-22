@@ -21,9 +21,8 @@ from src.bot.loop import (
 from src.clients.kalshi_client import KalshiClient
 from src.database.models import Base, BotState
 from src.decision_engine.strategy_gates import (
-    MAX_KELLY_BANKROLL_PCT,
     all_in_entry_dollars,
-    either_side_can_buy_one_capped_contract,
+    either_side_can_buy_one_contract,
     premodel_entry_block,
 )
 
@@ -46,13 +45,12 @@ def _quadratic_market(**extra) -> dict:
 
 def test_gate_passes_typical_asks_when_the_quadratic_schedule_is_known():
     balance = 100.60
-    cap = balance * MAX_KELLY_BANKROLL_PCT
-    assert cap == balance
+    cap = balance
     market = _quadratic_market()
     for ask in (0.29, 0.90):
         cost = all_in_entry_dollars(1, ask, fee_multiplier=1, fee_type="quadratic")
         assert cost is not None and cost < cap
-    assert either_side_can_buy_one_capped_contract(market, balance)
+    assert either_side_can_buy_one_contract(market, balance)
     assert premodel_entry_block(market, balance) is None
 
 
@@ -152,7 +150,7 @@ def test_series_fee_cache_serves_a_failed_read_and_a_known_schedule():
         assert calls[before:] == [f"/trade-api/v2/series/{SERIES}"]
         assert markets[0]["fee_multiplier"] == 1
         assert markets[1]["fee_type"] == "quadratic"
-        assert either_side_can_buy_one_capped_contract(markets[0], 100.60)
+        assert either_side_can_buy_one_contract(markets[0], 100.60)
 
     asyncio.run(scenario())
 

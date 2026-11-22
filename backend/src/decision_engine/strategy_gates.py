@@ -6,7 +6,7 @@ import math
 from typing import Optional
 
 from src.clients.kalshi_client import executable_buy_best_ask_dollars
-from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side, max_whole_contracts_for_cash
+from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side
 
 # Upper/lower bounds applied after user min edge / min AI (Settings + .env).
 MAX_EDGE_TO_BUY_PCT = 22
@@ -14,22 +14,10 @@ MAX_EDGE_TO_BUY_PCT = 22
 MAX_AI_WIN_PROB_BUY_SIDE_PCT = 100
 MIN_ENTRY_PRICE_CENTS = 50
 MAX_ENTRY_PRICE_CENTS = 85
-# Approved 2026-11-09 bundle. Quarter Kelly is applied in strategy_math.
-# Per-entry cap is 2.5% of available cash including the estimated entry fee.
-# 5-point edge, 60% win probability, and 80% stop-loss are not part of this cap.
-KELLY_FRACTION = 0.25
-MAX_KELLY_BANKROLL_PCT = 1.0
-EVENT_EXPOSURE_CAP_FRACTION = 1.0
 QUADRATIC_FEE_COEFFICIENT = 0.07
 
 # Sports: stricter scan volume only. Min edge uses the Settings value as-is.
 _SPORTS_MIN_VOLUME_FLOOR = 2000.0
-
-# High AI % on mid-priced contracts historically lost large despite decent win rate.
-_OVERCONF_AI_MIN_PCT = 75
-_OVERCONF_ENTRY_CENTS_LO = 41
-_OVERCONF_ENTRY_CENTS_HI = 65
-
 
 def is_sports_market_title(title: str, event_ticker: str = "") -> bool:
     t = f"{title or ''} {event_ticker or ''}".lower()
@@ -59,12 +47,6 @@ def effective_min_edge_for_market(min_edge_base: float, title: str, event_ticker
     return max(0.0, float(min_edge_base))
 
 
-def exit_grace_minutes_for_market(settings_grace_minutes: float, title: str, event_ticker: str = "") -> float:
-    """Exit grace is removed. The arguments are ignored so old callers stay safe."""
-    del settings_grace_minutes, title, event_ticker
-    return 0.0
-
-
 # GET /series/{series_ticker} documents these fee_type values.
 _QUADRATIC_FEE_TYPES = frozenset({
     "quadratic",
@@ -74,11 +56,10 @@ _QUADRATIC_FEE_TYPES = frozenset({
 
 FEE_ESTIMATE_NOTE = (
     "When GET /series returns a quadratic fee_type and a fee_multiplier, the "
-    "cap and expected-value check use 0.07 times that multiplier, rounded up "
-    "to the next cent. That is a conservative estimate, not the billed fee. "
-    "The exchange fill fee is stored separately. A missing or non-quadratic "
-    "schedule does not count as a positive expected value, and it does not "
-    "prove the 2.5% all-in cap."
+    "order check uses 0.07 times that multiplier, rounded up to the next cent. "
+    "That is a conservative estimate, not the billed fee. The exchange fill "
+    "fee is stored separately. A missing or non-quadratic schedule does not "
+    "count as a positive expected value."
 )
 
 
@@ -172,53 +153,6 @@ def fee_inclusive_ev_dollars(
     return p * qty - cost
 
 
-def kelly_contract_cap_for_bankroll(
-    bankroll: float,
-    per_contract_premium: float,
-    fee_multiplier: Optional[float] = None,
-    fee_type: Optional[str] = None,
-    bankroll_fraction: Optional[float] = None,
-) -> int:
-    """Largest whole-contract count whose estimated all-in cost fits the cash cap.
-
-    ``bankroll_fraction`` defaults to 2.5%. The order path passes the edge-bucket
-    cap. Returns 0 when the series fee schedule is unknown.
-    """
-    br = float(bankroll)
-    px = float(per_contract_premium)
-    if not math.isfinite(br) or not math.isfinite(px) or br <= 0 or px <= 1e-12:
-        return 0
-    if all_in_entry_dollars(1, px, fee_multiplier=fee_multiplier, fee_type=fee_type) is None:
-        return 0
-    cash_cap = max_whole_contracts_for_cash(br, px)
-    if cash_cap < 1:
-        return 0
-    fraction = MAX_KELLY_BANKROLL_PCT if bankroll_fraction is None else float(bankroll_fraction)
-    budget = br * max(0.0, min(1.0, fraction))
-    if all_in_entry_dollars(1, px, fee_multiplier=fee_multiplier, fee_type=fee_type) > budget + 1e-9:
-        return 0
-    lo, hi = 1, cash_cap
-    best = 1
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        cost = all_in_entry_dollars(mid, px, fee_multiplier=fee_multiplier, fee_type=fee_type)
-        if cost is not None and cost <= budget + 1e-9:
-            best = mid
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    return best
-
-
-def event_exposure_room(equity: float, open_cost_basis: float, pending_reserve: float, added_all_in: float) -> bool:
-    """True when this buy keeps the event's cost basis within 5% of equity."""
-    eq = float(equity)
-    if not math.isfinite(eq) or eq <= 0:
-        return False
-    total = float(open_cost_basis) + float(pending_reserve) + float(added_all_in)
-    return total <= eq * float(EVENT_EXPOSURE_CAP_FRACTION) + 1e-9
-
-
 def _side_entry_quote(market: dict, side: str, schedule: dict) -> dict:
     ask = executable_buy_best_ask_dollars(market, side)
     if ask is None:
@@ -238,24 +172,10 @@ def _side_entry_quote(market: dict, side: str, schedule: dict) -> dict:
     return {"side": side, "ask": float(ask), "fee": fee, "all_in": cost}
 
 
-def _cash_cap_skip_message(ticker: str, cap_dollars: float, sides: list) -> str:
-    parts = [f"Skip model {ticker} — one contract exceeds the cash cap ${cap_dollars:.2f}"]
-    for row in sides:
-        if row["ask"] is None:
-            parts.append(f"{row['side']} ask missing")
-            continue
-        fee = "n/a" if row["fee"] is None else f"{float(row['fee']):.2f}"
-        cost = "n/a" if row["all_in"] is None else f"{float(row['all_in']):.2f}"
-        parts.append(f"{row['side']} ask {float(row['ask']):.2f} estimated fee {fee} all-in {cost}")
-    return "; ".join(parts)
-
-
 def premodel_entry_block(market: dict, bankroll: float) -> Optional[dict]:
-    """Why this market cannot buy one capped contract, or None when it can.
+    """Why one contract cannot be bought with the cash on hand, or None when it can.
 
-    An unknown series fee is ``fee_unknown``. It is not reported as a cash-cap miss.
-    A real cash-cap miss includes the asks, the estimated fee, the all-in cost,
-    and the dollar cap. Model probability is not used.
+    An unknown series fee is ``fee_unknown``. Model probability is not used.
     """
     schedule = fee_schedule_from_mapping(market)
     ticker = str(market.get("id") or "")
@@ -280,34 +200,22 @@ def premodel_entry_block(market: dict, bankroll: float) -> Optional[dict]:
                 "cannot buy one contract at the ask including the estimated fee"
             ),
         }
-    for row in sides:
-        if row["ask"] is None:
-            continue
-        if kelly_contract_cap_for_bankroll(
-            float(bankroll),
-            float(row["ask"]),
-            fee_multiplier=schedule["fee_multiplier"],
-            fee_type=schedule["fee_type"],
-        ) >= 1:
-            return None
-    cap = float(bankroll) * float(MAX_KELLY_BANKROLL_PCT)
+    if any(row["all_in"] is not None and float(row["all_in"]) <= float(bankroll) + 1e-9 for row in sides):
+        return None
     return {
-        "kind": "cash_cap",
+        "kind": "cash_short",
         "series": series,
         "ticker": ticker,
-        "cap_dollars": cap,
         "sides": sides,
-        "message": _cash_cap_skip_message(ticker, cap, sides),
+        "message": (
+            f"Skip model {ticker} — available cash ${float(bankroll):.2f} "
+            "cannot buy one contract at the ask including the estimated fee"
+        ),
     }
 
 
-def either_side_can_buy_one_capped_contract(market: dict, bankroll: float) -> bool:
-    """True when YES or NO can buy one contract under the estimated 2.5% all-in cap.
-
-    Uses the native ask only. A missing ask is not replaced with the mid price.
-    A missing series fee schedule returns False. That is not a claim that the
-    cap was met. Model probability is not used.
-    """
+def either_side_can_buy_one_contract(market: dict, bankroll: float) -> bool:
+    """True when YES or NO can buy one whole contract with the cash on hand."""
     return premodel_entry_block(market, bankroll) is None
 
 

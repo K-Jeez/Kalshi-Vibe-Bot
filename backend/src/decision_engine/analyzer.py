@@ -1,4 +1,4 @@
-"""AI decision engine: outcome direction + calibrated P(YES), with server-side edge and Kelly."""
+"""AI decision engine: calibrated P(YES), with server-side edge and stake size."""
 
 import uuid
 from typing import Any, Dict, List, Optional
@@ -9,11 +9,10 @@ from src.clients.xai_client import XAIClient
 from src.decision_engine.strategy_math import (
     derive_buy_side,
     edge_pct_for_side,
-    full_kelly_fraction_for_side,
-    kelly_contracts_for_order,
     market_implied_pct_for_side,
+    stake_dollars_for_edge,
+    whole_contracts_for_stake,
 )
-from src.decision_engine.strategy_gates import kelly_contract_cap_for_bankroll
 from src.reconcile.open_positions import normalize_market_id
 from src.logger import setup_logging
 from src.util.datetimes import utc_iso_z, utc_now
@@ -68,20 +67,6 @@ def _parse_ai_yes_pct(xai_result: Dict[str, Any], current_prices: Optional[dict]
     return max(0, min(100, v))
 
 
-def _copy_blend(blob: dict, strat: dict) -> None:
-    if not isinstance(blob, dict):
-        return
-    for key in (
-        "blended_probability_yes_pct",
-        "blended_side_pct",
-        "blend_weight",
-        "blend_market",
-        "market_mid_yes_pct",
-    ):
-        if key in strat:
-            blob[key] = strat[key]
-
-
 def _enrich_strategy_fields(
     *,
     direction: str,
@@ -109,56 +94,25 @@ def _enrich_strategy_fields(
 
     edge = edge_pct_for_side(direction, ai_yes_pct, yes_ask_f, no_ask_f, yes_mid, no_mid)
     mkt = market_implied_pct_for_side(direction, yes_ask_f, no_ask_f, yes_mid, no_mid)
-    from src.decision_engine.blend import blend_snapshot
-
-    blend = blend_snapshot(
-        side=direction,
-        model_yes_pct=ai_yes_pct,
-        yes_bid=current_prices.get("yes_bid"),
-        yes_ask=yes_ask_f,
-        yes_price=yes_mid,
-    )
-    kf = full_kelly_fraction_for_side(direction, ai_yes_pct, yes_ask_f, no_ask_f, yes_mid, no_mid)
     if str(direction).upper() == "YES":
         premium = float(yes_ask_f) if yes_ask_f is not None else yes_mid
     else:
         premium = float(no_ask_f) if no_ask_f is not None else no_mid
     premium = max(1e-12, min(1.0, float(premium)))
-    br = float(bankroll)
-    kcap = kelly_contract_cap_for_bankroll(
-        br,
-        premium,
-        fee_multiplier=(current_prices or {}).get("fee_multiplier") if isinstance(current_prices, dict) else None,
-        fee_type=(current_prices or {}).get("fee_type") if isinstance(current_prices, dict) else None,
-    )
-    kc, _ = kelly_contracts_for_order(
-        br,
-        direction,
-        ai_yes_pct,
-        yes_ask_f,
-        no_ask_f,
-        yes_mid,
-        no_mid,
-        per_contract_premium=premium,
-        max_kelly_contracts=kcap,
-        win_probability=float(blend["win_probability"]),
-    )
+    br = max(0.0, float(bankroll))
+    stake = min(br, stake_dollars_for_edge(br, float(edge)))
+    contracts = whole_contracts_for_stake(stake, premium, br)
     return {
         "ai_probability_yes_pct": ai_yes_pct,
         "market_implied_probability_pct": mkt,
         "edge_pct": float(edge),
-        "kelly_fraction": float(kf),
-        "kelly_contracts": int(kc),
-        "blended_probability_yes_pct": blend["blended_yes_pct"],
-        "blended_side_pct": blend["blended_side_pct"],
-        "blend_weight": blend["weight"],
-        "blend_market": blend["market_source"],
-        "market_mid_yes_pct": blend["market_yes_pct"],
+        "kelly_fraction": 0.0,
+        "kelly_contracts": int(contracts),
     }
 
 
 class DecisionEngine:
-    """xAI (Grok) decision engine with server-side edge and quarter Kelly sizing."""
+    """xAI (Grok) decision engine. The server picks the side and the stake."""
 
     def __init__(
         self,
@@ -275,10 +229,8 @@ class DecisionEngine:
         action_summary = (
             f"{'Buy' if decision != 'SKIP' else 'Skip'} {side_label} — "
             f"AI P(YES)={ai_yes}% · {implied_label} · "
-            f"edge {strat['edge_pct']:.1f} pts · Kelly {strat['kelly_contracts']} contracts"
+            f"edge {strat['edge_pct']:.1f} pts · {strat['kelly_contracts']} contracts"
         )
-        _copy_blend(ai_result, strat)
-
         return {
             **base,
             "decision": decision,
@@ -451,14 +403,12 @@ class DecisionEngine:
         action_summary = (
             f"Event batch ({len(legs)} legs): {'Buy' if decision != 'SKIP' else 'Skip'} {side_label} "
             f"on {mid} — AI P(YES)={ai_yes}% · {implied_label} · "
-            f"edge {strat['edge_pct']:.1f} pts · Kelly {strat['kelly_contracts']} contracts"
+            f"edge {strat['edge_pct']:.1f} pts · {strat['kelly_contracts']} contracts"
         )
 
         if batch_post_gate:
             xai_analysis["batch_post_gate"] = batch_post_gate
         xai_analysis["reasoning"] = reasoning_out
-        _copy_blend(xai_analysis, strat)
-
         return {
             **base,
             "decision": decision,

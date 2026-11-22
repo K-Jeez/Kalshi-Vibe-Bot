@@ -32,7 +32,6 @@ from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import _parse_event_batch_json
 from src.config import Settings
 from src.database.models import ActivityEvent, Base, Position
-from src.decision_engine.strategy_math import kelly_contracts_for_order, kelly_order_skip_summary
 from src.util.datetimes import utc_now
 
 
@@ -58,47 +57,6 @@ def test_reentry_window_is_minutes():
     ]
     held = losing_exit_cooldown_market_ids(rows, now=now, cooldown_minutes=120)
     assert held == {"KXTEST-1"}
-
-
-def test_stake_cap_does_not_expand_to_full_cash_and_still_allows_one_contract():
-    # Cap cannot buy one contract: skip, even though cash could buy several.
-    assert kelly_contracts_for_order(
-        10.46,
-        "YES",
-        80,
-        0.67,
-        0.40,
-        0.67,
-        0.40,
-        per_contract_premium=0.67,
-        max_kelly_contracts=0,
-    ) == (0, "none")
-    summary = kelly_order_skip_summary(
-        10.46,
-        "YES",
-        80,
-        0.67,
-        0.40,
-        0.67,
-        0.40,
-        per_contract_premium=0.67,
-        max_kelly_contracts=0,
-    )
-    assert summary is not None and "not enlarged to full cash" in summary
-
-    # A positive fractional Kelly is not raised to one contract.
-    qty, tag = kelly_contracts_for_order(
-        10.0,
-        "YES",
-        42,
-        0.40,
-        0.60,
-        0.40,
-        0.60,
-        per_contract_premium=0.40,
-        max_kelly_contracts=1,
-    )
-    assert (qty, tag) == (0, "none")
 
 
 def test_invalid_batch_market_id_does_not_keep_the_side():

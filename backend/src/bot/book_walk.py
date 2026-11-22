@@ -116,33 +116,18 @@ def quote_blockers(
     min_ai: int,
     fee_multiplier,
     fee_type,
-    blend_ev_gate: bool,
     balance: float,
-    cap_fraction: float,
-    win_probability: float,
-    model_cost: float,
-    equity: float,
-    open_event_cost: float,
-    event_reserve: float,
     min_gross: float,
     original_ask: Optional[float] = None,
 ) -> list[str]:
-    """Names of the checks this size fails at this fresh limit.
-
-    Names stay stable so a skip can be counted from the activity log:
-    raw edge, AI win, Kelly, model cost, bucket cap, event cap, price moved.
-    """
+    """Names of the checks this size fails at this fresh limit."""
     from src.bot.buy_retry import gates_still_pass_at_ask
-    from src.decision_engine.history_sizing import order_covers_model_cost
-    from src.decision_engine.strategy_gates import (
-        all_in_entry_dollars,
-        autonomous_buy_gate_failure,
-        event_exposure_room,
-        fee_inclusive_ev_dollars,
-    )
+    from src.decision_engine.strategy_gates import all_in_entry_dollars, autonomous_buy_gate_failure
     from src.decision_engine.strategy_math import (
         ai_win_prob_pct_on_buy_side,
         edge_pct_for_side,
+        stake_dollars_for_edge,
+        whole_contracts_for_stake,
     )
 
     reasons: list[str] = []
@@ -178,11 +163,8 @@ def quote_blockers(
         min_ai=int(min_ai),
         fee_multiplier=fee_multiplier,
         fee_type=fee_type,
-        blend_ev_gate=blend_ev_gate,
     ) and not reasons:
         reasons.append("raw edge")
-    from src.decision_engine.strategy_math import stake_dollars_for_edge, whole_contracts_for_stake
-
     allowed = whole_contracts_for_stake(
         stake_dollars_for_edge(float(balance), float(edge)), px, float(balance)
     )
@@ -192,11 +174,6 @@ def quote_blockers(
     cost = float(all_in) if all_in is not None else qty * px
     if cost > float(balance) + 1e-9:
         reasons.append("stake")
-    elif all_in is not None and not event_exposure_room(
-        float(equity), float(open_event_cost), float(event_reserve), float(all_in)
-    ):
-        reasons.append("event cap")
-    del win_probability, model_cost, fee_inclusive_ev_dollars, order_covers_model_cost
     if (
         original_ask is not None
         and abs(px - float(original_ask)) >= 0.01
@@ -244,22 +221,10 @@ def size_still_fits(
     min_ai: int,
     fee_multiplier,
     fee_type,
-    blend_ev_gate: bool,
     balance: float,
-    cap_fraction: float,
-    win_probability: float,
-    model_cost: float,
-    equity: float,
-    open_event_cost: float,
-    event_reserve: float,
     min_gross: float,
 ) -> bool:
-    """True when this whole size at this fresh limit still clears the live gates.
-
-    Quarter Kelly, the bucket cash cap, the event cap, and the model-cost
-    check are all recomputed at ``limit``. A higher ask sizes down; it does
-    not by itself cancel a buy the raw gates still allow.
-    """
+    """True when this whole size at this fresh limit still clears the live gates."""
     return not quote_blockers(
         quantity=quantity,
         limit=limit,
@@ -271,13 +236,6 @@ def size_still_fits(
         min_ai=min_ai,
         fee_multiplier=fee_multiplier,
         fee_type=fee_type,
-        blend_ev_gate=blend_ev_gate,
         balance=balance,
-        cap_fraction=cap_fraction,
-        win_probability=win_probability,
-        model_cost=model_cost,
-        equity=equity,
-        open_event_cost=open_event_cost,
-        event_reserve=event_reserve,
         min_gross=min_gross,
     )

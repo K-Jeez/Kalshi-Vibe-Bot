@@ -270,7 +270,7 @@ export const AnalysisDetailBody: React.FC<{
   const impliedLabel = 'Market price of this side'
   const showBlend = a.blend_weight != null && Number(a.blend_weight) < 0.999 && a.blended_side_pct != null
   const edgePts = a.edge_pct ?? a.edge
-  const kelly = a.kelly_contracts ?? 0
+  const contracts = a.kelly_contracts ?? 0
   const batchLegId = (a.xai_analysis?.event_batch && String(a.market_id || '').trim()) || ''
 
   const badgeStyles = BADGE_TONE_CLASS[outcome.tone]
@@ -396,7 +396,7 @@ export const AnalysisDetailBody: React.FC<{
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-brand-muted/25 text-xs">
             <div>
               <span className="text-white/70">Suggested contracts </span>
-              <span className="font-semibold text-amber-300 tabular-nums">{kelly}</span>
+              <span className="font-semibold text-amber-300 tabular-nums">{contracts}</span>
               <span className="text-white/70"> contracts</span>
             </div>
           </div>

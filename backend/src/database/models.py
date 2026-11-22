@@ -26,10 +26,12 @@ from src.config import (
     DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
-    DEFAULT_STOP_LOSS_DRAWDOWN_PCT,
     TRADE_MODE,
     settings,
 )
+
+# Old databases still have stop-loss columns. Nothing reads them to sell.
+_LEGACY_STOP_LOSS_COLUMN_DEFAULT = 0.80
 from src.logger import logger as app_logger
 from src.util.datetimes import utc_now
 
@@ -68,7 +70,8 @@ class Position(Base):
     bid_price       = Column(Float, nullable=True)   # best bid on held side — liquidation mark (dashboard “Best bid”)
     estimated_price = Column(Float, nullable=True)  # Kalshi YES last trade (NO → 1−YES) — Est. Value + display unrealized only
     entry_best_bid  = Column(Float, nullable=True)  # legacy optional; older rows may have entry bid snapshot (unused for stop-loss)
-    stop_loss_drawdown_pct_at_entry = Column(Float, nullable=True)  # audit: threshold snapshot at open (bot uses current settings)
+    # Unread. Kept so an existing database file still opens.
+    stop_loss_drawdown_pct_at_entry = Column(Float, nullable=True)
     current_price   = Column(Float, nullable=False)
     unrealized_pnl  = Column(Float, default=0.0)
     realized_pnl    = Column(Float, default=0.0)
@@ -234,7 +237,8 @@ class TuningState(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     trade_mode = Column(String, nullable=False, default="live")  # historical column; app is live-only
 
-    stop_loss_drawdown_pct = Column(Float, default=DEFAULT_STOP_LOSS_DRAWDOWN_PCT)
+    # Unread. Kept so an existing database file still opens.
+    stop_loss_drawdown_pct = Column(Float, default=_LEGACY_STOP_LOSS_COLUMN_DEFAULT)
     stop_loss_selling_enabled = Column(Boolean, default=False)
     min_edge_to_buy_pct = Column(Integer, default=DEFAULT_MIN_EDGE_TO_BUY_PCT)
     min_ai_win_prob_buy_side_pct = Column(Integer, default=DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
@@ -519,7 +523,7 @@ def _run_migrations(engine):
     """Add new columns to existing tables idempotently (SQLite ALTER TABLE)."""
     migrations = [
         # table, column, sql_type_default
-        ("tuning_state", "stop_loss_drawdown_pct",  f"FLOAT DEFAULT {DEFAULT_STOP_LOSS_DRAWDOWN_PCT}"),
+        ("tuning_state", "stop_loss_drawdown_pct",  f"FLOAT DEFAULT {_LEGACY_STOP_LOSS_COLUMN_DEFAULT}"),
         ("tuning_state", "stop_loss_selling_enabled", "BOOLEAN DEFAULT 0"),
         ("tuning_state", "updated_at",               "DATETIME"),
         ("trades",        "action",            "TEXT DEFAULT 'buy'"),

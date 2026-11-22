@@ -12,11 +12,7 @@ from src.activity_log import fresh_unresolved_order_hold, mark_intent_reconciled
 from src.bot.order_reconcile import verdict_from_sources
 from src.bot.supervision import submission_reservation_lock
 from src.clients.kalshi_client import bounded_retry_delay_seconds
-from src.decision_engine.strategy_gates import (
-    fee_inclusive_ev_dollars,
-    fee_schedule_from_mapping,
-    kelly_contract_cap_for_bankroll,
-)
+from src.decision_engine.strategy_gates import fee_inclusive_ev_dollars, fee_schedule_from_mapping
 from src.fixed_point import FixedPointCountError, format_count_fp, parse_fixed_point_count, require_whole_submit_count
 from src.policy_migration import migrate_sqlite_file
 
@@ -126,11 +122,6 @@ def test_unknown_fee_schedule_does_not_prove_ev_or_cap():
     assert fee_schedule_from_mapping({"series": {"fee_type": "quadratic", "fee_multiplier": 2}})["known"]
     assert fee_inclusive_ev_dollars(0.9, 0.4, 1, fee_multiplier=1, fee_type="quadratic") is not None
     assert fee_inclusive_ev_dollars(0.9, 0.4, 1) is None
-    assert kelly_contract_cap_for_bankroll(1000, 0.5) == 0
-    assert kelly_contract_cap_for_bankroll(1000, 0.5, fee_multiplier=1, fee_type="flat") == 0
-    capped = kelly_contract_cap_for_bankroll(36, 0.40, fee_multiplier=1, fee_type="quadratic")
-    higher = kelly_contract_cap_for_bankroll(36, 0.40, fee_multiplier=10, fee_type="quadratic")
-    assert capped > higher
 
 
 def test_market_retry_delay_is_bounded():

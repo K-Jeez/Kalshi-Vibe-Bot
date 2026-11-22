@@ -26,7 +26,7 @@ vibe.bat bot play
 
 ## What each command does
 
-`launch` starts the backend with the same `backend/.env` as the UI, then starts the frontend on port 3000. The app lifespan sets the trading state to Stop. Launch checks that state and does not press Play. Position monitoring runs on its own timer, so a long market scan does not delay stop-loss checks. Stop still turns automatic exits off. Pause still allows them. Launch does not press Play. If the backend is not Stop, launch sends Stop once. If that still is not Stop, launch stops the processes it just started. Running launch again while the owned processes are healthy does not change Play, Pause, or Stop.
+`launch` starts the backend with the same `backend/.env` as the UI, then starts the frontend on port 3000. The app lifespan sets the trading state to Stop. Launch checks that state and does not press Play. Position monitoring runs on its own timer so a long market scan does not delay settlement checks. Launch does not press Play. If the backend is not Stop, launch sends Stop once. If that still is not Stop, launch stops the processes it just started. Running launch again while the owned processes are healthy does not change Play, Pause, or Stop.
 
 `shutdown` stops only the backend and frontend processes recorded for this repo. It checks the process id and the command line before it stops anything. It does not stop every Python or Node program, and it does not stop an unrelated program that happens to be using port 8000 or 3000. A stale or unreadable pid file does not get a process killed. Running shutdown again is safe.
 
@@ -38,7 +38,7 @@ vibe.bat bot play
 
 ## Risks
 
-Pause stops new buys. If stop-loss selling is enabled in Settings, Pause can still sell.
+Pause stops new buys. Open positions stay until Kalshi settles them.
 
 Stop stops new buys and turns off automatic exits. Stop does not cancel resting orders at Kalshi.
 
@@ -55,7 +55,7 @@ The processes already open from the old `start.bat` are not in the new pid file.
 5. `vibe.bat bot stop` to confirm the state route. This does not cancel resting orders.
 6. `vibe.bat shutdown` when you want the new processes stopped.
 
-Do not run `vibe.bat bot pause` or `vibe.bat bot play` in that first check. Play can place real orders. Pause can sell when stop-loss selling is enabled.
+Do not run `vibe.bat bot pause` or `vibe.bat bot play` in that first check. Play can place real orders.
 
 ## Checkout, migration, and read-only audit
 

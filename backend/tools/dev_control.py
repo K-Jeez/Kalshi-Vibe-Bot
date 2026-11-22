@@ -24,9 +24,7 @@ from typing import Callable, Optional
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
-RISK_PAUSE = (
-    "Pause stops new buys. If stop-loss selling is enabled in Settings, Pause can still sell."
-)
+RISK_PAUSE = "Pause stops new buys. Open positions stay until Kalshi settles them."
 RISK_STOP = (
     "Stop stops new buys and turns off automatic exits. "
     "Stop does not cancel resting orders at Kalshi."

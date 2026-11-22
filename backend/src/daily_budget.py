@@ -10,7 +10,18 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.decision_engine.history_sizing import _analysis_cost
+def _analysis_cost(raw_analysis) -> float:
+    import json
+
+    try:
+        analysis = json.loads(raw_analysis) if isinstance(raw_analysis, str) else (raw_analysis or {})
+    except (TypeError, ValueError):
+        return 0.0
+    usage = analysis.get("usage") if isinstance(analysis, dict) and isinstance(analysis.get("usage"), dict) else {}
+    try:
+        return max(0.0, float(usage.get("estimated_usd") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 _DENVER = ZoneInfo("America/Denver")
 _note = ""

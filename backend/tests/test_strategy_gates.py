@@ -2,13 +2,10 @@
 
 from src.decision_engine.strategy_gates import (
     MAX_EDGE_TO_BUY_PCT,
-    MAX_KELLY_BANKROLL_PCT,
     autonomous_buy_gate_failure,
     effective_min_edge_for_market,
     effective_scan_min_volume,
-    exit_grace_minutes_for_market,
     is_sports_market_title,
-    kelly_contract_cap_for_bankroll,
 )
 
 
@@ -24,11 +21,6 @@ def test_effective_scan_min_volume_sports():
 def test_effective_min_edge_matches_settings():
     assert effective_min_edge_for_market(5, "A vs B") == 5
     assert effective_min_edge_for_market(5, "Bitcoin") == 5
-
-
-def test_exit_grace_is_removed():
-    assert exit_grace_minutes_for_market(10, "A vs B") == 0
-    assert exit_grace_minutes_for_market(10, "Bitcoin") == 0
 
 
 def test_autonomous_max_edge():
@@ -59,25 +51,5 @@ def test_ai_probability_cap_is_off():
     )
 
 
-def test_kelly_contract_cap_scales_with_bankroll():
-    small = kelly_contract_cap_for_bankroll(75, 0.50, fee_multiplier=1, fee_type="quadratic")
-    large = kelly_contract_cap_for_bankroll(1000, 0.50, fee_multiplier=1, fee_type="quadratic")
-    assert large > small >= 1
-
-
-def test_kelly_contract_cap_small_bankroll_can_buy_when_cash_covers_one():
-    assert kelly_contract_cap_for_bankroll(10.46, 0.67, fee_multiplier=1, fee_type="quadratic") >= 1
-
-
-def test_history_floor_skip_names_the_add_on():
-    from src.decision_engine.history_sizing import edge_floor_skip_text
-
-    text = edge_floor_skip_text(4.0, 5.0, 4.0, "4-6")
-    assert "edge 4.0 below 5.0" in text
-    assert "your setting is 4" in text
-    assert "past 4-6 point trades lost money" in text
-
-
 def test_constants_sane():
     assert MAX_EDGE_TO_BUY_PCT == 22
-    assert MAX_KELLY_BANKROLL_PCT == 1.0

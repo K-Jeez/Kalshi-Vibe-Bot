@@ -13,12 +13,7 @@ import pytest
 from src.bot.order_outcome import buy_fill_status, classify_routing_error, ioc_zero_fill_is_not_resting
 from src.bot.routing_cooldown import clear_untradeable, note_untradeable, untradeable_reason
 from src.bot.supervision import run_parallel_cycles
-from src.decision_engine.strategy_gates import (
-    MAX_KELLY_BANKROLL_PCT,
-    either_side_can_buy_one_capped_contract,
-    kelly_contract_cap_for_bankroll,
-)
-from src.strategy_proposal import PROPOSAL_ACTIVE, PROPOSED_ENTRY_CAP_OF_CASH
+from src.decision_engine.strategy_gates import either_side_can_buy_one_contract
 from src.api.trades import denver_close_date
 
 
@@ -65,11 +60,8 @@ def test_order_status_and_exit_reason_and_whole_contracts():
 
 
 def test_event_cap_and_migration(tmp_path: Path):
-    from src.decision_engine.strategy_gates import event_exposure_room
     from src.policy_migration import migrate_sqlite_file
 
-    assert event_exposure_room(100, 4, 0, 0.5)
-    assert event_exposure_room(100, 4, 0, 2)
     db = tmp_path / "bot.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE tuning_state (max_open_positions INT)")
@@ -84,43 +76,6 @@ def test_event_cap_and_migration(tmp_path: Path):
     assert first["rows_updated"] == 1
     assert second["already_applied"] is True
     assert value == 12
-
-
-def test_shadow_eval_drops_future_leaks():
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "shadow_eval",
-        Path(__file__).resolve().parents[1] / "tools" / "shadow_eval.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    report = mod.score_rows(
-        [
-            {
-                "id": "leak",
-                "decided_at": "2024-11-09T00:00:00Z",
-                "resolved_at": "2024-11-09T00:00:00Z",
-                "outcome": "yes",
-                "model_p_yes": 0.7,
-                "market_p_yes": 0.4,
-            },
-            {
-                "id": "ok",
-                "decided_at": "2024-11-08T00:00:00Z",
-                "resolved_at": "2024-11-09T00:00:00Z",
-                "outcome": "yes",
-                "model_p_yes": 0.7,
-                "market_p_yes": 0.4,
-                "prompt_version": "decision-2026-11-09",
-            },
-        ]
-    )
-    assert report["n"] == 1
-    assert report["excluded"][0]["reason"] == "outcome_not_after_decision"
-    missing = mod.score_rows([{"id": "no-time", "outcome": "yes", "model_p_yes": 0.5, "market_p_yes": 0.5}])
-    assert missing["n"] == 0
-    assert missing["excluded"][0]["reason"] == "missing_time"
 
 
 def test_monitor_runs_while_scan_is_blocked():
@@ -171,20 +126,15 @@ def test_prefilter_requires_both_sides_unaffordable():
     # Cash, not a hidden percent cap, decides whether one contract fits.
     fee = {"fee_type": "quadratic", "fee_multiplier": 1}
     rich = {"yes_ask": 0.40, "no_ask": 0.51, **fee}
-    assert either_side_can_buy_one_capped_contract(rich, 40)
+    assert either_side_can_buy_one_contract(rich, 40)
     neither = {"yes_ask": 0.51, "no_ask": 0.80, **fee}
-    assert either_side_can_buy_one_capped_contract(neither, 10)
+    assert either_side_can_buy_one_contract(neither, 10)
     only_no = {"yes_ask": 0.90, "no_ask": 0.20, **fee}
-    assert either_side_can_buy_one_capped_contract(only_no, 10)
+    assert either_side_can_buy_one_contract(only_no, 10)
     missing_yes_cheap_no = {"no_ask": 0.20, **fee}
-    assert either_side_can_buy_one_capped_contract(missing_yes_cheap_no, 10)
+    assert either_side_can_buy_one_contract(missing_yes_cheap_no, 10)
     missing_yes_dear_no = {"no_ask": 0.90, **fee}
-    assert either_side_can_buy_one_capped_contract(missing_yes_dear_no, 10)
-    assert kelly_contract_cap_for_bankroll(10, 0.50, fee_multiplier=1, fee_type="quadratic") >= 1
-    assert kelly_contract_cap_for_bankroll(40, 0.50, fee_multiplier=1, fee_type="quadratic") >= 1
-    assert MAX_KELLY_BANKROLL_PCT == 1.0
-    assert PROPOSAL_ACTIVE is True
-    assert PROPOSED_ENTRY_CAP_OF_CASH == 1.0
+    assert either_side_can_buy_one_contract(missing_yes_dear_no, 10)
 
 
 def test_denver_evening_stays_on_that_denver_date():

@@ -23,7 +23,6 @@ from src.util.datetimes import utc_iso_z, utc_now
 router = APIRouter(tags=["tuning"])
 
 _STRATEGY_FIELD_BOUNDS: dict[str, tuple[float, float]] = {
-    "stop_loss_drawdown_pct": (0.05, 0.90),
     "min_edge_to_buy_pct": (0.0, 95.0),
 }
 

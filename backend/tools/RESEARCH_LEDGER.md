@@ -41,7 +41,7 @@ python tools/research_ledger.py init --dir /path/you/choose/ledger --config tool
 
 Use your own config when you actually start. The command writes `experiment.json` and a hash. If that file is edited later, scoring stops. The pre-registered window is every forecast at or after `score_not_before`. Earlier rows are stored as exploratory and are not the result.
 
-`hypothetical.illustrative_fee_per_contract_usd` is an assumption you type. It is not a Kalshi fee quote. The hypothetical trade is one contract when the model’s side is at least `min_edge_points` above that side’s ask. It is not the live Kelly sizer, and it is not an order.
+`hypothetical.illustrative_fee_per_contract_usd` is an assumption you type. It is not a Kalshi fee quote. The hypothetical trade is one contract when the model’s side is at least `min_edge_points` above that side’s ask. It is not the live stake, and it is not an order.
 
 ## Record and score offline
 

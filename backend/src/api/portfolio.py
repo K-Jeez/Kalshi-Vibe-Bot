@@ -113,10 +113,6 @@ def _serialize_open_positions(positions: List[Position]) -> List[Dict[str, Any]]
             "resolution_kalshi_payout_complete": resolution_kalshi_payout_complete_display(p),
             "kalshi_market_status": getattr(p, "kalshi_market_status", None),
             "kalshi_market_result": getattr(p, "kalshi_market_result", None),
-            # Stop-loss preview (dashboard): same ``(entry − est)/entry`` rule as ``stop_loss_triggered_from_position``.
-            "stop_loss_drawdown_pct_at_entry": getattr(p, "stop_loss_drawdown_pct_at_entry", None),
-            "stop_loss_drawdown_effective": float(getattr(settings, "stop_loss_drawdown_pct", 0.0)),
-            "exit_grace_minutes": float(getattr(settings, "exit_grace_minutes", 10.0)),
             "entry_decision_log_id": getattr(p, "entry_decision_log_id", None),
         }
         for p in positions
@@ -685,7 +681,6 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
         "order_search_active": bool(scan_active),
         "order_search_label": str(scan_label),
         "ai_provider": "xai",
-        "stop_loss_selling_enabled": bool(getattr(settings, "stop_loss_selling_enabled", False)),
         "kalshi_resting_order_count": len(resting_orders),
         "resting_buy_collateral_estimate_usd": round(resting_buy_reserve, 4),
         "kalshi_resting_orders_preview": _kalshi_resting_preview(resting_orders),

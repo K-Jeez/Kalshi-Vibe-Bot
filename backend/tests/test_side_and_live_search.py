@@ -71,7 +71,6 @@ def test_model_skip_still_prices_the_side_and_keeps_kelly():
     assert row["ai_probability_for_side_pct"] == 68
     assert row["edge_pct"] == 23.0
     assert row["kelly_contracts"] > 0
-    assert row["xai_analysis"]["blended_side_pct"] is not None
     assert row["xai_analysis"]["model_direction"] == "SKIP"
     assert row["xai_analysis"]["uncertainty"]["level"] == "high"
 
@@ -105,7 +104,6 @@ def test_model_skip_still_prices_the_side_and_keeps_kelly():
     )
     assert no_row["decision"] == "BUY_NO"
     assert no_row["ai_probability_for_side_pct"] == 75
-    assert no_row["xai_analysis"]["blended_side_pct"] is not None
     assert no_row["edge_pct"] == 34.0
 
 

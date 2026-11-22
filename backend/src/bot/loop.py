@@ -55,18 +55,14 @@ from src.decision_engine.strategy_gates import (
     effective_min_edge_for_market,
     effective_scan_min_volume,
     all_in_entry_dollars,
-    event_exposure_room,
     premodel_entry_block,
     fee_inclusive_ev_dollars,
     fee_schedule_from_mapping,
-    kelly_contract_cap_for_bankroll,
 )
 from src.decision_engine.strategy_math import (
     ai_win_prob_pct_on_buy_side,
     edge_pct_for_side,
     effective_buy_gate_thresholds,
-    kelly_contracts_for_order,
-    kelly_order_skip_summary,
 )
 from src.ledger_money import whole_contracts
 from src.bot.order_outcome import buy_fill_status, classify_routing_error
@@ -1048,9 +1044,6 @@ async def scan_and_trade(
             for p in positions_open
             if (p.market_id or "").strip()
         }
-        from src.decision_engine.history_sizing import edge_floor_skip_text
-
-        expected_model_cost = 0.0
         try:
             from src.activity_log import list_unresolved_intents
 
@@ -1598,9 +1591,8 @@ async def scan_and_trade(
             action_taken: Dict[str, Any]
             executed_trade = False
             stop_scan_after = False
-            kelly_sizing_tag = ""
+            sizing_tag = ""
             trade_side = ""
-            entry_cap = 0.025
             trade_quantity = 0
             trade_price = 0.0
             trade_cost = 0.0
@@ -1705,7 +1697,6 @@ async def scan_and_trade(
                             min_ai_win_prob_base=min_ai_base,
                         )
                         ai_buy = ai_win_prob_pct_on_buy_side(trade_side, ai_yes)
-                        entry_cap = 1.0
                         del risk_tier
                         gate_fail = autonomous_buy_gate_failure(
                             side=trade_side,
@@ -1729,15 +1720,11 @@ async def scan_and_trade(
                                 "signal": signal,
                             }
                         elif edge_now + 1e-9 < float(eff_min_edge):
-                            from src.decision_engine.bucket_caps import edge_bucket
-
                             action_taken = {
                                 "status": "no_trade",
-                                "summary": edge_floor_skip_text(
-                                    edge_now,
-                                    float(eff_min_edge),
-                                    float(min_edge_base),
-                                    edge_bucket(edge_now),
+                                "summary": (
+                                    f"Skipped — edge {edge_now:.1f} is below the "
+                                    f"{float(eff_min_edge):.0f}-point minimum"
                                 ),
                                 "signal": signal,
                             }
@@ -1764,7 +1751,7 @@ async def scan_and_trade(
                                 if _cost is None or _cost <= stake + 1e-9:
                                     break
                                 quantity -= 1
-                            kelly_sizing_tag = "edge_pct_of_cash"
+                            sizing_tag = "edge_pct_of_cash"
                             if quantity < 1:
                                 flat = float(getattr(settings, "flat_stake_dollars", 0) or 0)
                                 if flat > 0:
@@ -1851,14 +1838,6 @@ async def scan_and_trade(
                                             if isinstance(fresh_market, dict):
                                                 market = {**market, **fresh_market, "_quote_captured_at": utc_now()}
                                             levels = ask_levels_for_side(book, trade_side)
-                                            event_open = 0.0
-                                            for open_row in db.query(Position).filter(
-                                                Position.status == "open",
-                                                Position.trade_mode == TRADE_MODE,
-                                                Position.event_ticker == _pos_et_val,
-                                            ).all():
-                                                event_open += float(open_row.entry_cost or 0.0)
-                                                event_open += float(getattr(open_row, "fees_paid", 0) or 0.0)
 
                                             def _qualifies(qty, limit):
                                                 yes_now = float(limit) if trade_side == "YES" else float(market.get("yes_ask") or 0)
@@ -1874,14 +1853,7 @@ async def scan_and_trade(
                                                     min_ai=int(eff_min_ai),
                                                     fee_multiplier=_fee.get("fee_multiplier"),
                                                     fee_type=_fee.get("fee_type"),
-                                                    blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
                                                     balance=float(balance),
-                                                    cap_fraction=float(entry_cap),
-                                                    win_probability=float(blend["win_probability"]),
-                                                    model_cost=float(expected_model_cost),
-                                                    equity=float(total_portfolio_value),
-                                                    open_event_cost=event_open,
-                                                    event_reserve=0.0,
                                                     min_gross=float(getattr(settings, "local_min_residual_payoff", 0) or 0),
                                                 )
 
@@ -1900,14 +1872,7 @@ async def scan_and_trade(
                                                     min_ai=int(eff_min_ai),
                                                     fee_multiplier=_fee.get("fee_multiplier"),
                                                     fee_type=_fee.get("fee_type"),
-                                                    blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
                                                     balance=float(balance),
-                                                    cap_fraction=float(entry_cap),
-                                                    win_probability=float(blend["win_probability"]),
-                                                    model_cost=float(expected_model_cost),
-                                                    equity=float(total_portfolio_value),
-                                                    open_event_cost=event_open,
-                                                    event_reserve=0.0,
                                                     min_gross=float(getattr(settings, "local_min_residual_payoff", 0) or 0),
                                                 )
                                                 quote_blocked = True
@@ -1937,7 +1902,7 @@ async def scan_and_trade(
                                                     decision.get("ai_probability_yes_pct") or 0
                                                 ),
                                                 "edge_pct": float(decision.get("edge_pct") or 0.0),
-                                                "sizing_tag": kelly_sizing_tag or None,
+                                                "sizing_tag": sizing_tag or None,
                                                 "kelly_contracts": int(quantity),
                                                 "detail": "FOK buy intent",
                                                 **quote_snapshot(market),
@@ -2063,26 +2028,6 @@ async def scan_and_trade(
                                                                     ),
                                                                     "signal": signal,
                                                                 }
-                                                            elif not event_exposure_room(
-                                                                float(total_portfolio_value),
-                                                                open_basis,
-                                                                float(exposure.get("reserve_dollars") or 0.0),
-                                                                added,
-                                                            ):
-                                                                result = {
-                                                                    "error": "order not sent",
-                                                                    "order_not_sent": True,
-                                                                }
-                                                                action_taken = {
-                                                                    "status": "no_trade",
-                                                                    "summary": (
-                                                                        "Skipped — event cost basis plus unconfirmed buys "
-                                                                        "would exceed 5% of account equity. "
-                                                                        "The entry fee in that check is an estimate, "
-                                                                        "not the exchange fill fee."
-                                                                    ),
-                                                                    "signal": signal,
-                                                                }
                                                             else:
                                                                 from src.bot.shard_funding import fund_buy_shard
                                                                 from src.clients.kalshi_client import known_exchange_index
@@ -2098,7 +2043,6 @@ async def scan_and_trade(
                                                                         bankroll=float(balance),
                                                                         ticker=ticker_clean,
                                                                         client_order_id=str(order_intent_id or ""),
-                                                                        cap_fraction=entry_cap,
                                                                     )
                                                                 if not funding.get("ok"):
                                                                     result = {
@@ -2273,13 +2217,8 @@ async def scan_and_trade(
                                                 fee_type=_fee.get("fee_type"),
                                                 exchange_index=shard_index,
                                                 balance=float(balance),
-                                                cap_fraction=entry_cap,
-                                                blend_ev_gate=bool(getattr(settings, "vibe_blend_ev_gate", False)),
-                                                win_probability=float(blend["win_probability"]),
-                                                model_cost=float(expected_model_cost),
                                                 event_equity=float(total_portfolio_value),
                                                 event_open_cost=float(open_basis),
-                                                event_reserve=float(exposure.get("reserve_dollars") or 0.0),
                                                 persist_intent=lambda limit, qty: persist_order_intent(
                                                     {
                                                         "market_id": ticker_clean,
@@ -2302,7 +2241,6 @@ async def scan_and_trade(
                                                             order_all_in=float(cost),
                                                             bankroll=float(balance),
                                                             ticker=ticker_clean,
-                                                            cap_fraction=entry_cap,
                                                         )
                                                     )
                                                 ),
@@ -2499,7 +2437,7 @@ async def scan_and_trade(
                     "ai_probability_yes_pct": int(decision.get("ai_probability_yes_pct") or 0),
                     "market_implied_pct": int(decision.get("market_implied_probability_pct") or 0),
                     "edge_pct": float(decision.get("edge_pct") or 0.0),
-                    "sizing_tag": kelly_sizing_tag or None,
+                    "sizing_tag": sizing_tag or None,
                     "kelly_contracts": int(decision.get("kelly_contracts") or 0),
                     "order_status": str((action_taken or {}).get("status") or ""),
                     "detail": scrub_text((action_taken or {}).get("summary") or decision.get("action_summary") or ""),

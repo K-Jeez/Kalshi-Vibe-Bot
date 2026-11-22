@@ -9,7 +9,6 @@ from pathlib import Path
 from src.bot.reanalysis import should_skip_unchanged_quote
 from src.bot.exit_backoff import clear_exit_backoff, exit_is_backed_off, note_empty_exit, reset_for_tests
 from src.config import Settings
-from src.decision_engine.blend import quantity_after_blend
 from src.decision_engine.strategy_gates import premodel_entry_block
 from src.ops_status import alerts, clear_unresolved, note_unresolved, reset_for_tests as reset_ops
 from src.reconcile.realized_cashflow import fill_yes_price, fills_to_cashflows
@@ -79,33 +78,6 @@ def test_two_positions_on_one_ticker_are_not_both_given_the_full_pnl():
     plans = plan_repairs(positions, fills, [{"ticker": "KX", "market_result": "yes"}])
     assert abs(sum(plan["new_realized_pnl"] for plan in plans) - (4 - 2 - 0.08)) < 1e-9
     assert plans[0]["new_realized_pnl"] != plans[1]["new_realized_pnl"]
-
-
-def test_blend_gate_off_does_not_force_one_contract():
-    floor, tag = quantity_after_blend(
-        blend_ev_gate=False,
-        kelly_quantity=0,
-        blended_ev=-0.05,
-        cap_contracts=2,
-        one_contract_fits_cash=True,
-    )
-    assert (floor, tag) == (0, "none")
-    blocked, blocked_tag = quantity_after_blend(
-        blend_ev_gate=True,
-        kelly_quantity=3,
-        blended_ev=-0.05,
-        cap_contracts=2,
-        one_contract_fits_cash=True,
-    )
-    assert (blocked, blocked_tag) == (0, "blend_ev")
-    kept, kept_tag = quantity_after_blend(
-        blend_ev_gate=False,
-        kelly_quantity=4,
-        blended_ev=-0.02,
-        cap_contracts=2,
-        one_contract_fits_cash=True,
-    )
-    assert (kept, kept_tag) == (2, "quarter_kelly")
 
 
 def test_cooldown_skips_even_when_price_moved_and_a_quiet_market_stays_quiet():

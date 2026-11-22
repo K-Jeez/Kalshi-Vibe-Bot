@@ -15,6 +15,4 @@ def test_smoke_page_has_no_network_or_orders():
     assert "api_key" not in text
     assert "private_key" not in text
     assert "place_order" not in text
-    assert "stop_loss_selling_enabled" in text
-    assert "0.8" in text
     assert "disabled" in text

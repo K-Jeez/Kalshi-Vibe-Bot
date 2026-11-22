@@ -52,8 +52,6 @@ export interface Portfolio {
   order_search_active?: boolean
   /** Short status for the dashboard scan indicator. */
   order_search_label?: string
-  /** False disables bot stop-loss exits; manual sells still allowed. */
-  stop_loss_selling_enabled?: boolean
 }
 
 export interface VaultTransferResponse {
@@ -97,18 +95,12 @@ export interface Position {
   awaiting_settlement?: boolean
   /** Live: no native bids on last exit check; dashboard shows Dead Market. */
   dead_market?: boolean
-  /** Open cash basis (notional + buy-side fees) — same total used for stop-loss vs Est. Value. */
+  /** Open cash basis (price plus the buy fee). */
   cash_basis?: number
   /** Kalshi GET /markets ``status`` (e.g. active, closed, determined, finalized). */
   kalshi_market_status?: string | null
   /** Contract resolution ``yes`` / ``no`` (Kalshi ``result`` / inferred settlement) when known. */
   kalshi_market_result?: string | null
-  /** Audit: fractional threshold stored at open (may differ from current policy). */
-  stop_loss_drawdown_pct_at_entry?: number | null
-  /** Current stop-loss drawdown fraction used by bot + dashboard (Settings / tuning / .env). */
-  stop_loss_drawdown_effective?: number
-  /** Minutes after open before auto stop-loss applies — matches bot ``EXIT_GRACE_MINUTES``. */
-  exit_grace_minutes?: number
   /** ``DecisionLog.id`` for the bot gate that opened this leg (entry-time AI snapshot). */
   entry_decision_log_id?: string | null
   /** Full serialized decision row for this leg when ``entry_decision_log_id`` resolves. */
@@ -297,10 +289,7 @@ export interface LogEntry {
 }
 
 export interface TuningSnapshot {
-  stop_loss_drawdown_pct: number
   min_edge_to_buy_pct: number
-  /** When false, the bot never auto-exits for stop-loss drawdown. */
-  stop_loss_selling_enabled?: boolean
   /** Minimum AI win probability (0–100) on the purchased side; clamped >50% server-side. */
   min_ai_win_prob_buy_side_pct?: number
   /** Max open legs before new-entry market scan + AI analysis pauses. */
@@ -339,8 +328,6 @@ export interface HealthResponse {
   alerts?: string[]
   fee_estimate_note?: string
   approved_max_open_positions?: number
-  model_blend_weight?: number
-  entry_caps?: { bucket: string; cap_pct: number; n: number; roi: number | null }[]
 }
 
 export const apiClient = {

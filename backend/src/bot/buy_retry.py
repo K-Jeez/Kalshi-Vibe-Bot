@@ -58,9 +58,8 @@ def gates_still_pass_at_ask(
     min_ai: int,
     fee_multiplier,
     fee_type,
-    blend_ev_gate: bool = False,
 ) -> bool:
-    """Fee-inclusive edge and EV at the fresh ask. False when any gate fails."""
+    """Fee-inclusive edge and expected value at the fresh ask."""
     from src.decision_engine.strategy_gates import autonomous_buy_gate_failure, fee_inclusive_ev_dollars
     from src.decision_engine.strategy_math import ai_win_prob_pct_on_buy_side, edge_pct_for_side
 
@@ -70,23 +69,14 @@ def gates_still_pass_at_ask(
     win = ai_win_prob_pct_on_buy_side(side, int(ai_yes_pct))
     if win < int(min_ai):
         return False
-    from src.decision_engine.blend import blend_yes_probability
-
-    # The retry still has to clear the raw edge and win-prob gates. Expected
-    # value uses the same blend as the original order: weight on the model,
-    # the rest on this ask when a fresh mid is not in hand.
-    blended = blend_yes_probability(int(ai_yes_pct), float(ask) if str(side).upper() == "YES" else 1.0 - float(ask))
-    side_p = blended if str(side).upper() == "YES" else 1.0 - blended
     ev = fee_inclusive_ev_dollars(
-        side_p,
+        win / 100.0,
         float(ask),
         1,
         fee_multiplier=fee_multiplier,
         fee_type=fee_type,
     )
-    if blend_ev_gate and (ev is None or ev <= 0):
-        return False
-    if ev is None:
+    if ev is None or ev <= 0:
         return False
     if autonomous_buy_gate_failure(
         side=side,
@@ -113,13 +103,6 @@ async def retry_buy_once(
     client_order_id: Optional[str] = None,
     exchange_index: Optional[int] = None,
     balance: Optional[float] = None,
-    cap_fraction: Optional[float] = None,
-    blend_ev_gate: bool = False,
-    win_probability: Optional[float] = None,
-    model_cost: float = 0.0,
-    event_equity: Optional[float] = None,
-    event_open_cost: float = 0.0,
-    event_reserve: float = 0.0,
     persist_intent=None,
     fund=None,
     acknowledge=None,
@@ -127,8 +110,7 @@ async def retry_buy_once(
     """Re-read the book and send one fill-or-kill if the gates still pass.
 
     Returns ``(order_or_none, price_gap)``. A miss is remembered on the watch list.
-    The size is walked down the live depth and rechecked against the stricter
-    edge, the bucket cap, and the event cap.
+    The size is walked down the live depth and rechecked against the stake.
     """
     from src.bot.book_walk import ask_levels_for_side, largest_qualifying_buy, size_still_fits
     from src.clients.kalshi_client import executable_buy_best_ask_dollars
@@ -166,7 +148,6 @@ async def retry_buy_once(
                 min_ai=min_ai,
                 fee_multiplier=fee_multiplier,
                 fee_type=fee_type,
-                blend_ev_gate=blend_ev_gate,
             )
         return size_still_fits(
             quantity=int(qty),
@@ -179,14 +160,7 @@ async def retry_buy_once(
             min_ai=int(min_ai),
             fee_multiplier=fee_multiplier,
             fee_type=fee_type,
-            blend_ev_gate=blend_ev_gate,
             balance=float(balance),
-            cap_fraction=float(cap_fraction if cap_fraction is not None else 0.025),
-            win_probability=float(win_probability if win_probability is not None else 0.0),
-            model_cost=float(model_cost or 0.0),
-            equity=float(event_equity if event_equity is not None else balance),
-            open_event_cost=float(event_open_cost or 0.0),
-            event_reserve=float(event_reserve or 0.0),
             min_gross=0.0,
         )
 
