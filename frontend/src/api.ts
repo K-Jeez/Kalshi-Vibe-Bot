@@ -522,16 +522,9 @@ export const apiClient = {
 
   saveStrategyKnobs: async (body: {
     min_edge_to_buy_pct?: number
-    stop_loss_drawdown_pct?: number
     min_ai_win_prob_buy_side_pct?: number
-    max_open_positions?: number
   }): Promise<TuningSnapshot> => {
     const { data } = await client.post('/tuning/strategy-knobs', body)
-    return data
-  },
-
-  setStopLossSellingEnabled: async (enabled: boolean): Promise<TuningSnapshot> => {
-    const { data } = await client.post('/tuning/stop-loss-selling', { enabled })
     return data
   },
 

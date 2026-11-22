@@ -28,7 +28,6 @@ _EXACT_MUTATIONS = frozenset(
         "/portfolio/live/reconcile",
         "/positions/closed/refresh-resolution",
         "/tuning/strategy-knobs",
-        "/tuning/stop-loss-selling",
         "/tuning/reset-to-config-defaults",
     }
 )

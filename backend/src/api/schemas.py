@@ -5,10 +5,6 @@ class BotStateRequest(BaseModel):
     state: str
 
 
-class StopLossSellingRequest(BaseModel):
-    enabled: bool
-
-
 class StrategyKnobsRequest(BaseModel):
     """Minimum edge and/or model confidence on the bought side (at least one required)."""
 

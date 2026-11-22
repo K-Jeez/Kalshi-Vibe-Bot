@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from src.api.broadcast import broadcast_update
 from src.ai_provider import normalize_ai_provider
-from src.api.schemas import StopLossSellingRequest, StrategyKnobsRequest
+from src.api.schemas import StrategyKnobsRequest
 from src.config import (
     AI_PROVIDER,
     APPROVED_MAX_OPEN_POSITIONS,
@@ -117,20 +117,6 @@ async def set_strategy_knobs(req: StrategyKnobsRequest, db: Session = Depends(ge
         v = int(req.min_ai_win_prob_buy_side_pct)
         # Floor 51 = strictly above 50% on the buy side; cap 99 matches ``config.py`` validator.
         row.min_ai_win_prob_buy_side_pct = max(51, min(99, v))
-    row.updated_at = utc_now()
-    db.add(row)
-    db.commit()
-    _sync_runtime_from_row(row)
-    payload = tuning_state_payload(row)
-    await broadcast_update({"type": "tuning_update", "data": payload})
-    return payload
-
-
-@router.post("/tuning/stop-loss-selling")
-async def set_stop_loss_selling(req: StopLossSellingRequest, db: Session = Depends(get_db)):
-    """Enable or disable automatic stop-loss exits (manual sells unaffected)."""
-    row = ensure_tuning_state(db)
-    row.stop_loss_selling_enabled = bool(req.enabled)
     row.updated_at = utc_now()
     db.add(row)
     db.commit()
