@@ -292,6 +292,34 @@ async def get_performance_stats(db: Session = Depends(get_db)):
         if not daily_pnl and closed_n > 0:
             daily_pnl = [{"date": "All closed", "pnl": round(total_realized, 2)}]
 
+        from src.database.models import DecisionLog
+        from src.track_record import track_record_note
+
+        log_ids = [p.entry_decision_log_id for p in closed_positions if getattr(p, "entry_decision_log_id", None)]
+        logs = {}
+        if log_ids:
+            for log in db.query(DecisionLog).filter(DecisionLog.id.in_(log_ids)).all():
+                logs[log.id] = log
+        record_rows = []
+        for p in closed_positions:
+            log = logs.get(getattr(p, "entry_decision_log_id", None))
+            ai_yes = getattr(log, "ai_probability_yes_pct", None) if log is not None else None
+            side = str(getattr(p, "side", "") or "").upper()
+            result = str(getattr(p, "kalshi_market_result", "") or "").lower()
+            won = (side == "YES" and result == "yes") or (side == "NO" and result == "no")
+            ai_side = None
+            if ai_yes is not None:
+                ai_side = float(ai_yes) if side == "YES" else 100.0 - float(ai_yes)
+            record_rows.append(
+                {
+                    "won": won,
+                    "ai_side_pct": ai_side,
+                    "entry": getattr(p, "entry_price", None),
+                    "pnl": _rp(p),
+                }
+            )
+        record = track_record_note(record_rows)
+
         return {
             "stats_scope": "all_closed_positions_in_this_database",
             "fills_are_not_closed_positions": True,
@@ -307,6 +335,7 @@ async def get_performance_stats(db: Session = Depends(get_db)):
             "total_gained": round(total_gained, 4),
             "total_lost": round(total_lost, 4),
             "win_rate": round(win_rate, 4),
+            "track_record_note": record["note"],
             "daily_pnl": daily_pnl[-30:],
             "timestamp": utc_iso_z(utc_now()),
         }

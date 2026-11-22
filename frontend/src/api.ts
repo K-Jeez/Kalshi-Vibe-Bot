@@ -283,6 +283,7 @@ export interface PerformanceStats {
   /** Dollar sum of realized_pnl for all closed positions <= 0 (will be 0 or negative). */
   total_lost?: number
   win_rate: number
+  track_record_note?: string
   /** Cumulative realized P&L by close date (from closed positions). */
   daily_pnl: Array<{ date: string; pnl: number }>
   timestamp: string

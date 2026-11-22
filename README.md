@@ -14,7 +14,9 @@ App version **2.1.0**. The model default is **grok-4.3**.
 
 ## Round 6, for the record
 
-124 settled positions, 70% wins, average entry 70.6¢. The model claimed 81.1% on the bought side, about 11 points high. Result: **−$27.39** on $497 staked. Edges of 15 points or more went 57% and lost $16.50. Buys from 70¢ to 80¢ lost $36.25. That is why size is now a plain percent of cash, the price window is 50–85¢, and there is no early sell.
+124 settled positions, 70% wins, average entry 70.6¢. The model claimed 81.1% on the bought side, about 11 points high. Result: **−$27.39** on $497 staked. Edges of 15 points or more went 57% and lost $16.50. Buys from 70¢ to 80¢ lost $36.25.
+
+Across all 210 closed positions the same pattern holds, and the samples are still small. Bets where the model was under 70% confident won about 42% (40 bets) and lost money. The 70–80% band won 68% of 87 bets and made $20.55. Prices from 70¢ to 80¢ won 66% of 44 bets but lost $36.75; the win-rate range still includes a break-even result, so the 85¢ ceiling was left in place. Edges of 6–8 points were the only bucket whose win rate stayed clearly above 60% (34 of 43, +$9.36). Skipped bets were not scored: none of the 3,620 shadow rows had a settlement. Model spend is not in this export, so cost per buy cannot be recomputed from it. The Performance page now states the model’s claimed chance next to the settled win rate for whatever is in the database.
 
 ## Windows setup
 

@@ -161,7 +161,7 @@ export const Performance: React.FC = () => {
             detail={
               closedPositions === 0
                 ? 'No closed positions yet. Fill rows in the trade ledger are a different count.'
-                : `${closedPositions} closed position${closedPositions === 1 ? '' : 's'}. The trade list has ${stats.fills_total} buy and sell rows, which is a different count.`
+                : `${closedPositions} closed position${closedPositions === 1 ? '' : 's'}. The trade list has ${stats.fills_total} separate buy and sell rows.`
             }
             color={
               closedPositions === 0
@@ -179,6 +179,10 @@ export const Performance: React.FC = () => {
           />
         </div>
       )}
+
+      {stats?.track_record_note ? (
+        <p className="text-sm text-white/90 ui-surface-sm px-4 py-3">{stats.track_record_note}</p>
+      ) : null}
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
