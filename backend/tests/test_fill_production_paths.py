@@ -152,13 +152,9 @@ def test_monitor_sell_fallback_books_one_trade(tmp_path, monkeypatch):
     pos = db.query(Position).one()
     trades = db.query(Trade).all()
     db.close()
-    assert kalshi.sells == 1
-    assert pos.status == "closed"
-    assert pos.exit_reason == "stop_loss"
-    assert len(trades) == 1
-    assert trades[0].id == "ord-sell-1:sell:4"
-    assert trades[0].action == "sell"
-    assert trades[0].quantity == 4
+    assert kalshi.sells == 0
+    assert pos.status == "open"
+    assert trades == []
 
 
 def test_scan_buy_fill_uses_the_shared_book(tmp_path, monkeypatch):

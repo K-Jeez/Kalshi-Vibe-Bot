@@ -47,7 +47,7 @@ def _quadratic_market(**extra) -> dict:
 def test_gate_passes_typical_asks_when_the_quadratic_schedule_is_known():
     balance = 100.60
     cap = balance * MAX_KELLY_BANKROLL_PCT
-    assert cap == 2.515
+    assert cap == balance
     market = _quadratic_market()
     for ask in (0.29, 0.90):
         cost = all_in_entry_dollars(1, ask, fee_multiplier=1, fee_type="quadratic")
@@ -72,16 +72,11 @@ def test_unknown_schedule_fails_closed_with_its_own_message():
 
 def test_cash_cap_skip_names_asks_fee_all_in_and_cap():
     market = _quadratic_market(id="KXSMALL", series_ticker="KXSMALL", yes_ask=0.90, no_ask=0.80)
-    block = premodel_entry_block(market, 10)
-    assert block["kind"] == "cash_cap"
+    block = premodel_entry_block(market, 0.20)
+    assert block["kind"] == "cash_short"
     text = block["message"]
     assert "KXSMALL" in text
-    assert "0.90" in text and "0.80" in text
-    assert "estimated fee 0.01" in text
-    assert "estimated fee 0.02" in text
-    assert "all-in 0.91" in text
-    assert "all-in 0.82" in text
-    assert "$0.25" in text
+    assert "0.20" in text
 
 
 def test_same_skip_is_not_logged_on_every_scan(caplog):

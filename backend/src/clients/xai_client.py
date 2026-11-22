@@ -28,7 +28,7 @@ from src.reconcile.open_positions import normalize_market_id
 
 _logger = setup_logging("xai_client")
 
-PROMPT_VERSION = "decision-2026-11-16"
+PROMPT_VERSION = "decision-2026-11-22"
 _UNCERTAINTY_LEVELS = {"low", "medium", "high", "abstain"}
 _EMPTY_FACTS = {"", "none", "none found", "n/a", "unknown", "no facts"}
 
@@ -373,11 +373,11 @@ async def fetch_xai_prepaid_balance_usd(*, management_api_key: str, team_id: str
         _logger.debug("xAI invoice preview: %s", e)
         return None
 
-SYSTEM_PROMPT = """You advise an automated trader on Kalshi contracts held to resolution (optional stop-loss). Output **JSON only** (no markdown).
+SYSTEM_PROMPT = """You estimate probabilities for Kalshi contracts held until the exchange settles them. Output **JSON only** (no markdown).
 
 Each contract is still a **binary** YES/NO ticket, but some events list **several sibling contracts** where **at most one** YES can win (e.g. soccer **home win / away win / draw**). Then **P(YES)** on one leg is **not** independent of the others: those YES probabilities over the listed outcomes should **partition** ~100% (draw is a first-class outcome; buying NO on \"Team A wins\" is exposure to **both** the other win and a tie).
 
-Goal: estimate **P(YES)** — the probability **this** contract settles YES — using **real-time, horizon-matched** facts and the contract's resolution logic. Do not name a side. The server compares P(YES) to the asks and decides.
+Goal: estimate **P(YES)** — the chance **this contract's YES outcome is what the exchange settles**, not who wins the underlying game when this contract is a spread, total, prop, or other side bet. Use **real-time, horizon-matched** facts and the contract's resolution rule. Do not name a buy side. The server compares P(YES) with the asks and decides.
 
 **Threshold vs exact-hit:** Many Kalshi markets (crypto 15m, index levels, weather highs) use a numeric **threshold**: YES if the settlement index is **above** (or below) a stated level at expiration; NO otherwise. Labels like **"Target Price: $X"** are the comparison level — **not** a requirement that the index land exactly on $X. Never assign near-zero P(YES) on a standard above-threshold leg solely because exact equality is unlikely. Follow the **RESOLUTION** block in the user prompt when present.
 
@@ -389,11 +389,11 @@ Do not choose a side mainly because it looks cheap/rich. Never recommend the sid
 
 **Calibration:** Keep **ai_probability_yes_pct** honest. A large gap versus the ask is information for the server, not a reason to refuse a probability.
 
-The server computes edge and quarter-Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks. Keep that field calibrated and honest.
+The server sizes the order from your **ai_probability_yes_pct** and the executable asks. Keep that field calibrated and honest.
 
-Prompt version decision-2026-11-16. Always output a calibrated ai_probability_yes_pct. Do not output a side. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable and is never by itself a reason to abstain. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
+Prompt version decision-2026-11-22. Always output a calibrated ai_probability_yes_pct. Do not output a side. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable and is never by itself a reason to abstain. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
 
-USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this contract. Recommend **YES** or **NO** only when that matches your genuine outcome view—not because either side looks under/overpriced.
+USER_PROMPT_TEMPLATE = """Estimate **P(YES)**: the chance this contract settles YES under its own rule. If the contract is a spread, total, or player prop, that is not the same as who wins the game. Do not name a buy side.
 
 ═══════════════════════════════════════════════════════
 MARKET: {market_title}
@@ -470,7 +470,7 @@ Rules: best_market_id must be one from the list. direction is YES or NO for that
 
 The server computes edge and quarter-Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks.
 
-Prompt version decision-2026-11-16. Always output a calibrated ai_probability_yes_pct for the chosen contract. Do not output a side. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to abstain. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
+Prompt version decision-2026-11-22. Always output a calibrated ai_probability_yes_pct for the chosen contract. Do not output a side. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to abstain. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
 
 EVENT_BATCH_USER_TEMPLATE = """EVENT (shared): {event_title}
 EVENT_TICKER: {event_ticker}

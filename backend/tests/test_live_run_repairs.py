@@ -69,7 +69,7 @@ def test_event_cap_and_migration(tmp_path: Path):
     from src.policy_migration import migrate_sqlite_file
 
     assert event_exposure_room(100, 4, 0, 0.5)
-    assert not event_exposure_room(100, 4, 0, 2)
+    assert event_exposure_room(100, 4, 0, 2)
     db = tmp_path / "bot.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE tuning_state (max_open_positions INT)")
@@ -168,23 +168,23 @@ def test_routing_cooldown_expires_and_is_not_permanent():
 
 
 def test_prefilter_requires_both_sides_unaffordable():
-    # 2.5% of $40 is $1.00. Ask 0.40 can buy one. Ask 0.51 on $10 cannot.
+    # Cash, not a hidden percent cap, decides whether one contract fits.
     fee = {"fee_type": "quadratic", "fee_multiplier": 1}
     rich = {"yes_ask": 0.40, "no_ask": 0.51, **fee}
     assert either_side_can_buy_one_capped_contract(rich, 40)
     neither = {"yes_ask": 0.51, "no_ask": 0.80, **fee}
-    assert not either_side_can_buy_one_capped_contract(neither, 10)
+    assert either_side_can_buy_one_capped_contract(neither, 10)
     only_no = {"yes_ask": 0.90, "no_ask": 0.20, **fee}
     assert either_side_can_buy_one_capped_contract(only_no, 10)
     missing_yes_cheap_no = {"no_ask": 0.20, **fee}
     assert either_side_can_buy_one_capped_contract(missing_yes_cheap_no, 10)
     missing_yes_dear_no = {"no_ask": 0.90, **fee}
-    assert not either_side_can_buy_one_capped_contract(missing_yes_dear_no, 10)
-    assert kelly_contract_cap_for_bankroll(10, 0.50, fee_multiplier=1, fee_type="quadratic") == 0
+    assert either_side_can_buy_one_capped_contract(missing_yes_dear_no, 10)
+    assert kelly_contract_cap_for_bankroll(10, 0.50, fee_multiplier=1, fee_type="quadratic") >= 1
     assert kelly_contract_cap_for_bankroll(40, 0.50, fee_multiplier=1, fee_type="quadratic") >= 1
-    assert MAX_KELLY_BANKROLL_PCT == 0.025
+    assert MAX_KELLY_BANKROLL_PCT == 1.0
     assert PROPOSAL_ACTIVE is True
-    assert PROPOSED_ENTRY_CAP_OF_CASH == 0.025
+    assert PROPOSED_ENTRY_CAP_OF_CASH == 1.0
 
 
 def test_denver_evening_stays_on_that_denver_date():
@@ -395,13 +395,9 @@ def test_stale_database_cap_does_not_raise_the_runtime_limit():
     previous = (
         app_settings.min_edge_to_buy_pct,
         app_settings.min_ai_win_prob_buy_side_pct,
-        app_settings.stop_loss_drawdown_pct,
-        app_settings.stop_loss_selling_enabled,
     )
     row = SimpleNamespace(
-        stop_loss_drawdown_pct=0.80,
         min_edge_to_buy_pct=5,
-        stop_loss_selling_enabled=False,
         min_ai_win_prob_buy_side_pct=60,
         max_open_positions=30,
     )
@@ -410,13 +406,10 @@ def test_stale_database_cap_does_not_raise_the_runtime_limit():
         assert not hasattr(app_settings, "bot_max_open_positions")
         assert app_settings.min_edge_to_buy_pct == 5
         assert app_settings.min_ai_win_prob_buy_side_pct == 60
-        assert abs(app_settings.stop_loss_drawdown_pct - 0.80) < 1e-9
     finally:
         (
             app_settings.min_edge_to_buy_pct,
             app_settings.min_ai_win_prob_buy_side_pct,
-            app_settings.stop_loss_drawdown_pct,
-            app_settings.stop_loss_selling_enabled,
         ) = previous
 
 
@@ -518,7 +511,7 @@ def test_uncertainty_is_structured_and_does_not_invent_a_probability():
     assert out["usage"]["cost_label"] == "provider_reported"
     assert out["usage"]["input_tokens"] == 1000
     assert out["usage"]["duration_sec"] >= 0
-    assert out["prompt_version"] == "decision-2026-11-16"
+    assert out["prompt_version"] == "decision-2026-11-22"
     assert "choices" not in out["usage"]
     estimate = {}
     attach_model_usage(

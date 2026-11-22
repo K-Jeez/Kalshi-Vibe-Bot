@@ -57,7 +57,7 @@ def reset_shard_funding_memory() -> None:
 
 def _cap_cents(bankroll: float, cap_fraction: Optional[float] = None) -> int:
     fraction = MAX_KELLY_BANKROLL_PCT if cap_fraction is None else float(cap_fraction)
-    fraction = max(0.0, min(0.05, fraction))
+    fraction = max(0.0, min(1.0, fraction))
     return max(0, _cents_down(float(bankroll) * fraction))
 
 
@@ -91,7 +91,7 @@ def plan_shard_funding(
             "transfers": [],
             "reason": (
                 f"shard {target} funding failed: shortfall ${order_cents / 100:.2f} "
-                f"exceeds the 2.5% entry cap ${cap_cents / 100:.2f}"
+                f"exceeds available cash ${cap_cents / 100:.2f}"
             ),
             "cooldown_minutes": 30,
         }
@@ -107,7 +107,7 @@ def plan_shard_funding(
             "transfers": [],
             "reason": (
                 f"shard {target} funding failed: shortfall ${shortfall / 100:.2f} "
-                f"exceeds the 2.5% entry cap ${cap_cents / 100:.2f}"
+                f"exceeds available cash ${cap_cents / 100:.2f}"
             ),
             "cooldown_minutes": 30,
         }

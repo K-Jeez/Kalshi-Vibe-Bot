@@ -472,7 +472,7 @@ def test_model_size_keeps_small_edges_and_requote_names_the_failure():
 
     qty, limit = largest_qualifying_buy([(0.60, 20.0)], 8, _ok)
     assert qty >= 1 and abs(limit - 0.60) < 1e-9
-    assert _ok(1, 0.60) is False
+    assert _ok(1, 0.60) is True
     moved = fresh_quote_skip_reasons(
         [(0.80, 10.0)],
         original_ask=0.60,
@@ -563,7 +563,7 @@ def test_no_buy_calibration_and_recent_model_cost_and_resized_limit():
     assert costs == [0.067]
     assert buys == 1
     assert size_still_fits(
-        quantity=10,
+        quantity=1,
         limit=0.70,
         side="YES",
         ai_yes_pct=85,
@@ -582,7 +582,7 @@ def test_no_buy_calibration_and_recent_model_cost_and_resized_limit():
         open_event_cost=0,
         event_reserve=0,
         min_gross=0.10,
-    ) is False
+    ) is True
     assert size_still_fits(
         quantity=2,
         limit=0.70,

@@ -82,7 +82,6 @@ def test_two_positions_on_one_ticker_are_not_both_given_the_full_pnl():
 
 
 def test_blend_gate_off_does_not_force_one_contract():
-    assert Settings().vibe_blend_ev_gate is False
     floor, tag = quantity_after_blend(
         blend_ev_gate=False,
         kelly_quantity=0,

@@ -97,7 +97,7 @@ To stop the processes **this control started**, run **`stop.bat`** or **`vibe.ba
 1. Confirm Kalshi keys and balance look right on the dashboard before **Play**.
 2. Set the bot to **Play** when you want it to scan and trade automatically; **Pause** or **Stop** when you want it idle.
 
-All trading is **real money** on Kalshi (live-only): fill-or-kill **buys** at the price where the whole size is resting; **exits** use **stop-loss only** from the executable bid, with no grace period. Strategy defaults come from **`backend/.env`** and **`config.py`** (min edge **4**, model confidence **70%**, entry **50–85¢**, flat **$3** stake, stop-loss **off**, live search **off**, daily AI budget **$3**). **Settings** stores the edge and confidence floor. Market analysis is **xAI Grok** (`grok-4.3`). The edge cap is 22 points. See [README.md](README.md).
+All trading is **real money** on Kalshi. Buys are fill-or-kill. Positions stay open until Kalshi settles them. Defaults: edge **4**, model confidence **70%**, price **50–85¢**, stake is the edge as a percent of cash (`FLAT_STAKE_DOLLARS=0`), live search **off**, daily AI budget **off**. See [README.md](README.md).
 
 3. If you trade outside the bot or restart after downtime, open **Settings** and use **Reconcile with Kalshi** so open quantities, invested/fees basis, buy-order entry economics, unrealized marks, and closed P&L stay aligned with Kalshi (see README ``POST /portfolio/live/reconcile``). For a CLI-only open-leg refresh, use ``python scripts/refresh_open_live_positions_from_kalshi.py`` from ``backend/``.
 

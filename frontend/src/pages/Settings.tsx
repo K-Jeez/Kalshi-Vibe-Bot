@@ -6,11 +6,9 @@ import { useWebSocket } from '../hooks/useWebSocket'
 export const Settings: React.FC = () => {
   const [cur, setCur] = useState<TuningSnapshot | null>(null)
   const [minEdgeDraft, setMinEdgeDraft] = useState('')
-  const [stopLossDraft, setStopLossDraft] = useState('')
   const [minAiWinDraft, setMinAiWinDraft] = useState('')
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [resettingConfigDefaults, setResettingConfigDefaults] = useState(false)
-  const [toggleSavingStopLoss, setToggleSavingStopLoss] = useState(false)
   const [resettingHistory, setResettingHistory] = useState(false)
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [kalshiReconciling, setKalshiReconciling] = useState(false)
@@ -34,8 +32,7 @@ export const Settings: React.FC = () => {
 
   useEffect(() => {
     if (!cur) return
-    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 5))))
-    setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
+    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 4))))
     setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 70))))
   }, [cur])
 
@@ -52,19 +49,15 @@ export const Settings: React.FC = () => {
 
   const saveStrategyKnobs = async () => {
     const me = Number(minEdgeDraft)
-    const sl = Number(stopLossDraft)
     const ma = Number(minAiWinDraft)
-    if (!Number.isFinite(me) || !Number.isFinite(sl) || !Number.isFinite(ma)) {
-      alert(
-        'Enter whole numbers for minimum edge, stop-loss drawdown, and min AI win % on the buy side.',
-      )
+    if (!Number.isFinite(me) || !Number.isFinite(ma)) {
+      alert('Enter whole numbers for the minimum edge and the model confidence.')
       return
     }
     setSavingStrategy(true)
     try {
       const next = await apiClient.saveStrategyKnobs({
         min_edge_to_buy_pct: Math.round(me),
-        stop_loss_drawdown_pct: sl / 100,
         min_ai_win_prob_buy_side_pct: Math.round(ma),
       })
       setCur(next)
@@ -96,20 +89,6 @@ export const Settings: React.FC = () => {
       setKalshiReconcileMsg(typeof msg === 'string' ? msg : 'Reconcile failed (check backend logs).')
     } finally {
       setKalshiReconciling(false)
-    }
-  }
-
-  const persistStopLossToggle = async (enabled: boolean) => {
-    if (!cur) return
-    setToggleSavingStopLoss(true)
-    try {
-      const next = await apiClient.setStopLossSellingEnabled(enabled)
-      setCur(next)
-    } catch (e) {
-      console.error('Stop-loss toggle error:', e)
-      alert('Failed to update stop-loss setting.')
-    } finally {
-      setToggleSavingStopLoss(false)
     }
   }
 
@@ -219,14 +198,9 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Each buy uses a flat <strong className="text-white">$3</strong> stake, rounded down to whole contracts.
-            If that stake cannot buy one contract, the bot skips it.
-            Buys require your minimum edge and at least 70% model confidence on the purchased side.
-            Built-in limits you do not configure: edge capped at <strong className="text-white">22 points</strong>,
-            buys only between <strong className="text-white">50¢ and 85¢</strong>, and a block when the model is very confident on a mid-range price.
-            There is no cap on the model’s own probability. Sports markets use a higher volume floor at scan time.
-            Stop-loss is off unless you turn on auto sells below. Live web search is off unless <code className="text-cyan-200/90">VIBE_LIVE_SEARCH_ENABLED</code> is true.
-            Analysis stops for the day once recorded AI spend hits the daily budget (default $3).
+            Each buy spends the edge, in points, as a percent of available cash (a 10-point edge uses 10% of cash), rounded down to whole contracts. Set <code className="text-cyan-200/90">FLAT_STAKE_DOLLARS</code> above 0 to use a fixed dollar amount instead. If that amount cannot buy one contract, the bot skips.
+            Buys need your minimum edge and at least 70% model confidence. The price must be between 50¢ and 85¢. Edges above <code className="text-cyan-200/90">MAX_EDGE_TO_BUY_PCT</code> (22, or 0 to turn that cap off) are skipped.
+            The bot holds until Kalshi settles the market. Live web search is off unless <code className="text-cyan-200/90">VIBE_LIVE_SEARCH_ENABLED</code> is true. Analysis stops for the Denver day when recorded AI spend hits <code className="text-cyan-200/90">DAILY_XAI_BUDGET_USD</code> (0 means no cap).
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
             Numbers here are stored in the <strong className="text-white">database</strong>, not read
@@ -265,18 +239,6 @@ export const Settings: React.FC = () => {
                     className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
                   />
                 </label>
-                <label className="flex min-h-0 flex-col gap-1">
-                  <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Stop-loss drawdown (% below entry vs best bid)
-                  </span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={stopLossDraft}
-                    onChange={(e) => setStopLossDraft(e.target.value)}
-                    className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                  />
-                </label>
               </div>
               <button
                 type="button"
@@ -290,35 +252,6 @@ export const Settings: React.FC = () => {
               <p className="text-[11px] text-white/70">
                 Saved values apply immediately. Restore configuration defaults reloads the edge and the 70% confidence floor from <code className="text-cyan-200/90">backend/.env</code>. Editing the file alone does not overwrite the database.
               </p>
-              {health?.entry_caps && health.entry_caps.length > 0 ? (
-                <p className="text-[11px] text-white/70">
-                  Per-bet cash cap by raw edge, from closed results (starts at 2.5%, floor 1%, ceiling 5% after 8 closes):{' '}
-                  {health.entry_caps
-                    .map((row) => `${row.bucket} ${row.cap_pct.toFixed(2)}% (n=${row.n})`)
-                    .join(' · ')}
-                </p>
-              ) : null}
-
-              <div className="pt-3 border-t border-brand-muted/25 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium text-white">Stop-loss auto sells</p>
-                  <p className="text-xs text-white/80 mt-0.5">
-                    When enabled, the bot can exit when the best bid has fallen far enough below your entry price (manual sells always work).
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  disabled={toggleSavingStopLoss}
-                  onClick={() => void persistStopLossToggle(!(cur.stop_loss_selling_enabled === true))}
-                  className={`shrink-0 px-3 py-2 rounded-lg text-xs font-semibold border transition ${
-                    cur.stop_loss_selling_enabled === true
-                      ? 'bg-emerald-500/15 text-emerald-200 border-emerald-500/35'
-                      : 'bg-brand-muted/18 text-white border-brand-muted/35'
-                  } ${toggleSavingStopLoss ? 'opacity-50' : ''}`}
-                >
-                  {toggleSavingStopLoss ? 'Saving…' : cur.stop_loss_selling_enabled === true ? 'Enabled' : 'Disabled'}
-                </button>
-              </div>
               <p className="text-[11px] text-white/70">
                 {cur.config_source_note ||
                   'The numbers on this screen come from the database. The .env file applies when that row is missing, or after Restore configuration defaults.'}

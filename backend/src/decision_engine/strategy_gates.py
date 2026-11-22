@@ -18,8 +18,8 @@ MAX_ENTRY_PRICE_CENTS = 85
 # Per-entry cap is 2.5% of available cash including the estimated entry fee.
 # 5-point edge, 60% win probability, and 80% stop-loss are not part of this cap.
 KELLY_FRACTION = 0.25
-MAX_KELLY_BANKROLL_PCT = 0.025
-EVENT_EXPOSURE_CAP_FRACTION = 0.05
+MAX_KELLY_BANKROLL_PCT = 1.0
+EVENT_EXPOSURE_CAP_FRACTION = 1.0
 QUADRATIC_FEE_COEFFICIENT = 0.07
 
 # Sports: stricter scan volume only. Min edge uses the Settings value as-is.
@@ -194,7 +194,7 @@ def kelly_contract_cap_for_bankroll(
     if cash_cap < 1:
         return 0
     fraction = MAX_KELLY_BANKROLL_PCT if bankroll_fraction is None else float(bankroll_fraction)
-    budget = br * max(0.0, min(0.05, fraction))
+    budget = br * max(0.0, min(1.0, fraction))
     if all_in_entry_dollars(1, px, fee_multiplier=fee_multiplier, fee_type=fee_type) > budget + 1e-9:
         return 0
     lo, hi = 1, cash_cap
@@ -323,30 +323,19 @@ def autonomous_buy_gate_failure(
     edge = float(edge_pct)
     entry_c = int(max(0, min(100, round(float(entry_price_dollars) * 100.0))))
 
-    if edge > MAX_EDGE_TO_BUY_PCT + 1e-9:
-        return (
-            f"Skipped — the model’s edge is {edge:.0f} points, above the "
-            f"{MAX_EDGE_TO_BUY_PCT}-point safety cap"
-        )
-    if MAX_AI_WIN_PROB_BUY_SIDE_PCT < 100 and ai_buy > MAX_AI_WIN_PROB_BUY_SIDE_PCT:
-        return (
-            f"Skipped — the model is {ai_buy}% confident, above the "
-            f"{MAX_AI_WIN_PROB_BUY_SIDE_PCT}% cap"
-        )
     from src.config import settings as app_settings
 
+    max_edge = float(getattr(app_settings, "max_edge_to_buy_pct", MAX_EDGE_TO_BUY_PCT))
+    if max_edge > 0 and edge > max_edge + 1e-9:
+        return (
+            f"Skipped — the model’s edge is {edge:.0f} points, above the "
+            f"{max_edge:.0f}-point safety cap"
+        )
     low = int(getattr(app_settings, "min_entry_price_cents", MIN_ENTRY_PRICE_CENTS))
     high = int(getattr(app_settings, "max_entry_price_cents", MAX_ENTRY_PRICE_CENTS))
     if entry_c < low or entry_c > high:
         return (
             f"Skipped — price is {entry_c}¢. The bot only buys between {low}¢ and {high}¢."
         )
-    if (
-        ai_buy >= _OVERCONF_AI_MIN_PCT
-        and _OVERCONF_ENTRY_CENTS_LO <= entry_c <= _OVERCONF_ENTRY_CENTS_HI
-    ):
-        return (
-            f"Skipped — the model is {ai_buy}% confident on a {entry_c}¢ price, "
-            "and that combination has lost money before"
-        )
+    del ai_buy
     return None

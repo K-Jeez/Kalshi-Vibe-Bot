@@ -49,9 +49,9 @@ class TestBuyGates(unittest.TestCase):
             min_edge_base=1.0,
             min_ai_win_prob_base=51,
         )
-        self.assertTrue(tier)
-        self.assertEqual(eff_e, 6.0)
-        self.assertEqual(eff_ai, 55)
+        self.assertFalse(tier)
+        self.assertEqual(eff_e, 1.0)
+        self.assertEqual(eff_ai, 51)
 
     def test_effective_thresholds_normal_when_not_contrarian(self):
         eff_e, eff_ai, tier = effective_buy_gate_thresholds(

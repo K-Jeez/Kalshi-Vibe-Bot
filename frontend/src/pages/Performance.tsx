@@ -161,7 +161,7 @@ export const Performance: React.FC = () => {
             detail={
               closedPositions === 0
                 ? 'No closed positions yet. Fill rows in the trade ledger are a different count.'
-                : `${closedPositions} closed position${closedPositions === 1 ? '' : 's'} in this database. Fill rows are counted separately (${stats.fills_total}).`
+                : `${closedPositions} closed position${closedPositions === 1 ? '' : 's'}. The trade list has ${stats.fills_total} buy and sell rows, which is a different count.`
             }
             color={
               closedPositions === 0

@@ -592,8 +592,8 @@ def _ensure_tuning_row(db) -> None:
         return
     row = TuningState(
         trade_mode=mode,
-        stop_loss_drawdown_pct=float(settings.stop_loss_drawdown_pct),
-        stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
+        stop_loss_drawdown_pct=0.80,
+        stop_loss_selling_enabled=False,
         min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
         min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
         max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),
@@ -717,8 +717,8 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
     if not row:
         row = TuningState(
             trade_mode=mode,
-            stop_loss_drawdown_pct=float(settings.stop_loss_drawdown_pct),
-            stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
+            stop_loss_drawdown_pct=0.80,
+            stop_loss_selling_enabled=False,
             min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
             min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
             max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),

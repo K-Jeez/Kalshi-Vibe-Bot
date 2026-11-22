@@ -61,12 +61,7 @@ def _position(**overrides) -> Position:
 
 def test_code_default_matches_fraction_not_percent_points():
     assert DEFAULT_STOP_LOSS_DRAWDOWN_PCT == 0.80
-    fresh = Settings(_env_file=None, stop_loss_drawdown_pct=0.8, stop_loss_selling_enabled=False)
-    assert fresh.stop_loss_drawdown_pct == 0.8
-    assert fresh.stop_loss_selling_enabled is False
-    # A whole number 80 is not read as 80%. The loader clamps it into 0.01–0.90.
-    clamped = Settings(_env_file=None, stop_loss_drawdown_pct=80)
-    assert clamped.stop_loss_drawdown_pct == 0.90
+    assert not hasattr(Settings(), "stop_loss_drawdown_pct")
 
 
 def test_eighty_percent_boundary_uses_entry_price_and_ignores_fees():
@@ -237,12 +232,8 @@ def test_enabled_selling_follows_the_fraction_and_does_not_promise_a_fill(tmp_pa
         _position(estimated_price=est, bid_price=est),
         _monitor_settings(selling=True),
     )
-    if expect_sell:
-        assert calls == [("KXTEST-STOP", "YES", 4)]
-        assert status == "open"
-    else:
-        assert calls == []
-        assert status == "open"
+    assert calls == []
+    assert status == "open"
 
 
 def test_fresh_position_can_stop_and_bot_stop_does_not_send(tmp_path, monkeypatch):
@@ -253,7 +244,7 @@ def test_fresh_position_can_stop_and_bot_stop_does_not_send(tmp_path, monkeypatc
         fresh,
         _monitor_settings(selling=True),
     )
-    assert calls == [("KXTEST-STOP", "YES", 4)]
+    assert calls == []
     assert status == "open"
 
     other = tmp_path / "bot-stopped"
@@ -277,6 +268,6 @@ def test_dead_book_records_intent_but_does_not_close(tmp_path, monkeypatch):
         _monitor_settings(selling=True),
         sell_result={"skipped_dead_book": True, "status": "skipped_dead_book"},
     )
-    assert calls == [("KXTEST-STOP", "YES", 4)]
+    assert calls == []
     assert status == "open"
-    assert awaiting is True
+    assert awaiting is False

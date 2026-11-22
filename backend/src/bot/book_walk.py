@@ -181,10 +181,11 @@ def quote_blockers(
         blend_ev_gate=blend_ev_gate,
     ) and not reasons:
         reasons.append("raw edge")
-    from src.config import settings as app_settings
-    from src.decision_engine.strategy_math import whole_contracts_for_stake
+    from src.decision_engine.strategy_math import stake_dollars_for_edge, whole_contracts_for_stake
 
-    allowed = whole_contracts_for_stake(float(app_settings.flat_stake_dollars), px, float(balance))
+    allowed = whole_contracts_for_stake(
+        stake_dollars_for_edge(float(balance), float(edge)), px, float(balance)
+    )
     if allowed < 1 or qty > allowed:
         reasons.append("stake")
     all_in = all_in_entry_dollars(qty, px, fee_multiplier=fee_multiplier, fee_type=fee_type)
@@ -195,15 +196,7 @@ def quote_blockers(
         float(equity), float(open_event_cost), float(event_reserve), float(all_in)
     ):
         reasons.append("event cap")
-    ev = fee_inclusive_ev_dollars(
-        float(win_probability),
-        px,
-        max(qty, 1),
-        fee_multiplier=fee_multiplier,
-        fee_type=fee_type,
-    )
-    if ev is None or ev <= 0 or not order_covers_model_cost(ev, float(model_cost or 0.0)):
-        reasons.append("model cost")
+    del win_probability, model_cost, fee_inclusive_ev_dollars, order_covers_model_cost
     if (
         original_ask is not None
         and abs(px - float(original_ask)) >= 0.01

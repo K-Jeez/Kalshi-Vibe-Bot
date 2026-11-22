@@ -14,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Single source for tuning fallbacks (SQLite NULL / missing ORM attr); keep in sync with ``Settings`` field defaults below.
 DEFAULT_MIN_EDGE_TO_BUY_PCT = 4
+DEFAULT_MAX_EDGE_TO_BUY_PCT = 22
 DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT = 70
 DEFAULT_STOP_LOSS_DRAWDOWN_PCT = 0.80
 APPROVED_MAX_OPEN_POSITIONS = 12
@@ -60,21 +61,17 @@ class Settings(BaseSettings):
     # ── Trading configuration ────────────────────────────────────────────────────
     # Minimum edge (percentage points: AI prob for buy side minus market-implied ask %) to execute a buy.
     min_edge_to_buy_pct: int = DEFAULT_MIN_EDGE_TO_BUY_PCT
+    # 0 turns the upper edge cap off.
+    max_edge_to_buy_pct: int = DEFAULT_MAX_EDGE_TO_BUY_PCT
     # Minimum AI win probability (0–100) on the **purchased** side before a buy (clamped 51–99).
     min_ai_win_prob_buy_side_pct: int = DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
-    # Kept so an older .env still loads. Order size does not read this value.
-    # Size uses the raw model unless settled Brier skill is significantly negative.
-    vibe_model_blend_weight: float = 0.25
-    # When false, raw edge and win-prob gates decide the buy. Size uses the model
-    # (or the evidence-shrunk probability). When true, that probability's EV must be positive.
-    vibe_blend_ev_gate: bool = False
     # Bought side must be inside this window. Replaces the old 26¢ floor.
     min_entry_price_cents: int = 50
     max_entry_price_cents: int = 85
-    # Flat dollars per buy. Whole contracts only. A stake that cannot buy one contract is a skip.
-    flat_stake_dollars: float = 3.0
-    # Recorded xAI spend for the Denver day. 0 means no cap. Analysis stops until the next day.
-    daily_xai_budget_usd: float = 3.0
+    # 0 uses edge-as-percent-of-cash. A positive value is a fixed dollar stake instead.
+    flat_stake_dollars: float = 0.0
+    # Recorded xAI spend for the Denver day. 0 means no cap.
+    daily_xai_budget_usd: float = 0.0
 
     # ── Bot scan configuration ───────────────────────────────────────────────────
     bot_scan_interval: int = 10              # seconds between full market scans
@@ -112,13 +109,6 @@ class Settings(BaseSettings):
     vibe_live_search_max_per_sweep: int = 8
 
     # ── Exit hygiene ──────────────────────────────────────────────────────────────
-    # Exit grace is not applied. The field remains so an old .env key is ignored
-    # rather than crashing. Stop-loss can fire as soon as the bid has fallen.
-    exit_grace_minutes: float = 0.0
-    # Stop-loss: exit when the executable best bid has fallen this fraction vs entry (fees excluded). 0.80 = 80%.
-    stop_loss_drawdown_pct: float = DEFAULT_STOP_LOSS_DRAWDOWN_PCT
-    # When False, the bot never auto-exits for stop-loss (manual sells still allowed). Default off until enabled in Settings.
-    stop_loss_selling_enabled: bool = False
     # Periodically ``GET /markets`` for recent closed rows missing ``kalshi_market_result`` (0 = disable).
     closed_resolution_refresh_interval_sec: int = 450
     # Max closed rows checked per refresh tick (missing-result filter only when automated).
@@ -167,10 +157,8 @@ class Settings(BaseSettings):
         self.reentry_cooldown_minutes = max(0, min(7 * 24 * 60, int(self.reentry_cooldown_minutes)))
         self.local_min_residual_payoff = max(0.0, min(0.50, float(self.local_min_residual_payoff)))
         self.min_edge_to_buy_pct = max(0, min(95, int(self.min_edge_to_buy_pct)))
+        self.max_edge_to_buy_pct = max(0, min(95, int(self.max_edge_to_buy_pct)))
         self.min_ai_win_prob_buy_side_pct = max(51, min(99, int(self.min_ai_win_prob_buy_side_pct)))
-        self.vibe_model_blend_weight = max(0.0, min(1.0, float(self.vibe_model_blend_weight)))
-        self.exit_grace_minutes = max(0.0, min(1440.0, float(self.exit_grace_minutes)))
-        self.stop_loss_drawdown_pct = max(0.01, min(0.90, float(self.stop_loss_drawdown_pct)))
         self.kalshi_markets_page_delay_sec = max(0.0, min(0.5, float(self.kalshi_markets_page_delay_sec)))
         self.vibe_live_search_max_tool_calls = max(1, min(8, int(self.vibe_live_search_max_tool_calls)))
         self.vibe_live_search_within_sec = max(60, min(86400, int(self.vibe_live_search_within_sec)))

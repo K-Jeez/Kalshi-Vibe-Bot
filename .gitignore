@@ -16,6 +16,9 @@ build/
 *.db-journal
 *.db.bak
 *.db.bak-*
+.env.bak-*
+local_edits_backup_*/
+realized_pnl_audit_*.csv
 *.db.pre-bundle.bak
 venv/
 env/

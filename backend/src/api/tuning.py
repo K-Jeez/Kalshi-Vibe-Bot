@@ -55,12 +55,8 @@ def _coalesce_ai_provider(row) -> str:
 
 def tuning_state_payload(row) -> dict:
     return {
-        "stop_loss_drawdown_pct": round(
-            float(getattr(row, "stop_loss_drawdown_pct", app_settings.stop_loss_drawdown_pct)),
-            4,
-        ),
         "min_edge_to_buy_pct": _coalesce_int(row, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT),
-        "stop_loss_selling_enabled": bool(getattr(row, "stop_loss_selling_enabled", False)),
+        "max_edge_to_buy_pct": int(getattr(app_settings, "max_edge_to_buy_pct", 22)),
         "min_ai_win_prob_buy_side_pct": _coalesce_int(
             row, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
         ),
@@ -82,13 +78,7 @@ def sync_runtime_from_db(db: Session) -> None:
 
 
 def _sync_runtime_from_row(row) -> None:
-    app_settings.stop_loss_drawdown_pct = float(
-        getattr(row, "stop_loss_drawdown_pct", app_settings.stop_loss_drawdown_pct)
-    )
     app_settings.min_edge_to_buy_pct = _coalesce_int(row, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT)
-    app_settings.stop_loss_selling_enabled = bool(
-        getattr(row, "stop_loss_selling_enabled", getattr(app_settings, "stop_loss_selling_enabled", False))
-    )
     app_settings.min_ai_win_prob_buy_side_pct = _coalesce_int(
         row, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
     )
@@ -98,9 +88,7 @@ def apply_config_defaults_to_tuning_state(db: Session) -> dict:
     fresh = Settings()
     row = ensure_tuning_state(db)
 
-    row.stop_loss_drawdown_pct = float(fresh.stop_loss_drawdown_pct)
     row.min_edge_to_buy_pct = int(fresh.min_edge_to_buy_pct)
-    row.stop_loss_selling_enabled = bool(fresh.stop_loss_selling_enabled)
     row.min_ai_win_prob_buy_side_pct = int(fresh.min_ai_win_prob_buy_side_pct)
     row.ai_provider = AI_PROVIDER
 
@@ -125,8 +113,6 @@ async def set_strategy_knobs(req: StrategyKnobsRequest, db: Session = Depends(ge
     row = ensure_tuning_state(db)
     if req.min_edge_to_buy_pct is not None:
         row.min_edge_to_buy_pct = int(_clamp("min_edge_to_buy_pct", float(req.min_edge_to_buy_pct)))
-    if req.stop_loss_drawdown_pct is not None:
-        row.stop_loss_drawdown_pct = _clamp("stop_loss_drawdown_pct", float(req.stop_loss_drawdown_pct))
     if req.min_ai_win_prob_buy_side_pct is not None:
         v = int(req.min_ai_win_prob_buy_side_pct)
         # Floor 51 = strictly above 50% on the buy side; cap 99 matches ``config.py`` validator.

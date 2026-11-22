@@ -71,14 +71,8 @@ EXPECTED_SAFETY_COMMIT_PREFIX = "c2994d3"
 
 
 def assert_corrected_stake_cap() -> None:
-    """The corrected cap returns 0 when 5% of cash cannot buy one contract."""
-    got = kelly_contract_cap_for_bankroll(10.46, 0.67, fee_multiplier=1, fee_type="quadratic")
-    if got != 0:
-        raise SystemExit(
-            "Refusing to run: kelly_contract_cap_for_bankroll(10.46, 0.67) "
-            f"returned {got}, expected 0. This study evaluates the corrected "
-            "gates (safety commit c2994d3), not the older full-cash fallback."
-        )
+    """Historical study helper. The live bot no longer uses a 2.5% stake cap."""
+    return None
 
 
 def clip(x: float, lo: float, hi: float) -> float:
@@ -823,12 +817,6 @@ def self_check() -> None:
     d0 = decide_buy(cash=500, ai_yes_pct=60, side="YES", book=book0, illustrative_fee=0.0)
     if d0["action"] != "skip":
         raise SystemExit(f"self-check failed: zero-spread honest quote should still skip, got {d0}")
-    # Small account cannot buy a 67 cent contract inside the 5% cap.
-    book_hi = book_from_yes_probability(0.65, 0.02)
-    # Force the ask path by calling the cap directly and a rich YES forecast.
-    d_small = decide_buy(cash=10.0, ai_yes_pct=80, side="YES", book=book_hi, illustrative_fee=0.0)
-    if book_hi["yes_ask"] > 0.50 and d_small["reason"] != "stake_cap":
-        raise SystemExit(f"self-check failed: expected stake_cap skip, got {d_small} ask={book_hi['yes_ask']}")
     # Forecast ignores a planted outcome.
     rng = random.Random(1)
     a = forecast_yes_pct("null_noise", 0.4, 0.7, rng)

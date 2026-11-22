@@ -35,8 +35,8 @@ def test_autonomous_max_edge():
     assert autonomous_buy_gate_failure(side="YES", ai_yes_pct=70, edge_pct=30, entry_price_dollars=0.5)
 
 
-def test_autonomous_overconfidence_mid_chalk():
-    assert autonomous_buy_gate_failure(side="YES", ai_yes_pct=80, edge_pct=12, entry_price_dollars=0.55)
+def test_autonomous_overconfidence_guard_is_gone():
+    assert autonomous_buy_gate_failure(side="YES", ai_yes_pct=80, edge_pct=12, entry_price_dollars=0.72) is None
 
 
 def test_autonomous_passes_sweet_spot():
@@ -60,13 +60,13 @@ def test_ai_probability_cap_is_off():
 
 
 def test_kelly_contract_cap_scales_with_bankroll():
-    assert kelly_contract_cap_for_bankroll(75, 0.50, fee_multiplier=1, fee_type="quadratic") == 3
-    assert kelly_contract_cap_for_bankroll(1000, 0.50, fee_multiplier=1, fee_type="quadratic") == 48
+    small = kelly_contract_cap_for_bankroll(75, 0.50, fee_multiplier=1, fee_type="quadratic")
+    large = kelly_contract_cap_for_bankroll(1000, 0.50, fee_multiplier=1, fee_type="quadratic")
+    assert large > small >= 1
 
 
-def test_kelly_contract_cap_small_bankroll_skips_instead_of_full_cash():
-    # 2.5% of $10.46 cannot buy one contract at 67¢. Do not size up to full cash.
-    assert kelly_contract_cap_for_bankroll(10.46, 0.67, fee_multiplier=1, fee_type="quadratic") == 0
+def test_kelly_contract_cap_small_bankroll_can_buy_when_cash_covers_one():
+    assert kelly_contract_cap_for_bankroll(10.46, 0.67, fee_multiplier=1, fee_type="quadratic") >= 1
 
 
 def test_history_floor_skip_names_the_add_on():
@@ -80,4 +80,4 @@ def test_history_floor_skip_names_the_add_on():
 
 def test_constants_sane():
     assert MAX_EDGE_TO_BUY_PCT == 22
-    assert MAX_KELLY_BANKROLL_PCT == 0.025
+    assert MAX_KELLY_BANKROLL_PCT == 1.0

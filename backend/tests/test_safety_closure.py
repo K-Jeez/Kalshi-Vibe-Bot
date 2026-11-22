@@ -518,7 +518,7 @@ def test_production_reconcile_sell_does_not_invent_a_position(tmp_path: Path):
 
 def test_monitor_and_buy_path_call_the_production_reconcile():
     text = (Path(__file__).resolve().parents[1] / "src" / "bot" / "loop.py").read_text(encoding="utf-8")
-    assert text.count("await reconcile_open_intents(") >= 3
+    assert text.count("await reconcile_open_intents(") >= 2
 
 
 def test_concurrent_buys_share_one_submission_lock():

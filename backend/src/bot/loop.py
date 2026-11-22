@@ -48,7 +48,6 @@ from src.reconcile.open_positions import (
     normalize_market_id,
     open_position_cash_basis_dollars,
     resolution_intrinsic_mark_dollars,
-    stop_loss_triggered_from_position,
 )
 from src.decision_engine.market_resolution_context import enrich_ai_market_description
 from src.decision_engine.strategy_gates import (
@@ -873,333 +872,6 @@ async def monitor_positions(
                         "set" if intrinsic_resolved_mark is not None else "none",
                     )
 
-            exit_reason: Optional[str] = None
-            # Stop-loss uses the executable best bid and the current drawdown setting.
-            # There is no post-entry grace period.
-            sl_pct = float(getattr(settings, "stop_loss_drawdown_pct", 0.0))
-            stop_sales_on = bool(getattr(settings, "stop_loss_selling_enabled", False))
-            if stop_sales_on and not exit_reason:
-                if stop_loss_triggered_from_position(pos, stop_loss_drawdown_pct=sl_pct):
-                    exit_reason = "stop_loss"
-
-            if not exit_reason:
-                continue
-
-            if bool(getattr(pos, "awaiting_settlement", False)):
-                logger.debug(
-                    "Suppress auto-exit %s (%s) — awaiting Kalshi settlement (dead book or market removed)",
-                    pos.market_id,
-                    exit_reason,
-                )
-                continue
-
-            from src.bot.exit_backoff import exit_is_backed_off
-
-            if exit_is_backed_off(str(pos.market_id or "")):
-                logger.info("Skip auto-exit %s — empty-book backoff", pos.market_id)
-                continue
-
-            logger.info(
-                "Exiting %s (%s x%d) — reason=%s  P&L=%.2f",
-                pos.market_id, pos.side, pos.quantity, exit_reason,
-                current_value - cash_basis,
-            )
-
-            if not allow_exits:
-                logger.info(
-                    "Auto-exits disabled (bot_state=%s); would exit %s reason=%s",
-                    bot_state_label or "?",
-                    pos.market_id,
-                    exit_reason,
-                )
-                continue
-
-            from src.clients.kalshi_client import (
-                is_order_error_market_unavailable,
-                kalshi_order_avg_contract_price_and_proceeds_for_held_side,
-                kalshi_order_fees_dollars,
-                kalshi_order_filled_contracts,
-            )
-
-            sell_n = max(0, int(pos.quantity or 0))
-            if sell_n < 1:
-                logger.warning("Skip live exit %s — zero whole-contract quantity in DB", pos.market_id)
-                continue
-            sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
-            if sell_hold:
-                from src.database.models import release_sqlite_write
-
-                release_sqlite_write(db)
-                await reconcile_open_intents(
-                    kalshi_client,
-                    db_factory,
-                    market_id=pos.market_id,
-                    action="sell",
-                )
-                sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
-            if sell_hold:
-                from src.ops_status import note_unresolved
-
-                note_unresolved(sell_hold)
-                logger.info("Skip auto-exit %s — %s", pos.market_id, sell_hold)
-                continue
-            async with market_execution_lock(str(getattr(pos, "event_ticker", "") or pos.market_id or "")):
-                async with market_execution_lock(str(pos.market_id or "")):
-                    db.refresh(pos)
-                    if (pos.status or "") != "open" or int(pos.quantity or 0) < 1:
-                        logger.info(
-                            "Skip auto-exit %s — position changed before the order",
-                            pos.market_id,
-                        )
-                        continue
-                    from src.database.models import BotState
-
-                    state_row = db.query(BotState).filter(BotState.id == 1).first()
-                    if state_row is not None and (state_row.state or "") == "stop":
-                        logger.info("Skip auto-exit %s — bot is stopped", pos.market_id)
-                        continue
-                    sell_n = int(pos.quantity)
-                    from src.database.models import release_sqlite_write
-
-                    release_sqlite_write(db)
-                    sell_gate = make_order_submit_gate(
-                        {
-                            "market_id": pos.market_id,
-                            "event_ticker": getattr(pos, "event_ticker", None),
-                            "side": pos.side,
-                            "action": "sell",
-                            "quantity": sell_n,
-                            "detail": f"auto-exit {exit_reason}",
-                        }
-                    )
-                    sell_result = await kalshi_client.place_sell_market(
-                        pos.market_id,
-                        pos.side,
-                        sell_n,
-                        before_submit=sell_gate,
-                    )
-            record_order_ack(
-                sell_result,
-                {
-                    "market_id": pos.market_id,
-                    "side": pos.side,
-                    "action": "sell",
-                    "quantity": sell_n,
-                    "client_order_id": sell_result.get("client_order_id"),
-                    "fees_dollars": None,
-                    "detail": f"auto-exit {exit_reason}",
-                },
-            )
-            floor_d = float(current_price or 0.01)
-            if sell_result.get("skipped_dead_book"):
-                pos.dead_market = True
-                pos.awaiting_settlement = True
-                logger.info(
-                    "Live exit deferred %s — no native bids on book (dead market); will retry when bids return",
-                    pos.market_id,
-                )
-                db.commit()
-                continue
-            err = sell_result.get("error")
-            if err:
-                if is_order_error_market_unavailable(err):
-                    pos.awaiting_settlement = True
-                    pos.dead_market = False
-                    logger.warning(
-                        "Live exit skipped — market not tradable on Kalshi (%s); "
-                        "marked awaiting_settlement for reconciliation: %s",
-                        pos.market_id,
-                        err,
-                    )
-                    db.commit()
-                else:
-                    logger.error(
-                        "Live exit failed %s: %s",
-                        pos.market_id,
-                        err,
-                    )
-                continue
-            if kalshi_order_filled_contracts(sell_result) <= 0:
-                from src.bot.exit_backoff import note_empty_exit
-
-                empty_tries = note_empty_exit(str(pos.market_id or ""))
-                # Native bid only — parity-inferred bids can show liquidity IOC cannot hit.
-                exe_bid = (
-                    live_best_bid_dollars(
-                        market, pos.side, fallback=0.0, infer_from_opposite_ask=False
-                    )
-                    if market is not None
-                    else 0.0
-                )
-                bid_txt = f"{exe_bid:.2f}" if exe_bid and exe_bid > 0 else "none"
-                logger.warning(
-                    "Live exit did not fill — leaving position open %s kalshi_status=%s "
-                    "executable_bid=%s (IOC/market needs contra bids; empty book = expected cancel)",
-                    pos.market_id,
-                    sell_result.get("status"),
-                    bid_txt,
-                )
-                if empty_tries >= 3 or (not sell_result.get("error") and (exe_bid is None or exe_bid <= 0)):
-                    pos.awaiting_settlement = True
-                    pos.dead_market = True
-                    logger.info(
-                        "Marked awaiting_settlement %s — no bids; stop IOC retries until "
-                        "settlement sync or liquidity returns",
-                        pos.market_id,
-                    )
-                    db.commit()
-                continue
-            sell_result = await kalshi_client.refresh_order_fill_snapshot(sell_result)
-            filled_fp = max(0.0, float(kalshi_order_filled_contracts(sell_result)))
-            # Exit IOC can partially fill; only the filled size is realized/closed.
-            if filled_fp <= 0:
-                logger.warning(
-                    "Live exit IOC returned nonpositive filled size (%s) — leaving position open %s",
-                    filled_fp,
-                    pos.market_id,
-                )
-                continue
-            avg_exit_px, proceeds = kalshi_order_avg_contract_price_and_proceeds_for_held_side(
-                sell_result,
-                held_side=str(pos.side or "YES"),
-                filled=filled_fp,
-                fallback_per_contract_dollars=float(floor_d),
-            )
-            exit_order_id = (
-                sell_result.get("order_id")
-                or sell_result.get("client_order_id")
-                or sell_result.get("id")
-            )
-
-            # Whole-contract ledger only: floor fill, scale proceeds/cost to whole contracts.
-            sold_whole = max(0, int(math.floor(float(filled_fp) + 1e-9)))
-            if sold_whole < 1:
-                logger.warning(
-                    "Live exit fill had no whole contracts (%s filled_fp=%.6f) — leaving position open %s",
-                    pos.market_id,
-                    filled_fp,
-                    pos.market_id,
-                )
-                continue
-            sold_qty_trade = sold_whole
-            scale = sold_whole / float(filled_fp) if filled_fp > 1e-9 else 1.0
-            sold_proceeds = float(proceeds) * scale
-            sold_px = float(avg_exit_px)
-            exit_fees_scaled = float(kalshi_order_fees_dollars(sell_result)) * scale
-            pos.dead_market = False
-            pos.awaiting_settlement = False
-            pre_qty = max(0, int(pos.quantity or 0))
-            pre_entry_cost = float(pos.entry_cost or 0.0)
-            pre_entry_price = float(pos.entry_price or 0.0)
-            pre_sync_fees_paid = float(getattr(pos, "fees_paid", 0) or 0.0) + float(exit_fees_scaled)
-            per_contract_basis = float(cash_basis) / float(pre_qty) if pre_qty > 0 else 0.0
-            sold_basis = per_contract_basis * float(sold_qty_trade)
-            fill_integer = filled_fp > 1e-9 and abs(float(filled_fp) - round(float(filled_fp))) < 1e-6
-            fifo_basis, fifo_ok = (0.0, False)
-            if fill_integer and sold_qty_trade < pre_qty:
-                fifo_basis, fifo_ok = fifo_cost_for_next_sell(
-                    db,
-                    trade_mode=TRADE_MODE,
-                    market_id=pos.market_id,
-                    side=pos.side,
-                    sell_qty=int(sold_qty_trade),
-                )
-            gross_exit_notional = float(sold_px) * float(sold_qty_trade)
-            realized = closed_leg_realized_pnl_kalshi_dollars(
-                quantity_sold=int(sold_qty_trade),
-                exit_price_per_contract_gross=sold_px,
-                entry_cost_at_open=pre_entry_cost,
-                entry_price_at_open=pre_entry_price,
-                quantity_at_open=pre_qty,
-                fees_paid_roundtrip=pre_sync_fees_paid,
-            )
-
-            synced = await sync_open_position_qty_cost_from_kalshi(kalshi_client, pos, db=db)
-            full_exit = pre_qty > 0 and int(sold_qty_trade) >= int(pre_qty)
-            portfolio_flat = synced and int(pos.quantity or 0) <= 0
-            if synced or full_exit:
-                ensure_fill_trade(
-                    db,
-                    action="sell",
-                    market_id=pos.market_id,
-                    market_title=pos.market_title or pos.market_id,
-                    side=str(pos.side or ""),
-                    cumulative_qty=int(sold_qty_trade),
-                    delta_qty=int(sold_qty_trade),
-                    price=float(sold_px),
-                    notional=float(gross_exit_notional),
-                    client_order_id=str(sell_result.get("client_order_id") or exit_order_id or ""),
-                    exchange_order_id=str(sell_result.get("order_id") or ""),
-                    realized_pnl=float(realized),
-                )
-                if portfolio_flat or full_exit:
-                    # Kalshi flat-row sync zeros qty and often avg_price; keep exit leg + basis for history/UI.
-                    pos.quantity = int(sold_qty_trade)
-                    if pre_entry_price > 1e-12:
-                        pos.entry_price = pre_entry_price
-                    if pre_entry_cost > 1e-12:
-                        pos.entry_cost = pre_entry_cost
-                    pos.fees_paid = pre_sync_fees_paid
-                    pos.status = "closed"
-                    pos.closed_at = utc_now()
-                    pos.exit_reason = exit_reason
-                    pos.realized_pnl = realized
-                    pos.current_price = sold_px
-                    mark_position_kalshi_flat_reconcile_pending(pos)
-                    from src.bot.exit_backoff import clear_exit_backoff
-
-                    clear_exit_backoff(str(pos.market_id or ""))
-                else:
-                    logger.info(
-                        "Partial exit IOC filled: %s %s filled_fp=%.4f proceeds=%.2f remaining=%d (Kalshi sync)",
-                        pos.market_id,
-                        pos.side,
-                        filled_fp,
-                        sold_proceeds,
-                        pos.quantity,
-                    )
-                    continue
-            else:
-                booked_exit = apply_cumulative_fill(
-                    db,
-                    action="sell",
-                    side=pos.side,
-                    market_id=pos.market_id,
-                    cumulative_qty=int(sold_qty_trade),
-                    cumulative_fees=float(exit_fees_scaled),
-                    price=float(sold_px),
-                    client_order_id=str(sell_result.get("client_order_id") or exit_order_id or ""),
-                    exchange_order_id=str(sell_result.get("order_id") or ""),
-                    event_ticker=getattr(pos, "event_ticker", None),
-                    exit_reason=exit_reason,
-                    order=sell_result,
-                )
-                if not booked_exit.get("ok"):
-                    logger.error(
-                        "Live exit filled but was not booked %s: %s",
-                        pos.market_id,
-                        booked_exit.get("reason"),
-                    )
-                    continue
-                if not booked_exit.get("closed"):
-                    logger.info(
-                        "Partial exit booked %s remaining=%s",
-                        pos.market_id,
-                        booked_exit.get("remaining"),
-                    )
-                    continue
-                realized = booked_exit.get("realized_pnl", realized)
-                mark_position_kalshi_flat_reconcile_pending(pos)
-            closed_notices.append(
-                {
-                    "market_id": pos.market_id,
-                    "market_title": pos.market_title,
-                    "side": pos.side,
-                    "exit_reason": exit_reason,
-                    "realized_pnl": float(realized),
-                }
-            )
-
         db.commit()
 
     except Exception as e:
@@ -1376,29 +1048,9 @@ async def scan_and_trade(
             for p in positions_open
             if (p.market_id or "").strip()
         }
-        from src.decision_engine.bucket_caps import load_bucket_caps
-        from src.decision_engine.history_sizing import (
-            calibrated_blend_weight,
-            expected_xai_cost_per_buy,
-            floor_for_edge,
-            edge_floor_skip_text,
-            load_edge_floors,
-            order_covers_model_cost,
-            load_model_spend,
-            load_settled_calibration,
-        )
+        from src.decision_engine.history_sizing import edge_floor_skip_text
 
-        bucket_caps = load_bucket_caps(db)
-        calibration_rows = load_settled_calibration(db)
-        blend_weight_now = calibrated_blend_weight(
-            calibration_rows,
-            prior=float(getattr(settings, "vibe_model_blend_weight", 0.25) or 0.25),
-        )
-        edge_floors = load_edge_floors(
-            db, float(getattr(settings, "min_edge_to_buy_pct", 4) or 4)
-        )
-        model_costs, filled_buys = load_model_spend(db)
-        expected_model_cost = expected_xai_cost_per_buy(model_costs, filled_buys)
+        expected_model_cost = 0.0
         try:
             from src.activity_log import list_unresolved_intents
 
@@ -2053,23 +1705,7 @@ async def scan_and_trade(
                             min_ai_win_prob_base=min_ai_base,
                         )
                         ai_buy = ai_win_prob_pct_on_buy_side(trade_side, ai_yes)
-                        from src.decision_engine.blend import blend_snapshot, stamp_blend
-                        from src.decision_engine.bucket_caps import cap_for_edge
-
-                        blend = blend_snapshot(
-                            side=trade_side,
-                            model_yes_pct=ai_yes,
-                            yes_bid=market.get("yes_bid"),
-                            yes_ask=y_ask_f,
-                            yes_price=float(yes_price),
-                            weight=blend_weight_now,
-                        )
-                        stamp_blend(decision, blend)
-                        entry_cap = cap_for_edge(bucket_caps, edge_now)
-                        eff_min_edge = max(
-                            float(eff_min_edge),
-                            floor_for_edge(edge_floors, edge_now, float(eff_min_edge)),
-                        )
+                        entry_cap = 1.0
                         del risk_tier
                         gate_fail = autonomous_buy_gate_failure(
                             side=trade_side,
@@ -2107,17 +1743,42 @@ async def scan_and_trade(
                             }
                         else:
                             _fee = await ensure_market_fee_schedule(kalshi_client, market)
-                            from src.decision_engine.strategy_math import whole_contracts_for_stake
+                            from src.decision_engine.strategy_math import (
+                                stake_dollars_for_edge,
+                                whole_contracts_for_stake,
+                            )
+                            from src.decision_engine.strategy_gates import all_in_entry_dollars as _all_in
 
-                            stake = float(getattr(settings, "flat_stake_dollars", 3) or 0)
+                            stake = min(
+                                float(balance),
+                                stake_dollars_for_edge(float(balance), float(edge_now)),
+                            )
                             quantity = whole_contracts_for_stake(stake, float(trade_price), float(balance))
-                            kelly_sizing_tag = "flat_stake"
+                            while quantity > 0:
+                                _cost = _all_in(
+                                    quantity,
+                                    float(trade_price),
+                                    fee_multiplier=_fee.get("fee_multiplier"),
+                                    fee_type=_fee.get("fee_type"),
+                                )
+                                if _cost is None or _cost <= stake + 1e-9:
+                                    break
+                                quantity -= 1
+                            kelly_sizing_tag = "edge_pct_of_cash"
                             if quantity < 1:
+                                flat = float(getattr(settings, "flat_stake_dollars", 0) or 0)
+                                if flat > 0:
+                                    summary = (
+                                        f"Skipped — a ${stake:.2f} stake cannot buy one whole contract at this price"
+                                    )
+                                else:
+                                    summary = (
+                                        f"Skipped — ${stake:.2f} ({edge_now:.1f}% of cash) "
+                                        "cannot buy one whole contract at this price"
+                                    )
                                 action_taken = {
                                     "status": "no_trade",
-                                    "summary": (
-                                        f"Skipped — a ${stake:.0f} stake cannot buy one whole contract at this price"
-                                    ),
+                                    "summary": summary,
                                     "signal": signal,
                                 }
                             else:

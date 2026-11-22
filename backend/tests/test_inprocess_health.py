@@ -10,15 +10,15 @@ import socket
 
 from fastapi.testclient import TestClient
 
-from src.config import DEFAULT_STOP_LOSS_DRAWDOWN_PCT, settings
+from src.config import settings
 from src.database.models import BotState
 
 
 def test_health_with_trading_tasks_faked(tmp_path, monkeypatch):
     assert not (settings.kalshi_api_key or "").strip()
     assert not (settings.xai_api_key or "").strip()
-    assert settings.stop_loss_selling_enabled is False
-    assert settings.stop_loss_drawdown_pct == DEFAULT_STOP_LOSS_DRAWDOWN_PCT == 0.80
+    assert settings.flat_stake_dollars == 0
+    assert settings.daily_xai_budget_usd == 0
 
     import src.database.models as models
 

@@ -29,7 +29,7 @@ def test_abstain_keeps_the_stated_side_and_probability():
     assert parsed["direction"] == "YES"
     assert parsed["ai_probability_yes_pct"] == 73
     assert parsed["uncertainty"]["level"] == "abstain"
-    assert PROMPT_VERSION == "decision-2026-11-16"
+    assert PROMPT_VERSION == "decision-2026-11-22"
     assert "never by itself a reason to abstain" in SYSTEM_PROMPT
     assert "Do not withhold a side" in SYSTEM_PROMPT
     assert "Never write 50" in SYSTEM_PROMPT

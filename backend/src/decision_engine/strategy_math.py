@@ -105,6 +105,21 @@ def kelly_contracts_for_side(
     return int(math.floor(stake / b + 1e-12))
 
 
+def stake_dollars_for_edge(cash: float, edge_pct: float) -> float:
+    """Stake is the edge, in points, as a percent of available cash.
+
+    A positive FLAT_STAKE_DOLLARS replaces that with a fixed dollar amount.
+    There is no extra percent cap. The order is still limited to available cash
+    and to whole contracts.
+    """
+    from src.config import settings as app_settings
+
+    flat = float(getattr(app_settings, "flat_stake_dollars", 0) or 0)
+    if flat > 0:
+        return flat
+    return max(0.0, float(cash)) * max(0.0, float(edge_pct)) / 100.0
+
+
 def whole_contracts_for_stake(stake_dollars: float, price: float, cash: float) -> int:
     """How many whole contracts a flat dollar stake buys. Never rounds up to one."""
     px = float(price)
@@ -307,18 +322,6 @@ def effective_buy_gate_thresholds(
     min_edge_base: float,
     min_ai_win_prob_base: int,
 ) -> Tuple[float, int, bool]:
-    """Return ``(effective_min_edge_pct, effective_min_ai_win_prob_buy_side, contrarian_buy_tier)``."""
-    tier = contrarian_buy_tier_active(
-        side=side,
-        ai_yes_pct=ai_yes_pct,
-        yes_ask=yes_ask,
-        no_ask=no_ask,
-        yes_mid=yes_mid,
-        no_mid=no_mid,
-    )
-    extra_e = _CONTRARIAN_EXTRA_MIN_EDGE_PCT if tier else 0
-    extra_p = _CONTRARIAN_EXTRA_MIN_AI_WIN_PROB_PCT if tier else 0
-    eff_edge = float(min_edge_base) + float(extra_e)
-    eff_ai = int(min_ai_win_prob_base) + int(extra_p)
-    eff_ai = max(51, min(99, eff_ai))
-    return eff_edge, eff_ai, tier
+    """Return the Settings floors unchanged. The third value stays false."""
+    del side, ai_yes_pct, yes_ask, no_ask, yes_mid, no_mid
+    return float(min_edge_base), int(min_ai_win_prob_base), False

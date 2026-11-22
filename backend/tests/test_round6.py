@@ -43,11 +43,12 @@ def test_flat_stake_floors_and_does_not_round_up():
     assert whole_contracts_for_stake(3, 0.60, 100) == 5
     assert whole_contracts_for_stake(0.40, 0.60, 100) == 0
     assert whole_contracts_for_stake(3, 0.60, 0.50) == 0
-    assert settings.flat_stake_dollars == 3
+    assert settings.flat_stake_dollars == 0
+    assert whole_contracts_for_stake(__import__("src.decision_engine.strategy_math", fromlist=["stake_dollars_for_edge"]).stake_dollars_for_edge(100, 10), 0.50, 100) == 20
     assert settings.min_ai_win_prob_buy_side_pct == 70
     assert settings.vibe_live_search_enabled is False
-    assert settings.stop_loss_selling_enabled is False
-    assert settings.daily_xai_budget_usd == 3
+    assert settings.daily_xai_budget_usd == 0
+    assert settings.max_edge_to_buy_pct == 22
 
 
 def test_search_off_never_calls_the_tool():
@@ -91,7 +92,10 @@ def test_daily_budget_counts_denver_spend_and_sets_the_note():
         )
     )
     db.commit()
+    from src.config import settings as app_settings
+    app_settings.daily_xai_budget_usd = 3
     status = budget_status(db, noon)
+    app_settings.daily_xai_budget_usd = 0
     assert status["reached"] is True
     assert status["note"] == "Daily AI budget reached, analysis resumes tomorrow"
     db.close()

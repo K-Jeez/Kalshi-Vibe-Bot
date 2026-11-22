@@ -104,11 +104,10 @@ async def lifespan(app: FastAPI):
             )
 
     logger.info(
-        "Application ready — mode=%s scan_interval=%ds min_edge=%d%% stop_loss_drawdown=%.0f%%",
+        "Application ready — mode=%s scan_interval=%ds min_edge=%d%%",
         TRADE_MODE,
         settings.bot_scan_interval,
         settings.min_edge_to_buy_pct,
-        settings.stop_loss_drawdown_pct * 100.0,
     )
 
     yield
