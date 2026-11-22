@@ -2328,7 +2328,7 @@ async def scan_and_trade(
                                                 market_title=title,
                                                 order=result,
                                                 entry_decision_log_id=decision_log_row_id,
-                                                stop_loss_drawdown_pct_at_entry=float(settings.stop_loss_drawdown_pct),
+                                                stop_loss_drawdown_pct_at_entry=None,
                                                 close_time=contractual_close,
                                                 expected_expiration_time=expected_expiration_iso,
                                             )
