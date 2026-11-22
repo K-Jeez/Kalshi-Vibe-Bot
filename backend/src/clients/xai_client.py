@@ -14,7 +14,8 @@ import asyncio
 import json
 import random
 import re
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
@@ -26,6 +27,92 @@ from src.logger import setup_logging
 from src.reconcile.open_positions import normalize_market_id
 
 _logger = setup_logging("xai_client")
+
+PROMPT_VERSION = "decision-2026-11-22"
+_UNCERTAINTY_LEVELS = {"low", "medium", "high", "abstain"}
+_EMPTY_FACTS = {"", "none", "none found", "n/a", "unknown", "no facts"}
+
+
+# Reasoning tokens count against this cap. 200 was small enough to finish as
+# status "incomplete" with no output_text.
+_LIVE_LOOKUP_MAX_OUTPUT_TOKENS = 1500
+_scan_logged_client_errors: Set[int] = set()
+_scan_client_error: Optional[int] = None
+_lookup_tally = {"facts": 0, "confirmed_empty": 0, "transient": 0, "client_error": 0}
+
+
+def begin_live_lookup_scan() -> None:
+    """Allow one loud client-error log per scan, then try the endpoint again next scan."""
+    global _scan_client_error
+    _scan_logged_client_errors.clear()
+    _scan_client_error = None
+    for key in _lookup_tally:
+        _lookup_tally[key] = 0
+
+
+def note_lookup_outcome(outcome: str) -> None:
+    if outcome in _lookup_tally:
+        _lookup_tally[outcome] += 1
+
+
+def log_live_lookup_summary() -> None:
+    """One line per scan: facts, confirmed-empty, transient, client-error."""
+    if sum(_lookup_tally.values()) <= 0:
+        return
+    _logger.info(
+        "Live lookups this scan: facts=%d confirmed-empty=%d transient=%d client-error=%d",
+        _lookup_tally["facts"],
+        _lookup_tally["confirmed_empty"],
+        _lookup_tally["transient"],
+        _lookup_tally["client_error"],
+    )
+
+
+def live_lookup_tools(today) -> List[dict]:
+    """Web search plus X posts from today UTC through tomorrow UTC. Dates are YYYY-MM-DD.
+
+    Image and video understanding are left off. ``to_date`` is exclusive, so tomorrow
+    covers the rest of today.
+    """
+    start = today.isoformat() if hasattr(today, "isoformat") else str(today)
+    if hasattr(today, "isoformat") and not isinstance(today, str):
+        end = (today + timedelta(days=1)).isoformat()
+    else:
+        end = start
+    return [
+        {"type": "web_search"},
+        {"type": "x_search", "from_date": start, "to_date": end},
+    ]
+
+
+def live_lookup_max_tool_calls(value: int) -> int:
+    return max(1, min(8, int(value)))
+
+
+def classify_live_lookup(data: dict) -> Tuple[str, str, str]:
+    """Return ``(outcome, facts, reason)``.
+
+    Confirmed-empty requires ``status == completed`` and JSON that explicitly
+    has no live data. Incomplete, blank, or unparseable output is transient.
+    """
+    status = str((data or {}).get("status") or "").strip().lower()
+    text = output_text_from_response(data or {})
+    if status != "completed":
+        reason = "incomplete" if status == "incomplete" else "status not completed"
+        details = (data or {}).get("incomplete_details")
+        if isinstance(details, dict) and details.get("reason"):
+            reason = f"{reason} {details.get('reason')}"
+        return "transient", "", reason.strip()
+    if not text:
+        return "transient", "", "empty output"
+    parsed = loads_json_object(text, log_label="live-search")
+    if not isinstance(parsed, dict) or "facts" not in parsed:
+        return "transient", "", "unparseable"
+    raw = parsed.get("facts")
+    facts = "" if raw is None else str(raw).strip()
+    if facts.lower() in _EMPTY_FACTS:
+        return "confirmed_empty", "", ""
+    return "facts", facts[:500], ""
 
 XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_MANAGEMENT_BASE_URL = "https://management-api.x.ai"
@@ -142,6 +229,79 @@ async def _post_xai_chat_with_retries(
     return ("err", last_msg)
 
 
+def _note_live_lookup_client_error(status: int, snippet: str) -> None:
+    """Log a 4xx once per scan. Later lookups in that scan do not call the endpoint."""
+    global _scan_client_error
+    code = int(status)
+    _scan_client_error = code
+    if code in _scan_logged_client_errors:
+        return
+    _scan_logged_client_errors.add(code)
+    _logger.error("xAI live lookup HTTP %s: %s", code, (snippet or "")[:300])
+
+
+def output_text_from_response(data: dict) -> str:
+    """Final assistant text. Tool-call items and citations are not part of the answer."""
+    output = data.get("output") if isinstance(data, dict) else None
+    if isinstance(output, list):
+        texts: List[str] = []
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and content.strip():
+                texts.append(content.strip())
+                continue
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    if part["text"].strip():
+                        texts.append(part["text"].strip())
+        if texts:
+            return texts[-1]
+    direct = data.get("output_text") if isinstance(data, dict) else None
+    return direct.strip() if isinstance(direct, str) else ""
+
+
+async def _post_xai_responses(
+    *,
+    api_key: str,
+    payload: dict,
+    timeout_sec: float,
+    log_label: str,
+) -> Tuple[Any, ...]:
+    """POST ``/responses``. ``("ok", body)``, ``("client", status, snippet)``, or ``("transient", message)``."""
+    url = f"{XAI_BASE_URL}/responses"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    last_msg = "Request failed"
+    http = _xai_http()
+    for attempt in range(2):
+        try:
+            resp = await http.post(url, json=payload, headers=headers, timeout=timeout_sec)
+            if resp.is_success:
+                body = resp.json()
+                return ("ok", body if isinstance(body, dict) else {})
+            code = resp.status_code
+            snippet = (resp.text or "")[:300]
+            if code in _RETRYABLE_XAI_HTTP and attempt == 0:
+                await asyncio.sleep(_xai_retry_delay_seconds(attempt))
+                last_msg = f"HTTP {code}"
+                continue
+            if 400 <= code < 500 and code not in (408, 429):
+                return ("client", code, snippet)
+            return ("transient", f"HTTP {code} {snippet}")
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_msg = "Request timed out" if isinstance(exc, httpx.TimeoutException) else str(exc)
+            if attempt == 0:
+                await asyncio.sleep(_xai_retry_delay_seconds(attempt))
+                continue
+            return ("transient", last_msg)
+        except Exception as exc:
+            return ("transient", str(exc))
+    return ("transient", last_msg)
+
+
 def _xai_money_object_cents(obj: object) -> Optional[float]:
     if not isinstance(obj, dict):
         return None
@@ -213,25 +373,27 @@ async def fetch_xai_prepaid_balance_usd(*, management_api_key: str, team_id: str
         _logger.debug("xAI invoice preview: %s", e)
         return None
 
-SYSTEM_PROMPT = """You advise an automated trader on Kalshi contracts held to resolution (optional stop-loss). Output **JSON only** (no markdown).
+SYSTEM_PROMPT = """You estimate probabilities for Kalshi contracts held until the exchange settles them. Output **JSON only** (no markdown).
 
 Each contract is still a **binary** YES/NO ticket, but some events list **several sibling contracts** where **at most one** YES can win (e.g. soccer **home win / away win / draw**). Then **P(YES)** on one leg is **not** independent of the others: those YES probabilities over the listed outcomes should **partition** ~100% (draw is a first-class outcome; buying NO on \"Team A wins\" is exposure to **both** the other win and a tie).
 
-Goal: estimate **P(YES)** — the probability **this** contract settles YES — using **real-time, horizon-matched** facts and the contract's resolution logic. If unclear or the book/liquidity is poor, output direction SKIP.
+Goal: estimate **P(YES)** — the chance **this contract's YES outcome is what the exchange settles**, not who wins the underlying game when this contract is a spread, total, prop, or other side bet. Use **real-time, horizon-matched** facts and the contract's resolution rule. Do not name a buy side. The server compares P(YES) with the asks and decides.
 
 **Threshold vs exact-hit:** Many Kalshi markets (crypto 15m, index levels, weather highs) use a numeric **threshold**: YES if the settlement index is **above** (or below) a stated level at expiration; NO otherwise. Labels like **"Target Price: $X"** are the comparison level — **not** a requirement that the index land exactly on $X. Never assign near-zero P(YES) on a standard above-threshold leg solely because exact equality is unlikely. Follow the **RESOLUTION** block in the user prompt when present.
 
 **Time / clock:** Use the server **CLOCK** block (UTC now, resolution anchor UTC + US/Eastern, **time until resolution**). Trust it over calendar-date guesses. Example: 10:00 PM EDT on May 17 equals 02:00 UTC on May 18 — at 01:44 UTC May 18 there are **16 minutes left**; do **not** treat the event as past just because the UTC date is May 18. While **time until resolution** shows positive minutes, do not claim the contract already expired.
 
-Use quotes/book **secondarily**: they inform whether a trade is worthwhile; poor liquidity can justify SKIP. Treat market-implied odds as informed sentiment; if your view diverges sharply from the market, explain the wedge in **reasoning** or choose **SKIP**.
+Use quotes/book **secondarily**. Treat market-implied odds as informed sentiment. If your view diverges from the market, explain the wedge in **reasoning**. Do not withhold a side because the gap is large, the book is thin, or a live score is missing. The server applies its own edge, fee, and size gates.
 
 Do not choose a side mainly because it looks cheap/rich. Never recommend the side you think is less likely to win.
 
-**Calibration:** If you report **ai_probability_yes_pct** above **75** while the executable ask on your buy side is **40–65¢**, lower your probability or **SKIP** unless you have strong, specific evidence—the market is pricing meaningful risk. Treat implied edge above **~20 percentage points** as a warning sign of overconfidence unless you can defend it point-by-point; otherwise **SKIP**.
+**Calibration:** Keep **ai_probability_yes_pct** honest. A large gap versus the ask is information for the server, not a reason to refuse a probability.
 
-The server computes edge and full Kelly **order sizing** from your **ai_probability_yes_pct** and executable asks (whole contracts, cash-capped; may use exactly **one** contract when fractional Kelly is below one contract but edge at the ask remains). Keep that field calibrated and honest."""
+The server sizes the order from your **ai_probability_yes_pct** and the executable asks. Keep that field calibrated and honest.
 
-USER_PROMPT_TEMPLATE = """Forecast **which side wins at resolution** for this contract. Recommend **YES** or **NO** only when that matches your genuine outcome view—not because either side looks under/overpriced.
+Prompt version decision-2026-11-22. Always output a calibrated ai_probability_yes_pct. Do not output a side. When extra facts are thin and a book exists, use that market price as your prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for a contract you cannot analyse: unparseable rules, or a contract that has already expired. A short time to close is desirable and is never by itself a reason to abstain. Name the source and as-of time for any fact you use. P(YES) and P(NO) must sum to 100. Put uncertainty in its object. Do not invent a fee or a size; the server does that."""
+
+USER_PROMPT_TEMPLATE = """Estimate **P(YES)**: the chance this contract settles YES under its own rule. If the contract is a spread, total, or player prop, that is not the same as who wins the game. Do not name a buy side.
 
 ═══════════════════════════════════════════════════════
 MARKET: {market_title}
@@ -245,9 +407,9 @@ CLOCK (server-authoritative — use for before/after resolution; do not infer fr
 MARKET QUOTES — **sentiment baseline** (use with fundamentals; do not flip sides on price alone):
   YES: ${yes_price:.3f}  →  ~{yes_pct:.1f}% market-implied for YES
   NO:  ${no_price:.3f}  →  ~{no_pct:.1f}% market-implied for NO
-  If you recommend buying YES while YES is priced **far below** your P(YES)—or buying NO while NO is priced far below your P(NO)—**reasoning** must explain that wedge or choose **SKIP**.
+  If your P(YES) is far from the YES price, **reasoning** must explain the wedge. Still output the side you think wins.
 
-MARKET MICROSTRUCTURE (**secondary** — can justify **SKIP**; never replace outcome logic):
+MARKET MICROSTRUCTURE (**secondary** — never replace outcome logic, and never a reason to omit a side):
   YES bid/ask: {yes_bid_str} / {yes_ask_str} (top ask size: {yes_ask_size_str})
   NO  bid/ask: {no_bid_str} / {no_ask_str} (top ask size: {no_ask_size_str})
   24h Volume: {volume:.0f} contracts
@@ -262,7 +424,7 @@ LOCAL VETTING NOTES:
 
 Use external context **when temporally relevant**: breaking news and calendars inside the horizon, near-term forecasts, flows/sentiment as weak signals, and analog events with **similar time scale** to time-to-close.
 
-In **reasoning**, briefly show: (1) resolution logic; (2) your P(YES) view **for this horizon**; (3) how **Kalshi-implied odds** compare to your probability—if they diverge a lot, say **why** you still buy that side or why you skip; (4) how **liquidity/spread** affected your decision.
+In **reasoning**, briefly show: (1) resolution logic; (2) your P(YES) view **for this horizon**; (3) how **Kalshi-implied odds** compare to your probability—if they diverge, say why; (4) any live score or status you used.
 
 Fill **real_time_context** with drivers credible **now through close** (approximate timing). Omit stale-era summaries that do not bear on this window (or ``None found``).
 
@@ -270,7 +432,6 @@ If recommending YES/NO: include ≥1 **evidence** item that bears on **who wins*
 
 Output strict JSON only:
 {{
-    "direction": "<YES | NO | SKIP>",
     "ai_probability_yes_pct": <integer 0-100 — your subjective probability YES resolves>,
     "reasoning": "<2-5 sentences>",
     "real_time_context": "<short bullet summary or 'None found'>",
@@ -282,8 +443,15 @@ Output strict JSON only:
             "when": "<date or time window>",
             "link": "<optional>"
         }}
-    ]
-}}"""
+    ],
+    "uncertainty": {{
+        "level": "<low | medium | high | abstain>",
+        "missing": ["<fact this horizon needs and you do not have>"],
+        "as_of": "<source time, or empty>"
+    }}
+}}
+
+uncertainty is required. Use abstain only when the contract is unparseable or already expired. Still output a probability. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon."""
 
 # Line-ladder batches: switch to a sibling leg when its P(YES) beats the model pick by at least this much.
 _LADDER_LIKELIHOOD_OVERRIDE_MIN_GAP_PCT = 5
@@ -296,13 +464,13 @@ When **three or more** legs are listed and they are **mutually exclusive** on th
 
 **Numeric stat thresholds** (e.g. different strikeout **lines** like 5+ vs 7+ Ks) are **not** a single-winner partition: **multiple** YES legs can win together if the stat clears multiple hurdles; different **players** in the same game each have **independent** YES/NO settlements—never force their YES probabilities to sum to ~100% across players.
 
-Use book/quotes/volume secondarily; poor liquidity can justify SKIP. If your pick is a market-priced longshot, justify the wedge concretely or SKIP.
+Use book/quotes/volume secondarily. If your pick disagrees with the market, explain the wedge. Do not omit a side because the gap is large or the book is thin.
 
-**Edge discipline:** If your implied edge on the buy side would exceed **~20 points**, treat that as a red flag—re-check calibration or **SKIP** unless evidence is overwhelming. Do not chase “great value” on unlikely outcomes.
+Rules: best_market_id must be one from the list. direction is YES or NO for that contract. The server applies liquidity and edge gates.
 
-Rules: best_market_id must be one from the list (if SKIP, use the first). direction applies to that contract only. Honor BOT FILTER ALIGNMENT if present.
+The server computes edge and quarter-Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks.
 
-The server computes edge and Kelly **order sizing** from **ai_probability_yes_pct** (for the chosen contract) and executable asks (whole contracts, cash-capped; may use exactly **one** contract when fractional Kelly is below one contract but edge at the ask remains)."""
+Prompt version decision-2026-11-22. Always output a calibrated ai_probability_yes_pct for the chosen contract. Do not output a side. When extra facts are thin and that leg has a book, use the book as the prior. Never write 50 only because evidence is thin. Reserve uncertainty.level abstain for unparseable rules or an already expired leg. A short time to close is desirable and is never by itself a reason to abstain. Name sources and as-of times. Probabilities on one contract must be coherent. Put uncertainty in its object. Do not invent fees or size."""
 
 EVENT_BATCH_USER_TEMPLATE = """EVENT (shared): {event_title}
 EVENT_TICKER: {event_ticker}
@@ -318,7 +486,7 @@ NOW (UTC): {now_utc}
 
 Use live/public knowledge where it sharpens the forecast **for this horizon**. Compare strikes only to see **which question** you can forecast best, not which price looks farthest from fair.
 
-For your pick, **real_time_context** should summarize inputs operative **now through that contract’s close**; mention notable **market-structure** factors there if they drove SKIP or a cautious probability.
+For your pick, **real_time_context** should summarize inputs operative **now through that contract’s close**, including any live score or status.
 
 If you recommend a direction: **evidence** must support **outcome** (which side wins); use **key_factors** for liquidity/spread/volume **and**, when relevant, **why Kalshi’s implied odds differ from your view**.
 
@@ -327,7 +495,6 @@ If you recommend a direction: **evidence** must support **outcome** (which side 
 OUTPUT JSON ONLY:
 {{
   "best_market_id": "<exact market_id from the list above>",
-  "direction": "<YES | NO | SKIP>",
   "ai_probability_yes_pct": <integer 0-100 for the CHOSEN contract — P(that contract settles YES) at resolution>,
   "outcome_probability_pct_by_market_id": {{ "<market_id_from_list>": <int 0-100>, "...": <int> }},
   "reasoning": "<2-6 sentences: chosen contract, resolution logic, why the chosen side likely wins—avoid framing around mispricing alone>",
@@ -335,14 +502,21 @@ OUTPUT JSON ONLY:
   "key_factors": ["<factor>", "..."],
   "evidence": [
     {{"claim": "<...>", "source": "<...>", "when": "<...>", "link": "<optional>"}}
-  ]
+  ],
+  "uncertainty": {{
+    "level": "<low | medium | high | abstain>",
+    "missing": ["<fact this horizon needs and you do not have>"],
+    "as_of": "<source time, or empty>"
+  }}
 }}
+
+uncertainty is required. Use abstain only when the chosen contract is unparseable or already expired. Still output a probability. Do not abstain, and do not output 50, only because the book is the best prior or because close is soon.
 
 Include **outcome_probability_pct_by_market_id** when the legs are **mutually exclusive on YES** (only one can settle YES — e.g. home / away / **draw**). Keys must be **exact** ``market_id`` strings from the list; values are your P(YES) for each; they must **sum to 99–101** across **all listed legs** in that case. Omit this field (or use null) only when legs are clearly **not** such a partition (e.g. unrelated props)."""
 
 
 class XAIClient:
-    """xAI Grok client: outcome-first P(YES); microstructure informs SKIP."""
+    """xAI Grok client: outcome-first P(YES). The server applies edge and size gates."""
 
     def __init__(self, api_key: str, model: str = "grok-4.3"):
         self.api_key = api_key
@@ -433,6 +607,7 @@ class XAIClient:
         except Exception:
             pass
 
+        started = time.perf_counter()
         try:
             outcome, resp_or_msg = await _post_xai_chat_with_retries(
                 api_key=self.api_key,
@@ -447,6 +622,7 @@ class XAIClient:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             result = _parse_json(content)
+            attach_model_usage(result, data if isinstance(data, dict) else {}, started=started)
             _logger.debug(
                 "xAI direction=%s ai_yes_pct=%s for '%s'",
                 result.get("direction"),
@@ -457,6 +633,68 @@ class XAIClient:
         except Exception as e:
             _logger.error("xAI error for '%s': %s", market_title[:60], e)
             return _error_response(str(e))
+
+    async def search_event_facts(self, title: str, *, max_tool_calls: int = 3) -> dict:
+        """One Responses API web+X lookup.
+
+        ``facts`` is text when a completed response names live data. ``confirmed_empty``
+        is true only when that response's JSON says nothing was found. Anything
+        incomplete, blank, or unparseable is transient and the model still runs.
+        ``client_error`` is an HTTP 4xx status.
+        """
+        global _scan_client_error
+        if _scan_client_error is not None:
+            note_lookup_outcome("client_error")
+            return {"facts": None, "confirmed_empty": False, "client_error": _scan_client_error, "usage": None}
+        today = datetime.now(timezone.utc).date()
+        payload: dict = {
+            "model": self.model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": 'JSON only: {"facts":"<score, clock, key stats, or empty>"}',
+                },
+                {"role": "user", "content": f"Current score, clock, and key stats: {title}"},
+            ],
+            "tools": live_lookup_tools(today),
+            "max_tool_calls": live_lookup_max_tool_calls(max_tool_calls),
+            "max_output_tokens": _LIVE_LOOKUP_MAX_OUTPUT_TOKENS,
+            "temperature": 0,
+        }
+        try:
+            outcome = await _post_xai_responses(
+                api_key=self.api_key,
+                payload=payload,
+                timeout_sec=_XAI_CHAT_TIMEOUT_SEC,
+                log_label=f"live {title}",
+            )
+        except Exception as exc:
+            _logger.warning("live lookup transient for '%s': %s", title[:80], exc)
+            note_lookup_outcome("transient")
+            return {"facts": None, "confirmed_empty": False, "client_error": None, "usage": None}
+        kind = outcome[0]
+        if kind == "client":
+            status = int(outcome[1])
+            _note_live_lookup_client_error(status, str(outcome[2] if len(outcome) > 2 else ""))
+            note_lookup_outcome("client_error")
+            return {"facts": None, "confirmed_empty": False, "client_error": status, "usage": None}
+        if kind != "ok":
+            _logger.warning("live lookup transient for '%s': %s", title[:80], outcome[-1])
+            note_lookup_outcome("transient")
+            return {"facts": None, "confirmed_empty": False, "client_error": None, "usage": None}
+        data = outcome[1] if isinstance(outcome[1], dict) else {}
+        recorded: dict = {}
+        attach_model_usage(recorded, data, started=time.perf_counter())
+        label, facts, reason = classify_live_lookup(data)
+        if label == "transient":
+            _logger.warning("live lookup transient for '%s': %s", title[:80], reason or "unusable")
+        note_lookup_outcome(label)
+        return {
+            "facts": facts or None,
+            "confirmed_empty": label == "confirmed_empty",
+            "client_error": None,
+            "usage": recorded.get("usage"),
+        }
 
     async def analyze_event_best_trade(
         self,
@@ -486,7 +724,7 @@ class XAIClient:
             batch_config_block = (
                 "BOT FILTER ALIGNMENT (same thresholds the bot's scan uses; your best pick must satisfy these for your direction):\n"
                 + "\n".join(lines_blk)
-                + "\n\nIf no sibling meets both applicable lines for a directional trade, output direction SKIP.\n\n"
+                + "\n\nStill name the most likely side. The server drops a leg that fails these filters.\n\n"
             )
         else:
             batch_config_block = ""
@@ -523,6 +761,7 @@ class XAIClient:
         }
 
         fallback_best = str(legs[0].get("market_id") or "")
+        started = time.perf_counter()
         try:
             outcome, resp_or_msg = await _post_xai_chat_with_retries(
                 api_key=self.api_key,
@@ -537,6 +776,7 @@ class XAIClient:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             parsed = _parse_event_batch_json(content, allowed_ids=allowed, ladder_stat_line_batch=ladder)
+            attach_model_usage(parsed, data if isinstance(data, dict) else {}, started=started)
             _logger.debug(
                 "xAI event batch %s best=%s dir=%s",
                 event_ticker,
@@ -745,12 +985,9 @@ def _parse_event_batch_json(
 
     raw_best = str(result.get("best_market_id") or "").strip()
     best_norm = normalize_market_id(raw_best).upper()
-    if best_norm and best_norm in allowed_ids:
-        best_out = best_norm
-    elif allowed_ids:
-        best_out = sorted(allowed_ids)[0]
-    else:
-        best_out = ""
+    id_ok = bool(best_norm) and best_norm in allowed_ids
+    # An id that is missing or not in this batch must not be swapped for another leg.
+    best_out = best_norm if id_ok else ""
 
     direction = str(result.get("direction", "SKIP") or "SKIP").strip().upper()
     if direction not in ("YES", "NO", "SKIP"):
@@ -762,10 +999,12 @@ def _parse_event_batch_json(
         else:
             direction = "SKIP"
 
-    if direction in ("YES", "NO") and best_out and best_out not in allowed_ids:
+    market_id_rejected = direction in ("YES", "NO") and not id_ok
+    if market_id_rejected:
         direction = "SKIP"
 
-    ai_yes = _extract_ai_probability_yes_pct(result)
+    raw_probability = result.get("ai_probability_yes_pct", result.get("confidence_pct"))
+    ai_yes = None if raw_probability is None else _extract_ai_probability_yes_pct(result)
 
     omap = _normalize_outcome_probability_pct_by_market_id(
         result.get("outcome_probability_pct_by_market_id"),
@@ -795,20 +1034,77 @@ def _parse_event_batch_json(
         key_factors = []
     key_factors = [str(f) for f in key_factors[:5]]
 
+    reasoning = str(result.get("reasoning", "")).strip()
+    uncertainty = uncertainty_from_result(result)
+    if market_id_rejected:
+        reasoning = (
+            f"{reasoning} [Rejected: best_market_id is not one of the listed contracts; no order.]"
+        ).strip()
+
     out = {
         "best_market_id": best_out,
+        "market_id_rejected": market_id_rejected,
         "direction": direction,
         "ai_probability_yes_pct": ai_yes,
-        "reasoning": str(result.get("reasoning", "")).strip(),
+        "reasoning": reasoning,
         "real_time_context": str(result.get("real_time_context", "")).strip(),
         "key_factors": key_factors,
         "evidence": result.get("evidence", []) if isinstance(result.get("evidence", []), list) else [],
+        "uncertainty": uncertainty,
     }
     if omap:
         out["outcome_probability_pct_by_market_id"] = omap
+    if market_id_rejected:
+        out["batch_market_id_rejected"] = True
+        out["rejected_market_id"] = best_norm or raw_best
     if ladder_stat_line_batch:
         out = _prioritize_line_ladder_likelihood(out, allowed_ids=allowed_ids)
     return out
+
+
+def normalize_uncertainty(raw: object) -> dict:
+    """Validate a structured uncertainty object. Missing stays missing. Invalid is not guessed."""
+    if not isinstance(raw, dict):
+        return {"status": "invalid"}
+    level = str(raw.get("level") or "").strip().lower()
+    if level not in _UNCERTAINTY_LEVELS:
+        return {"status": "invalid"}
+    missing = raw.get("missing", [])
+    if missing is None:
+        missing = []
+    if not isinstance(missing, list) or any(not isinstance(item, str) for item in missing):
+        return {"status": "invalid"}
+    as_of = raw.get("as_of")
+    if as_of is not None and not isinstance(as_of, str):
+        return {"status": "invalid"}
+    out = {
+        "status": "present",
+        "level": level,
+        "missing": [item.strip()[:80] for item in missing if item.strip()][:8],
+    }
+    if isinstance(as_of, str) and as_of.strip():
+        out["as_of"] = as_of.strip()[:40]
+    return out
+
+
+def uncertainty_from_result(result: dict) -> dict:
+    if "uncertainty" not in result:
+        return {"status": "missing"}
+    return normalize_uncertainty(result.get("uncertainty"))
+
+
+def attach_model_usage(result: dict, data: dict, *, started: float) -> None:
+    """Attach token counts and cost labels. Does not copy prompt or completion text."""
+    from src.model_usage import estimate_with_tools, prompt_fingerprint, usage_from_response
+
+    usage = usage_from_response(data if isinstance(data, dict) else {})
+    usage["estimated_usd"] = estimate_with_tools(usage)
+    usage["duration_sec"] = round(max(0.0, time.perf_counter() - float(started)), 3)
+    usage["estimate_is_not_a_bill"] = usage.get("actual_usd") is None
+    usage["cost_label"] = "provider_reported" if usage.get("actual_usd") is not None else "list_price_estimate"
+    result["usage"] = usage
+    result["prompt_version"] = PROMPT_VERSION
+    result["prompt_fingerprint"] = prompt_fingerprint(PROMPT_VERSION)
 
 
 def _parse_json(content: str) -> dict:
@@ -828,7 +1124,10 @@ def _parse_json(content: str) -> dict:
         else:
             direction = "SKIP"
 
-    ai_yes = _extract_ai_probability_yes_pct(result)
+    raw_probability = result.get("ai_probability_yes_pct", result.get("confidence_pct"))
+    ai_yes = None if raw_probability is None else _extract_ai_probability_yes_pct(result)
+    uncertainty = uncertainty_from_result(result)
+    # Abstain is a confidence flag. It does not drop the side or replace a stated probability.
 
     key_factors = result.get("key_factors", [])
     if not isinstance(key_factors, list):
@@ -842,6 +1141,7 @@ def _parse_json(content: str) -> dict:
         "real_time_context": str(result.get("real_time_context", "")).strip(),
         "key_factors": key_factors,
         "evidence": result.get("evidence", []) if isinstance(result.get("evidence", []), list) else [],
+        "uncertainty": uncertainty,
     }
 
 

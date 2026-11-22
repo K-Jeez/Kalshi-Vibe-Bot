@@ -5,7 +5,8 @@ The trading loop starts inside the FastAPI lifespan (src/main.py).
 
 Run from backend/: python run.py
 
-Bot state (play/pause/stop) is controlled via the dashboard UI or POST /bot/state.
+Bot state (play/pause/stop) is controlled via the dashboard UI, POST /bot/state, or vibe.bat bot play|pause|stop.
+Launching this process does not press Play. A restart forces Stop in the app lifespan.
 """
 
 if __name__ == "__main__":

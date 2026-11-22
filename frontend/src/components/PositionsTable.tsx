@@ -10,8 +10,6 @@ import { formatContractPriceCents, positionCashInvestedUsd } from '../utils/posi
 import { presentOpenPositionRow } from '../utils/positionRowPresentation'
 
 /** Absolute gap below stop threshold (fraction) before showing amber warning. */
-const STOP_LOSS_WARN_BELOW_THRESHOLD = 0.05
-
 export type PositionSortKey =
   | 'opened_at'
   | 'market'
@@ -70,64 +68,6 @@ function SortHeader({
   )
 }
 
-export type StopLossDrawdownUi = { pct: number; level: 'warning' | 'trigger'; thresholdPct: number }
-
-function entryPricePerContractForStop(pos: Position): number | null {
-  let entryPx = Number(pos.entry_price)
-  if (!Number.isFinite(entryPx) || entryPx <= 1e-12) {
-    const q = Math.max(0, Math.round(Number(pos.quantity) || 0))
-    const ec = Number(pos.entry_cost)
-    if (q <= 0 || !Number.isFinite(ec) || ec <= 1e-12) return null
-    entryPx = ec / q
-  }
-  if (!Number.isFinite(entryPx) || entryPx <= 1e-12) return null
-  return Math.max(0, Math.min(1, entryPx))
-}
-
-/**
- * Mark drawdown: ``(entry − Est. Value) / entry`` per contract — same rule as the bot
- * (``stop_loss_triggered_from_position``), fees excluded. Close column shows this % vs Settings threshold.
- * - ``trigger``: at or past stop threshold (red).
- * - ``warning``: within 5 percentage points of threshold but not yet there (yellow).
- * Null when still in grace, Est. Value unknown, unusable entry, or drawdown is below the warning band.
- */
-export function stopLossDrawdownDisplay(pos: Position, nowMs: number): StopLossDrawdownUi | null {
-  const graceMin = Number(pos.exit_grace_minutes ?? 10)
-  const opened = Date.parse(pos.opened_at)
-  if (!Number.isFinite(opened)) return null
-  const ageMin = (nowMs - opened) / 60_000
-  if (!Number.isFinite(ageMin) || ageMin < graceMin) return null
-
-  const slRaw =
-    pos.stop_loss_drawdown_effective ??
-    pos.stop_loss_drawdown_pct_at_entry
-  const sl = Number(slRaw)
-  if (!Number.isFinite(sl) || sl <= 0) return null
-  const thresholdPct = Math.round(sl * 100)
-
-  const entryPx = entryPricePerContractForStop(pos)
-  if (entryPx === null) return null
-
-  const estRaw = pos.estimated_price
-  if (estRaw == null || !Number.isFinite(Number(estRaw))) return null
-  let estPx = Number(estRaw)
-  if (!Number.isFinite(estPx)) return null
-  estPx = Math.max(0, Math.min(1, estPx))
-
-  const dd = (entryPx - estPx) / entryPx
-  if (!Number.isFinite(dd)) return null
-
-  const pct = Math.round(dd * 100)
-  if (dd >= sl - 1e-9) {
-    return { pct, level: 'trigger', thresholdPct }
-  }
-  const warnFloor = Math.max(0, sl - STOP_LOSS_WARN_BELOW_THRESHOLD)
-  if (dd >= warnFloor - 1e-9) {
-    return { pct, level: 'warning', thresholdPct }
-  }
-  return null
-}
-
 export interface PositionsTableProps {
   analyses: DecisionAnalysis[]
   expandedDetailKey: string | null
@@ -140,14 +80,12 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
   onToggleDetail,
 }) => {
   const {
-    portfolio,
     positions: cachedPositions,
     setPositions: setCachedPositions,
     setPortfolio,
     positionAnalysesByMarketId,
     setPositionAnalysesByMarketId,
   } = useDashboardDataCache()
-  const stopLossAutoSellsEnabled = portfolio?.stop_loss_selling_enabled === true
   const loading = cachedPositions === null
   const [closing, setClosing] = useState<string | null>(null)
   /** After a failed manual sell, show RETRY instead of SELL until success or row disappears. */
@@ -651,29 +589,6 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                                 {formatContractPriceCents(Number(pos.bid_price ?? pos.current_price))}
                               </span>
                             </span>
-                            {stopLossAutoSellsEnabled
-                              ? (() => {
-                                  const slUi = stopLossDrawdownDisplay(pos, nowMs)
-                                  if (slUi === null) return null
-                                  const lim = slUi.thresholdPct
-                                  const color =
-                                    slUi.level === 'trigger'
-                                      ? 'text-red-400'
-                                      : 'text-amber-400'
-                                  const title =
-                                    slUi.level === 'trigger'
-                                      ? `(Entry cash basis − Est. Value) / basis (rounded). At or above your stop setting (${lim}%); bot attempts exit after grace when not in Stop mode.`
-                                      : `Value drawdown ${slUi.pct}% (rounded; same basis vs Est. Value as the bot). Within 5 percentage points of your ${lim}% stop — not yet at threshold.`
-                                  return (
-                                    <span
-                                      className={`text-[10px] font-semibold tabular-nums leading-tight whitespace-nowrap text-center w-full ${color}`}
-                                      title={title}
-                                    >
-                                      Stop Loss: {slUi.pct}%
-                                    </span>
-                                  )
-                                })()
-                              : null}
                           </div>
                         ) : null}
                       </div>

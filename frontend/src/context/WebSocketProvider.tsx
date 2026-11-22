@@ -8,7 +8,15 @@ import React, {
   useState,
 } from 'react'
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://localhost:8000/ws'
+function wsOrigin(): string {
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//${window.location.hostname}:8000/ws`
+  }
+  return 'ws://127.0.0.1:8000/ws'
+}
+
+const WS_URL = import.meta.env.VITE_WS_URL || wsOrigin()
 
 export interface WebSocketUpdate {
   type: string

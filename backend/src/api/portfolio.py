@@ -113,10 +113,6 @@ def _serialize_open_positions(positions: List[Position]) -> List[Dict[str, Any]]
             "resolution_kalshi_payout_complete": resolution_kalshi_payout_complete_display(p),
             "kalshi_market_status": getattr(p, "kalshi_market_status", None),
             "kalshi_market_result": getattr(p, "kalshi_market_result", None),
-            # Stop-loss preview (dashboard): same ``(entry − est)/entry`` rule as ``stop_loss_triggered_from_position``.
-            "stop_loss_drawdown_pct_at_entry": getattr(p, "stop_loss_drawdown_pct_at_entry", None),
-            "stop_loss_drawdown_effective": float(getattr(settings, "stop_loss_drawdown_pct", 0.0)),
-            "exit_grace_minutes": float(getattr(settings, "exit_grace_minutes", 10.0)),
             "entry_decision_log_id": getattr(p, "entry_decision_log_id", None),
         }
         for p in positions
@@ -685,7 +681,6 @@ async def _build_portfolio_payload(db: Session) -> Dict[str, Any]:
         "order_search_active": bool(scan_active),
         "order_search_label": str(scan_label),
         "ai_provider": "xai",
-        "stop_loss_selling_enabled": bool(getattr(settings, "stop_loss_selling_enabled", False)),
         "kalshi_resting_order_count": len(resting_orders),
         "resting_buy_collateral_estimate_usd": round(resting_buy_reserve, 4),
         "kalshi_resting_orders_preview": _kalshi_resting_preview(resting_orders),
@@ -1069,10 +1064,39 @@ async def close_position_manual(position_id: str, db: Session = Depends(get_db))
             kalshi_order_filled_contracts,
         )
 
+        from src.activity_log import (
+            fresh_unresolved_order_hold,
+            make_order_submit_gate,
+            record_order_ack,
+        )
+
+        sell_hold = fresh_unresolved_order_hold(pos.market_id, "sell")
+        if sell_hold:
+            raise HTTPException(status_code=409, detail=sell_hold)
         sell_result = await kc.place_sell_market(
             pos.market_id,
             pos.side,
             pos.quantity,
+            before_submit=make_order_submit_gate(
+                {
+                    "market_id": pos.market_id,
+                    "side": pos.side,
+                    "action": "sell",
+                    "quantity": int(pos.quantity or 0),
+                    "detail": "manual close",
+                }
+            ),
+        )
+        record_order_ack(
+            sell_result,
+            {
+                "market_id": pos.market_id,
+                "side": pos.side,
+                "action": "sell",
+                "quantity": int(pos.quantity or 0),
+                "client_order_id": sell_result.get("client_order_id"),
+                "detail": "manual close",
+            },
         )
         floor_d = float(pos.current_price or 0.01)
         if sell_result.get("skipped_dead_book"):
@@ -1168,8 +1192,9 @@ async def close_position_manual(position_id: str, db: Session = Depends(get_db))
         pos.dead_market = False
 
         synced = await sync_open_position_qty_cost_from_kalshi(kc, pos, db=db)
-        if synced:
-            if int(pos.quantity or 0) <= 0:
+        full_exit = pre_qty > 0 and int(sold_qty_trade) >= int(pre_qty)
+        if synced or full_exit:
+            if int(pos.quantity or 0) <= 0 or full_exit:
                 pos.quantity = int(sold_qty_trade)
                 if pre_entry_price > 1e-12:
                     pos.entry_price = pre_entry_price

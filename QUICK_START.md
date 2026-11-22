@@ -67,9 +67,13 @@ npm install
 cd ..
 ```
 
-If the dashboard runs on a **non-default host or port**, create `frontend/.env` with `VITE_API_BASE_URL` and `VITE_WS_URL` pointing at your backend. Optionally add **`CORS_ORIGINS`** to `backend/.env` (comma-separated origins; default is localhost:3000). Vite dev uses **port 3000**, not 5173.
+The dashboard listens on the LAN at port 3000 and calls the API on the same host, port 8000. From a phone on the home network, open `http://<PC LAN IP>:3000`. Set `VITE_API_BASE_URL` only if the API is not on port 8000 of that same host. Keep **`ENABLE_DEBUG_RAW_KALSHI=false`** unless you need the `GET /debug/raw` Kalshi debug route.
 
-For a single-machine setup, **`HOST=127.0.0.1`** in `backend/.env` avoids binding the API on all interfaces. Keep **`ENABLE_DEBUG_RAW_KALSHI=false`** unless you need the `GET /debug/raw` Kalshi debug route.
+`HOST` defaults to **`0.0.0.0`**. This computer and private LAN addresses can press Play. A public address still needs `LOCAL_API_TOKEN`. Allow the Windows private firewall profile for ports 3000 and 8000:
+
+```powershell
+New-NetFirewallRule -DisplayName "Kalshi Vibe Bot LAN" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3000,8000 -Profile Private
+```
 
 ---
 
@@ -79,12 +83,12 @@ From the repo root:
 
 1. Double‑click **`start.bat`** (Windows), **or** run it from a terminal in this folder.
 
-That starts the backend and frontend and should open the dashboard in your browser.
+That starts the backend and frontend and should open the dashboard in your browser. The trading state stays **Stop** until you press Play.
 
 - If it doesn’t open automatically, go to **http://localhost:3000**
 - The API lives at **http://localhost:8000**
 
-To stop everything, run **`stop.bat`** (or close the windows it opened).
+To stop the processes **this control started**, run **`stop.bat`** or **`vibe.bat shutdown`**. That does not cancel resting Kalshi orders. Command-line Play, Pause, and Stop, and the difference between closing the app and changing trading state, are in [DEV_CONTROL.md](DEV_CONTROL.md).
 
 ---
 
@@ -93,7 +97,7 @@ To stop everything, run **`stop.bat`** (or close the windows it opened).
 1. Confirm Kalshi keys and balance look right on the dashboard before **Play**.
 2. Set the bot to **Play** when you want it to scan and trade automatically; **Pause** or **Stop** when you want it idle.
 
-All trading is **real money** on Kalshi (live-only): IOC limit **buys** at ask (+ slippage); **exits** use **stop-loss only** after a short grace period (**open cash basis** / Entry column vs dashboard **Est. Value** × quantity). Strategy defaults come from **`backend/.env`** and **`config.py`** (e.g. min edge **5**, min AI win **60%**, stop-loss **80%** drawdown). **Settings** adjusts those knobs in **`tuning_state`** (applied immediately) and shows the running **`XAI_MODEL`**. Market analysis is **xAI Grok** only (`XAI_API_KEY` / `XAI_MODEL` in `.env`; default **`grok-4.3`**). Additional caps (max edge, max AI %, Kelly limit, sports rules) are automatic — see [README.md](README.md).
+All trading is **real money** on Kalshi. Buys are fill-or-kill. Positions stay open until Kalshi settles them. Defaults: edge **4**, model confidence **70%**, price **50–85¢**, stake is the edge as a percent of cash (`FLAT_STAKE_DOLLARS=0`), live search **off**, daily AI budget **off**. See [README.md](README.md).
 
 3. If you trade outside the bot or restart after downtime, open **Settings** and use **Reconcile with Kalshi** so open quantities, invested/fees basis, buy-order entry economics, unrealized marks, and closed P&L stay aligned with Kalshi (see README ``POST /portfolio/live/reconcile``). For a CLI-only open-leg refresh, use ``python scripts/refresh_open_live_positions_from_kalshi.py`` from ``backend/``.
 

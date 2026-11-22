@@ -1,6 +1,6 @@
 {
   "name": "kalshi-trader-ui",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Web UI for Kalshi Vibe Bot (live Kalshi + xAI Grok)",
   "type": "module",
   "engines": {

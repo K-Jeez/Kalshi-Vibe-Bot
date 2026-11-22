@@ -95,10 +95,14 @@ def test_get_portfolio_429_then_success(monkeypatch):
         c = _client()
         c._PORTFOLIO_BALANCE_429_MAX_ATTEMPTS = 2
         c._http_get_signed = AsyncMock(side_effect=[_429_response(), _ok_response(250, 0)])
-        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        sleep = AsyncMock()
+        monkeypatch.setattr(asyncio, "sleep", sleep)
         out = await c.get_portfolio()
         assert out["cash"] == pytest.approx(2.50)
         assert c._http_get_signed.await_count == 2
+        # Base delay is 0.55s on the first retry, plus a small jitter, and never above 2s.
+        sleep.assert_awaited_once()
+        assert 0.55 <= sleep.await_args.args[0] <= 2
 
     asyncio.run(_run())
 

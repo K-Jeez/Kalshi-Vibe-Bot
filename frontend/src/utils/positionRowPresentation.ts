@@ -3,7 +3,7 @@ import {
   formatTimeLeft,
   isCloseTimePassed,
   positionEndsAtIso,
-  tradeableExpectedExpirationPassed,
+  tradingClosesSource,
 } from '../formatTimeLeft'
 
 export type PositionLifecyclePhase =
@@ -66,7 +66,7 @@ export interface PositionRowPresentation {
 export function presentOpenPositionRow(pos: Position, nowMs: number): PositionRowPresentation {
   const endsAtIso = positionEndsAtIso(pos, nowMs)
   const eventClockEnded = isCloseTimePassed(endsAtIso, nowMs)
-  const delayedSchedule = tradeableExpectedExpirationPassed(pos, nowMs)
+  const timeSource = tradingClosesSource(pos)
   const outcomePending = !!pos.resolution_outcome_pending
   const settlementPending = !!pos.resolution_awaiting_payout
   const payoutComplete = !!pos.resolution_kalshi_payout_complete
@@ -113,22 +113,25 @@ export function presentOpenPositionRow(pos: Position, nowMs: number): PositionRo
   let endsSecondary: string | undefined
   let endsTitle: string
 
+  const expirationHint = (pos.expected_expiration_time ?? '').trim()
+  const closeHintTime = (pos.close_time ?? '').trim()
+  const showExpirationHint = Boolean(expirationHint && expirationHint !== closeHintTime)
   if (!eventClockEnded) {
-    if (delayedSchedule) {
-      endsPrimary = 'Delayed'
-      endsSecondary = deadWhileOpen ? 'Illiquid' : undefined
-      endsTitle = deadWhileOpen
-        ? 'Listed expected end has passed — no bid on your side; exits wait until bids return or you hold to resolution.'
-        : 'Listed expected end time has passed while the contract is still open; Kalshi will update status or result as the market resolves.'
-    } else {
-      endsPrimary = formatTimeLeft(endsAtIso, nowMs)
-      endsSecondary = deadWhileOpen ? 'Illiquid' : undefined
-      endsTitle = deadWhileOpen
-        ? 'Event not over yet — no bid on your side; exits wait until bids return or you hold to resolution.'
-        : `Time until display horizon (${endsAtIso ?? 'unknown'})`
-    }
+    endsPrimary = `Trading closes ${formatTimeLeft(endsAtIso, nowMs)}`
+    endsSecondary = showExpirationHint
+      ? `Expected result ${formatTimeLeft(expirationHint, nowMs)}`
+      : deadWhileOpen
+        ? 'Illiquid'
+        : undefined
+    endsTitle = deadWhileOpen
+      ? `Trading closes from Kalshi ${timeSource}. No bid on your side yet.`
+      : `Trading closes from Kalshi ${timeSource}${endsAtIso ? ` (${endsAtIso})` : ''}.`
+  } else if (!postCloseOutcomeKnown) {
+    endsPrimary = 'Awaiting result'
+    endsSecondary = showExpirationHint ? 'Expected result passed' : undefined
+    endsTitle = `Trading has closed (Kalshi ${timeSource}). Waiting for the official result.`
   } else if (outcomePending) {
-    endsPrimary = 'Ended'
+    endsPrimary = 'Awaiting result'
     endsSecondary = 'Outcome pending'
     endsTitle =
       'Kalshi status "closed": trading has stopped; the official yes/no outcome is not posted yet for this contract.'

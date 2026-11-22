@@ -6,12 +6,9 @@ import { useWebSocket } from '../hooks/useWebSocket'
 export const Settings: React.FC = () => {
   const [cur, setCur] = useState<TuningSnapshot | null>(null)
   const [minEdgeDraft, setMinEdgeDraft] = useState('')
-  const [stopLossDraft, setStopLossDraft] = useState('')
   const [minAiWinDraft, setMinAiWinDraft] = useState('')
-  const [maxOpenPositionsDraft, setMaxOpenPositionsDraft] = useState('')
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [resettingConfigDefaults, setResettingConfigDefaults] = useState(false)
-  const [toggleSavingStopLoss, setToggleSavingStopLoss] = useState(false)
   const [resettingHistory, setResettingHistory] = useState(false)
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [kalshiReconciling, setKalshiReconciling] = useState(false)
@@ -35,10 +32,8 @@ export const Settings: React.FC = () => {
 
   useEffect(() => {
     if (!cur) return
-    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 5))))
-    setStopLossDraft(String(Math.round(Number(cur.stop_loss_drawdown_pct ?? 0.8) * 100)))
-    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 60))))
-    setMaxOpenPositionsDraft(String(Math.round(Number(cur.max_open_positions ?? 30))))
+    setMinEdgeDraft(String(Math.round(Number(cur.min_edge_to_buy_pct ?? 4))))
+    setMinAiWinDraft(String(Math.round(Number(cur.min_ai_win_prob_buy_side_pct ?? 70))))
   }, [cur])
 
   useEffect(() => {
@@ -54,27 +49,16 @@ export const Settings: React.FC = () => {
 
   const saveStrategyKnobs = async () => {
     const me = Number(minEdgeDraft)
-    const sl = Number(stopLossDraft)
     const ma = Number(minAiWinDraft)
-    const mx = Number(maxOpenPositionsDraft)
-    if (!Number.isFinite(me) || !Number.isFinite(sl) || !Number.isFinite(ma) || !Number.isFinite(mx)) {
-      alert(
-        'Enter whole numbers for minimum edge, stop-loss drawdown, min AI win % on the buy side, and max open positions.',
-      )
-      return
-    }
-    const mxI = Math.round(mx)
-    if (mxI < 1 || mxI > 500) {
-      alert('Max open positions must be between 1 and 500.')
+    if (!Number.isFinite(me) || !Number.isFinite(ma)) {
+      alert('Enter whole numbers for the minimum edge and the model confidence.')
       return
     }
     setSavingStrategy(true)
     try {
       const next = await apiClient.saveStrategyKnobs({
         min_edge_to_buy_pct: Math.round(me),
-        stop_loss_drawdown_pct: sl / 100,
         min_ai_win_prob_buy_side_pct: Math.round(ma),
-        max_open_positions: mxI,
       })
       setCur(next)
     } catch (e: unknown) {
@@ -105,20 +89,6 @@ export const Settings: React.FC = () => {
       setKalshiReconcileMsg(typeof msg === 'string' ? msg : 'Reconcile failed (check backend logs).')
     } finally {
       setKalshiReconciling(false)
-    }
-  }
-
-  const persistStopLossToggle = async (enabled: boolean) => {
-    if (!cur) return
-    setToggleSavingStopLoss(true)
-    try {
-      const next = await apiClient.setStopLossSellingEnabled(enabled)
-      setCur(next)
-    } catch (e) {
-      console.error('Stop-loss toggle error:', e)
-      alert('Failed to update stop-loss setting.')
-    } finally {
-      setToggleSavingStopLoss(false)
     }
   }
 
@@ -228,14 +198,9 @@ export const Settings: React.FC = () => {
         <div className="ui-surface-sm p-5 space-y-4">
           <h2 className="text-base font-semibold text-white">Trading strategy</h2>
           <p className="text-xs text-white/90">
-            Position size uses <strong className="text-white">full Kelly</strong> from Grok&apos;s P(YES) and executable
-            asks, capped by deployable cash and an automatic <strong className="text-white">5% of deployable cash</strong> maximum premium per entry.
-            Buys require your minimum edge and AI win % on the purchased side, plus built-in guardrails you do not configure:
-            edge capped at <strong className="text-white">22 pts</strong>, AI win % capped at <strong className="text-white">90%</strong> (stricter on mid-priced picks),
-            no entries below <strong className="text-white">26¢</strong>, and a calibration block on mid-priced “very confident” picks.
-            Sports markets use a higher volume floor at scan time and +5 minutes exit grace. Stop-loss compares{' '}
-            <strong className="text-white">entry price</strong> to <strong className="text-white">Est. Value</strong> per contract after grace
-            (sports get +5 minutes). Contrarian longshots still get a fixed stricter edge and AI floor in code.
+            Each buy spends the edge, in points, as a percent of available cash (a 10-point edge uses 10% of cash), rounded down to whole contracts. Set <code className="text-cyan-200/90">FLAT_STAKE_DOLLARS</code> above 0 to use a fixed dollar amount instead. If that amount cannot buy one contract, the bot skips.
+            Buys need your minimum edge and at least 70% model confidence. The price must be between 50¢ and 85¢. Edges above <code className="text-cyan-200/90">MAX_EDGE_TO_BUY_PCT</code> (22, or 0 to turn that cap off) are skipped.
+            The bot holds until Kalshi settles the market. Live web search is off unless <code className="text-cyan-200/90">VIBE_LIVE_SEARCH_ENABLED</code> is true. Analysis stops for the Denver day when recorded AI spend hits <code className="text-cyan-200/90">DAILY_XAI_BUDGET_USD</code> (0 means no cap).
           </p>
           <p className="text-xs text-amber-200/90 border border-amber-500/25 rounded-lg px-3 py-2 bg-amber-500/10">
             Numbers here are stored in the <strong className="text-white">database</strong>, not read
@@ -264,37 +229,13 @@ export const Settings: React.FC = () => {
                 </label>
                 <label className="flex min-h-0 flex-col gap-1">
                   <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Min AI win % on buy side (51–99)
+                    Minimum model confidence on the bought side (51–99)
                   </span>
                   <input
                     type="text"
                     inputMode="numeric"
                     value={minAiWinDraft}
                     onChange={(e) => setMinAiWinDraft(e.target.value)}
-                    className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                  />
-                </label>
-                <label className="flex min-h-0 flex-col gap-1">
-                  <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Stop-loss drawdown (% below entry vs Est. Value)
-                  </span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={stopLossDraft}
-                    onChange={(e) => setStopLossDraft(e.target.value)}
-                    className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                  />
-                </label>
-                <label className="flex min-h-0 flex-col gap-1">
-                  <span className="block min-h-[3rem] text-xs leading-snug text-white/80">
-                    Max open positions (1–500)
-                  </span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={maxOpenPositionsDraft}
-                    onChange={(e) => setMaxOpenPositionsDraft(e.target.value)}
                     className="w-full bg-primary/50 border border-brand-muted/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40"
                   />
                 </label>
@@ -309,32 +250,12 @@ export const Settings: React.FC = () => {
                 {savingStrategy ? 'Saving…' : 'Save strategy settings'}
               </button>
               <p className="text-[11px] text-white/70">
-                Saved values apply immediately to the running bot. To match <code className="text-cyan-200/90">backend/.env</code> defaults
-                (including <code className="text-cyan-200/90">BOT_MAX_OPEN_POSITIONS</code>,{' '}
-                <code className="text-cyan-200/90">STOP_LOSS_DRAWDOWN_PCT</code>, or <code className="text-cyan-200/90">MIN_AI_WIN_PROB_BUY_SIDE_PCT</code>), use{' '}
-                <strong className="text-white">Restore configuration defaults</strong> — editing the file alone does not overwrite what is already in the database.
+                Saved values apply immediately. Restore configuration defaults reloads the edge and the 70% confidence floor from <code className="text-cyan-200/90">backend/.env</code>. Editing the file alone does not overwrite the database.
               </p>
-
-              <div className="pt-3 border-t border-brand-muted/25 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium text-white">Stop-loss auto sells</p>
-                  <p className="text-xs text-white/80 mt-0.5">
-                    When enabled, the bot can exit when Est. Value has fallen far enough below your entry price (manual sells always work).
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  disabled={toggleSavingStopLoss}
-                  onClick={() => void persistStopLossToggle(!(cur.stop_loss_selling_enabled === true))}
-                  className={`shrink-0 px-3 py-2 rounded-lg text-xs font-semibold border transition ${
-                    cur.stop_loss_selling_enabled === true
-                      ? 'bg-emerald-500/15 text-emerald-200 border-emerald-500/35'
-                      : 'bg-brand-muted/18 text-white border-brand-muted/35'
-                  } ${toggleSavingStopLoss ? 'opacity-50' : ''}`}
-                >
-                  {toggleSavingStopLoss ? 'Saving…' : cur.stop_loss_selling_enabled === true ? 'Enabled' : 'Disabled'}
-                </button>
-              </div>
+              <p className="text-[11px] text-white/70">
+                {cur.config_source_note ||
+                  'The numbers on this screen come from the database. The .env file applies when that row is missing, or after Restore configuration defaults.'}
+              </p>
 
               <button
                 type="button"

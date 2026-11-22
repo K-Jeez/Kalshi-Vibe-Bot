@@ -453,7 +453,7 @@ export const ClosedPositionsTable: React.FC<ClosedPositionsTableProps> = ({
                     <td className="px-5 py-4 text-right text-xs">
                       {(p.exit_reason || '').toLowerCase() === 'stop_loss' ? (
                         <div className="flex flex-col items-end gap-0.5">
-                          <span className="text-red-400 font-semibold leading-tight">Stop loss</span>
+                          <span className="text-white/80 font-semibold leading-tight" title="Sold before Kalshi settled this market">Sold early</span>
                           <span className="text-white">{formatUtcIsoLocal(p.closed_at)}</span>
                         </div>
                       ) : (

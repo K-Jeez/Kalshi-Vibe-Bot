@@ -17,6 +17,6 @@ export default defineConfig({
       },
     },
   },
-  // Dev UI port 3000; API is separate (default http://localhost:8000 via VITE_API_BASE_URL in frontend/.env).
-  server: { port: 3000 },
+  // Dev UI on every interface, port 3000. The page calls the API on the same host, port 8000.
+  server: { port: 3000, host: true },
 })

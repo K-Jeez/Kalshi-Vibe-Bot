@@ -1,7 +1,16 @@
 import axios from 'axios'
 
-/** Override in `.env` as `VITE_API_BASE_URL=http://host:port` when the UI is not on localhost:3000. */
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+/** Same host the page was loaded from, so a phone on the LAN reaches the PC's API. */
+function apiOrigin(port: string): string {
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    const proto = window.location.protocol === 'https:' ? 'https:' : 'http:'
+    return `${proto}//${window.location.hostname}:${port}`
+  }
+  return `http://127.0.0.1:${port}`
+}
+
+/** Override in `.env` as `VITE_API_BASE_URL=http://host:port` when the API is not on port 8000. */
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || apiOrigin('8000')
 
 // ── Interfaces ─────────────────────────────────────────────────────────────────
 
@@ -43,8 +52,6 @@ export interface Portfolio {
   order_search_active?: boolean
   /** Short status for the dashboard scan indicator. */
   order_search_label?: string
-  /** False disables bot stop-loss exits; manual sells still allowed. */
-  stop_loss_selling_enabled?: boolean
 }
 
 export interface VaultTransferResponse {
@@ -88,18 +95,12 @@ export interface Position {
   awaiting_settlement?: boolean
   /** Live: no native bids on last exit check; dashboard shows Dead Market. */
   dead_market?: boolean
-  /** Open cash basis (notional + buy-side fees) — same total used for stop-loss vs Est. Value. */
+  /** Open cash basis (price plus the buy fee). */
   cash_basis?: number
   /** Kalshi GET /markets ``status`` (e.g. active, closed, determined, finalized). */
   kalshi_market_status?: string | null
   /** Contract resolution ``yes`` / ``no`` (Kalshi ``result`` / inferred settlement) when known. */
   kalshi_market_result?: string | null
-  /** Audit: fractional threshold stored at open (may differ from current policy). */
-  stop_loss_drawdown_pct_at_entry?: number | null
-  /** Current stop-loss drawdown fraction used by bot + dashboard (Settings / tuning / .env). */
-  stop_loss_drawdown_effective?: number
-  /** Minutes after open before auto stop-loss applies — matches bot ``EXIT_GRACE_MINUTES``. */
-  exit_grace_minutes?: number
   /** ``DecisionLog.id`` for the bot gate that opened this leg (entry-time AI snapshot). */
   entry_decision_log_id?: string | null
   /** Full serialized decision row for this leg when ``entry_decision_log_id`` resolves. */
@@ -157,11 +158,18 @@ export interface XAIAnalysis {
   event_batch_market_ids?: string[]
   /** When legs are mutually exclusive (e.g. 1X2), model P(YES) per market_id (sums ~100%). */
   outcome_probability_pct_by_market_id?: Record<string, number>
+  uncertainty?: { status?: string; level?: string; missing?: string[]; as_of?: string }
+  prompt_version?: string
 }
 
 export type AnalysisActionTaken =
   | { status: 'skipped'; summary?: string; reason?: string }
   | { status: 'no_trade'; summary?: string; reason?: string; signal?: string }
+  | { status: 'rejected'; summary?: string; signal?: string; error_class?: string }
+  | { status: 'zero_fill'; summary?: string; signal?: string; filled_fp?: number }
+  | { status: 'missed_fill'; summary?: string; signal?: string; filled_fp?: number; price_gap?: number }
+  | { status: 'fractional_fill'; summary?: string; signal?: string; filled_fp?: number }
+  | { status: 'partial'; side?: string; summary?: string; signal?: string }
   | { status: 'executed'; side: string; quantity: number; price: number; cost: number; at: string }
 
 export interface DecisionAnalysis {
@@ -176,8 +184,14 @@ export interface DecisionAnalysis {
   market_implied_probability_pct?: number
   /** Edge in percentage points (AI side prob minus market-implied). */
   edge_pct?: number
-  /** Full Kelly contract count at analysis time and deployable cash snapshot. */
+  /** Quarter Kelly contract count at analysis time and deployable cash snapshot. */
   kelly_contracts?: number
+  /** w*model + (1-w)*fee-free mid, as a YES percent. Gates still use the raw model. */
+  blended_probability_yes_pct?: number | null
+  blended_side_pct?: number | null
+  blend_weight?: number | null
+  market_mid_yes_pct?: number | null
+  blend_market?: string | null
   yes_confidence: number
   no_confidence: number
   reasoning: string
@@ -223,14 +237,13 @@ export interface AnalysesStats {
 export type AiProvider = 'xai'
 
 /** Human label for the analysis model (xAI Grok). */
-export function aiProviderDisplayName(_provider?: string | null): string {
+export function aiProviderDisplayName(): string {
   return 'xAI'
 }
 
 /** Show the xAI logo when a row has LLM analysis metadata. */
 export function analysisAiProviderId(
   a: Pick<DecisionAnalysis, 'xai_analysis' | 'ai_analysis' | 'ai_provider' | 'escalated_to_xai' | 'escalated_to_ai'>,
-  _fallback?: AiProvider | null,
 ): AiProvider | null {
   if (a.escalated_to_xai || a.escalated_to_ai) return 'xai'
   const blob = a.xai_analysis ?? a.ai_analysis
@@ -241,6 +254,7 @@ export function analysisAiProviderId(
 export interface BotStateInfo {
   state: 'play' | 'pause' | 'stop'
   updated_at: string
+  daily_ai_note?: string
 }
 
 export interface PerformanceStats {
@@ -261,6 +275,7 @@ export interface PerformanceStats {
   /** Dollar sum of realized_pnl for all closed positions <= 0 (will be 0 or negative). */
   total_lost?: number
   win_rate: number
+  track_record_note?: string
   /** Cumulative realized P&L by close date (from closed positions). */
   daily_pnl: Array<{ date: string; pnl: number }>
   timestamp: string
@@ -274,10 +289,7 @@ export interface LogEntry {
 }
 
 export interface TuningSnapshot {
-  stop_loss_drawdown_pct: number
   min_edge_to_buy_pct: number
-  /** When false, the bot never auto-exits for stop-loss drawdown. */
-  stop_loss_selling_enabled?: boolean
   /** Minimum AI win probability (0–100) on the purchased side; clamped >50% server-side. */
   min_ai_win_prob_buy_side_pct?: number
   /** Max open legs before new-entry market scan + AI analysis pauses. */
@@ -286,6 +298,8 @@ export interface TuningSnapshot {
   ai_provider?: string
   /** Model id from server config (``XAI_MODEL``; default ``grok-4.3``). */
   xai_model?: string
+  config_source?: string
+  config_source_note?: string
   updated_at?: string | null
 }
 
@@ -310,11 +324,20 @@ export interface HealthResponse {
   status: string
   version?: string
   timestamp?: string
+  monitor_age_sec?: number | null
+  alerts?: string[]
+  fee_estimate_note?: string
+  approved_max_open_positions?: number
 }
 
 export const apiClient = {
   getHealth: async (): Promise<HealthResponse> => {
     const { data } = await client.get('/health')
+    return data
+  },
+
+  getOpsStatus: async (): Promise<{ monitor_age_sec: number | null; alerts: string[] }> => {
+    const { data } = await client.get('/ops/status')
     return data
   },
 
@@ -487,16 +510,9 @@ export const apiClient = {
 
   saveStrategyKnobs: async (body: {
     min_edge_to_buy_pct?: number
-    stop_loss_drawdown_pct?: number
     min_ai_win_prob_buy_side_pct?: number
-    max_open_positions?: number
   }): Promise<TuningSnapshot> => {
     const { data } = await client.post('/tuning/strategy-knobs', body)
-    return data
-  },
-
-  setStopLossSellingEnabled: async (enabled: boolean): Promise<TuningSnapshot> => {
-    const { data } = await client.post('/tuning/stop-loss-selling', { enabled })
     return data
   },
 

@@ -15,9 +15,13 @@ router = APIRouter(tags=["bot"])
 @router.get("/bot/state")
 async def get_bot_state(db: Session = Depends(get_db)):
     row = ensure_bot_state(db)
+    from src.daily_budget import budget_status
+
+    budget = budget_status(db)
     return {
         "state": row.state,
         "updated_at": utc_iso_z(row.updated_at),
+        "daily_ai_note": budget["note"],
     }
 
 

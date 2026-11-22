@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { BarChart3, TrendingUp, Zap, Terminal, Play, Pause, Square, Settings as SettingsIcon } from 'lucide-react'
+import { BarChart3, TrendingUp, Zap, Terminal, Play, Pause, Square, Settings as SettingsIcon, Menu, X } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { apiClient } from '../api'
 import { useWebSocket } from '../hooks/useWebSocket'
@@ -18,10 +18,13 @@ export const Header: React.FC = () => {
   const [connected, setConnected]     = useState(false)
   const [botState, setBotState]       = useState<'play' | 'pause' | 'stop'>('stop')
   const [botLoading, setBotLoading]   = useState(false)
+  const [localAlert, setLocalAlert]   = useState('')
+  const [budgetNote, setBudgetNote]   = useState('')
+  const [menuOpen, setMenuOpen]       = useState(false)
   const docVisible = useDocumentVisible()
   const prevVisibleRef = useRef(docVisible)
 
-  const { data: wsData } = useWebSocket('ws://localhost:8000/ws')
+  const { data: wsData } = useWebSocket('')
 
   useEffect(() => {
     if (!wsData) return
@@ -34,9 +37,15 @@ export const Header: React.FC = () => {
   const refresh = async () => {
     if (!docVisible) return
     try {
-      const [_, bot] = await Promise.all([apiClient.getHealth(), apiClient.getBotState()])
+      const [, bot, ops] = await Promise.all([
+        apiClient.getHealth(),
+        apiClient.getBotState(),
+        apiClient.getOpsStatus().catch(() => ({ monitor_age_sec: null, alerts: [] as string[] })),
+      ])
       setConnected(true)
       setBotState(bot.state ?? 'stop')
+      setBudgetNote(bot.daily_ai_note || '')
+      setLocalAlert(ops.alerts?.[0] ?? '')
     } catch {
       setConnected(false)
     }
@@ -67,6 +76,9 @@ export const Header: React.FC = () => {
 
   return (
     <header className="bg-secondary border-b border-brand-muted/45 sticky top-0 z-50 shadow-lg shadow-black/40 backdrop-blur-sm">
+      {budgetNote ? (
+        <p className="bg-amber-500/15 text-amber-100 text-center text-xs py-1.5 px-3">{budgetNote}</p>
+      ) : null}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-14 gap-4">
 
@@ -85,6 +97,14 @@ export const Header: React.FC = () => {
           </Link>
 
           {/* Navigation */}
+          <button
+            type="button"
+            className="md:hidden p-2 rounded-lg text-white hover:bg-primary/40"
+            aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            {menuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
           <nav className="hidden md:flex items-center gap-0.5 flex-1">
             {NAV.map((link) => {
               const active = location.pathname === link.href
@@ -115,6 +135,11 @@ export const Header: React.FC = () => {
             >
               LIVE
             </span>
+            {localAlert ? (
+              <span className="max-w-[220px] truncate text-[10px] text-amber-200" title={localAlert}>
+                {localAlert}
+              </span>
+            ) : null}
 
             {/* Play / Pause / Stop */}
             <div className="flex gap-0.5 bg-primary/55 rounded-xl p-1 border border-brand-muted/35 shadow-inner shadow-black/40">
@@ -125,8 +150,8 @@ export const Header: React.FC = () => {
                   disabled={botLoading || !connected}
                   title={
                     s === 'play'  ? 'Play — scan markets and trade autonomously' :
-                    s === 'pause' ? 'Pause — no new positions; exits still run for open trades' :
-                                    'Stop — no scanning; automatic stop-loss exits are off'
+                    s === 'pause' ? 'Pause — no new buys. Open positions stay until Kalshi settles them' :
+                                    'Stop — no scanning and no new buys'
                   }
                   className={`p-2 rounded-lg transition ${
                     botState === s
@@ -153,6 +178,26 @@ export const Header: React.FC = () => {
           </div>
 
         </div>
+        {menuOpen ? (
+          <nav className="md:hidden flex flex-col gap-1 pb-3">
+            {NAV.map((link) => {
+              const active = location.pathname === link.href
+              return (
+                <Link
+                  key={link.href}
+                  to={link.href}
+                  onClick={() => setMenuOpen(false)}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${
+                    active ? 'bg-blue-600 text-white font-medium' : 'text-white hover:bg-primary/40'
+                  }`}
+                >
+                  {link.icon}
+                  {link.name}
+                </Link>
+              )
+            })}
+          </nav>
+        ) : null}
       </div>
     </header>
   )

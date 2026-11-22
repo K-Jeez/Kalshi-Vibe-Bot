@@ -3,6 +3,7 @@
 .env.local
 backend/.env
 backend/logs/
+backend/.vibe-control/
 logs/
 .venv
 node_modules/
@@ -12,6 +13,13 @@ build/
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.db.bak
+*.db.bak-*
+.env.bak-*
+local_edits_backup_*/
+realized_pnl_audit_*.csv
+*.db.pre-bundle.bak
 venv/
 env/
 .idea/

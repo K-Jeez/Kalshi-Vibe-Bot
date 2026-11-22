@@ -26,10 +26,12 @@ from src.config import (
     DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
-    DEFAULT_STOP_LOSS_DRAWDOWN_PCT,
     TRADE_MODE,
     settings,
 )
+
+# Old databases still have stop-loss columns. Nothing reads them to sell.
+_LEGACY_STOP_LOSS_COLUMN_DEFAULT = 0.80
 from src.logger import logger as app_logger
 from src.util.datetimes import utc_now
 
@@ -68,7 +70,8 @@ class Position(Base):
     bid_price       = Column(Float, nullable=True)   # best bid on held side — liquidation mark (dashboard “Best bid”)
     estimated_price = Column(Float, nullable=True)  # Kalshi YES last trade (NO → 1−YES) — Est. Value + display unrealized only
     entry_best_bid  = Column(Float, nullable=True)  # legacy optional; older rows may have entry bid snapshot (unused for stop-loss)
-    stop_loss_drawdown_pct_at_entry = Column(Float, nullable=True)  # audit: threshold snapshot at open (bot uses current settings)
+    # Unread. Kept so an existing database file still opens.
+    stop_loss_drawdown_pct_at_entry = Column(Float, nullable=True)
     current_price   = Column(Float, nullable=False)
     unrealized_pnl  = Column(Float, default=0.0)
     realized_pnl    = Column(Float, default=0.0)
@@ -138,6 +141,25 @@ class DecisionLog(Base):
     snapshot_expires_days = Column(Float, nullable=True)
     timestamp           = Column(DateTime(timezone=True), default=utc_now)
     trade_mode          = Column(String, default="live")  # historical column; app is live-only
+
+
+class ShadowBuy(Base):
+    """A BUY the bot did not fill, kept so the outcome can be scored later."""
+
+    __tablename__ = "shadow_buys"
+
+    id = Column(String, primary_key=True)
+    market_id = Column(String, nullable=False)
+    side = Column(String, nullable=False)
+    reason = Column(String, nullable=True)
+    edge_pct = Column(Float, default=0.0)
+    ai_yes_pct = Column(Integer, nullable=True)
+    ask = Column(Float, nullable=False)
+    blended_side_pct = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    resolved_result = Column(String, nullable=True)
+    hypothetical_pnl = Column(Float, nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class EventSeriesLock(Base):
@@ -215,7 +237,8 @@ class TuningState(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     trade_mode = Column(String, nullable=False, default="live")  # historical column; app is live-only
 
-    stop_loss_drawdown_pct = Column(Float, default=DEFAULT_STOP_LOSS_DRAWDOWN_PCT)
+    # Unread. Kept so an existing database file still opens.
+    stop_loss_drawdown_pct = Column(Float, default=_LEGACY_STOP_LOSS_COLUMN_DEFAULT)
     stop_loss_selling_enabled = Column(Boolean, default=False)
     min_edge_to_buy_pct = Column(Integer, default=DEFAULT_MIN_EDGE_TO_BUY_PCT)
     min_ai_win_prob_buy_side_pct = Column(Integer, default=DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT)
@@ -225,10 +248,68 @@ class TuningState(Base):
     updated_at = Column(DateTime(timezone=True), default=utc_now)
 
 
+class ActivityEvent(Base):
+    """Bounded trace from a decision through order intent, ack, fill, mark, and settlement.
+
+    Stores no API keys, headers, PEM material, or raw broker payloads.
+    """
+
+    __tablename__ = "activity_events"
+
+    id = Column(String, primary_key=True)
+    seq = Column(Integer, nullable=False, default=0, index=True)
+    ts_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
+    run_id = Column(String, nullable=False, index=True)
+    app_version = Column(String, nullable=True)
+    git_sha = Column(String, nullable=True)
+    event_type = Column(String, nullable=False, index=True)
+    market_id = Column(String, nullable=True, index=True)
+    event_ticker = Column(String, nullable=True)
+    side = Column(String, nullable=True)
+    action = Column(String, nullable=True)  # buy | sell
+    model_id = Column(String, nullable=True)
+    ai_probability_yes_pct = Column(Integer, nullable=True)
+    market_implied_pct = Column(Integer, nullable=True)
+    edge_pct = Column(Float, nullable=True)
+    sizing_tag = Column(String, nullable=True)
+    kelly_contracts = Column(Integer, nullable=True)
+    quantity = Column(Integer, nullable=True)
+    limit_price = Column(Float, nullable=True)
+    fill_price = Column(Float, nullable=True)
+    fill_qty = Column(Float, nullable=True)
+    fill_count_fp = Column(String, nullable=True)
+    fees_dollars = Column(Float, nullable=True)
+    client_order_id = Column(String, nullable=True, index=True)
+    exchange_order_id = Column(String, nullable=True)
+    fee_kind = Column(String, nullable=True)
+    order_status = Column(String, nullable=True)
+    quote_captured_at = Column(String, nullable=True)
+    quote_age_ms = Column(Integer, nullable=True)
+    yes_bid = Column(Float, nullable=True)
+    yes_ask = Column(Float, nullable=True)
+    no_bid = Column(Float, nullable=True)
+    no_ask = Column(Float, nullable=True)
+    settings_json = Column(Text, nullable=True)
+    detail = Column(Text, nullable=True)
+    error = Column(String, nullable=True)
+
+
 # ── Database helpers ───────────────────────────────────────────────────────────
 
 _engine: Optional[Engine] = None
 _session_factory = None
+
+
+def release_sqlite_write(db) -> None:
+    """End the current transaction before a network call.
+
+    A flushed SQLite write stays locked until commit. Reconcile must not keep
+    that lock while it waits on Kalshi.
+    """
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 def _sqlite_on_connect(dbapi_conn, _connection_record) -> None:
@@ -332,6 +413,9 @@ def init_db():
         _ensure_tuning_row(db)
         _ensure_vault_row(db)
         _purge_paper_trade_mode_rows(engine)
+        from src.policy_migration import migrate_database_url
+
+        migrate_database_url(settings.database_url)
         _force_tuning_ai_provider_xai(engine)
         app_logger.info("Database initialized: %s", settings.database_url)
     finally:
@@ -439,7 +523,7 @@ def _run_migrations(engine):
     """Add new columns to existing tables idempotently (SQLite ALTER TABLE)."""
     migrations = [
         # table, column, sql_type_default
-        ("tuning_state", "stop_loss_drawdown_pct",  f"FLOAT DEFAULT {DEFAULT_STOP_LOSS_DRAWDOWN_PCT}"),
+        ("tuning_state", "stop_loss_drawdown_pct",  f"FLOAT DEFAULT {_LEGACY_STOP_LOSS_COLUMN_DEFAULT}"),
         ("tuning_state", "stop_loss_selling_enabled", "BOOLEAN DEFAULT 0"),
         ("tuning_state", "updated_at",               "DATETIME"),
         ("trades",        "action",            "TEXT DEFAULT 'buy'"),
@@ -479,6 +563,9 @@ def _run_migrations(engine):
         ("decision_logs", "ai_probability_yes_pct", "INTEGER"),
         ("decision_logs", "market_implied_probability_pct", "INTEGER"),
         ("decision_logs", "kelly_contracts", "INTEGER"),
+        ("activity_events", "exchange_order_id", "TEXT"),
+        ("activity_events", "fee_kind", "TEXT"),
+        ("activity_events", "fill_count_fp", "TEXT"),
     ]
     with engine.connect() as conn:
         _ensure_kalshi_reconcile_cursor_table(conn)
@@ -509,11 +596,11 @@ def _ensure_tuning_row(db) -> None:
         return
     row = TuningState(
         trade_mode=mode,
-        stop_loss_drawdown_pct=float(settings.stop_loss_drawdown_pct),
-        stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
+        stop_loss_drawdown_pct=0.80,
+        stop_loss_selling_enabled=False,
         min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
         min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
-        max_open_positions=int(settings.bot_max_open_positions),
+        max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),
         ai_provider=AI_PROVIDER,
     )
     db.add(row)
@@ -634,11 +721,11 @@ def ensure_tuning_state(db, trade_mode: Optional[str] = None) -> TuningState:
     if not row:
         row = TuningState(
             trade_mode=mode,
-            stop_loss_drawdown_pct=float(settings.stop_loss_drawdown_pct),
-            stop_loss_selling_enabled=bool(settings.stop_loss_selling_enabled),
+            stop_loss_drawdown_pct=0.80,
+            stop_loss_selling_enabled=False,
             min_edge_to_buy_pct=int(settings.min_edge_to_buy_pct),
             min_ai_win_prob_buy_side_pct=int(settings.min_ai_win_prob_buy_side_pct),
-            max_open_positions=int(settings.bot_max_open_positions),
+            max_open_positions=int(DEFAULT_MAX_OPEN_POSITIONS),
             ai_provider=AI_PROVIDER,
         )
         db.add(row)

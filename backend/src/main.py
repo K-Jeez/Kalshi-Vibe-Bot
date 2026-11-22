@@ -15,7 +15,9 @@ from src.api.bot import router as bot_router
 from src.api.broadcast import broadcast_update
 from src.api.common import ensure_bot_state
 from src.api.health import router as health_router
+from src.api.local_guard import LocalMutationGuard
 from src.api.logs_debug import router as logs_debug_router
+from src.api.ops import router as ops_router
 from src.api.markets import router as markets_router
 from src.api.portfolio import router as portfolio_router
 from src.api.trades import router as trades_router
@@ -36,6 +38,20 @@ def _cors_allow_origins() -> list[str]:
     if raw:
         return [o.strip() for o in raw.split(",") if o.strip()]
     return ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+
+# Phone on the home network loads the UI from a private address, not localhost.
+_PRIVATE_ORIGIN = (
+    r"https?://("
+    r"localhost|127\.0\.0\.1|"
+    r"10(?:\.\d{1,3}){3}|"
+    r"192\.168(?:\.\d{1,3}){2}|"
+    r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|"
+    r"169\.254(?:\.\d{1,3}){2}|"
+    r"\[[fF][eE]80:[^\]]+\]|"
+    r"\[[fF][cCdD][0-9a-fA-F:]*\]"
+    r")(?::\d+)?$"
+)
 
 
 @asynccontextmanager
@@ -79,13 +95,19 @@ async def lifespan(app: FastAPI):
         logger.warning("KALSHI_API_KEY is empty — Kalshi API calls will fail until set in backend/.env")
     if not (getattr(settings, "xai_api_key", None) or "").strip():
         logger.warning("XAI_API_KEY is empty — xAI analysis will fail until set in backend/.env")
+    if str(getattr(settings, "host", "") or "") in ("0.0.0.0", "::"):
+        if not (getattr(settings, "local_api_token", None) or "").strip():
+            logger.warning(
+                "HOST is %s and LOCAL_API_TOKEN is empty — non-local trading and other "
+                "state-changing requests are denied. Localhost dashboard actions still work.",
+                settings.host,
+            )
 
     logger.info(
-        "Application ready — mode=%s scan_interval=%ds min_edge=%d%% stop_loss_drawdown=%.0f%%",
+        "Application ready — mode=%s scan_interval=%ds min_edge=%d%%",
         TRADE_MODE,
         settings.bot_scan_interval,
         settings.min_edge_to_buy_pct,
-        settings.stop_loss_drawdown_pct * 100.0,
     )
 
     yield
@@ -114,7 +136,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Kalshi Vibe Bot",
-    description="Binary Kalshi markets: local liquidity vetting, xAI (Grok) P(YES) + edge, full Kelly sizing, stop-loss-only exits.",
+    description="Binary Kalshi markets: local liquidity vetting, xAI (Grok) P(YES) + edge, quarter Kelly sizing, stop-loss-only exits.",
     version=APP_VERSION,
     lifespan=lifespan,
 )
@@ -122,10 +144,13 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allow_origins(),
+    allow_origin_regex=None if (settings.cors_origins or "").strip() else _PRIVATE_ORIGIN,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Added after CORS so this runs first. OPTIONS is passed through for browser preflight.
+app.add_middleware(LocalMutationGuard)
 
 app.include_router(health_router)
 app.include_router(websocket_router)
@@ -136,3 +161,4 @@ app.include_router(markets_router)
 app.include_router(analysis_router)
 app.include_router(trades_router)
 app.include_router(logs_debug_router)
+app.include_router(ops_router)

@@ -9,8 +9,6 @@ from sqlalchemy.orm import Session
 
 from src.api.common import ensure_bot_state
 from src.app_state import app_state
-from src.config import DEFAULT_MAX_OPEN_POSITIONS
-
 # Do not fetch markets or run AI analysis when uninvested deployable cash is below this (USD).
 MIN_DEPLOYABLE_USD_FOR_ORDER_SEARCH = 1.0
 
@@ -54,19 +52,14 @@ def compute_order_search_scan_labels(
             return False, "Holding — total balance under $5"
 
     bal = max(0.0, float(available_cash))
+    from src.ops_status import note_low_balance
+
+    note_low_balance(bal)
+    del open_position_count
 
     min_dep = float(MIN_DEPLOYABLE_USD_FOR_ORDER_SEARCH)
     if bal < min_dep:
         return False, f"Holding — deployable funds under ${min_dep:g}"
-
-    try:
-        cap = int(getattr(settings, "bot_max_open_positions", DEFAULT_MAX_OPEN_POSITIONS))
-    except (TypeError, ValueError):
-        cap = DEFAULT_MAX_OPEN_POSITIONS
-    cap = max(1, min(500, cap))
-    n_open = max(0, int(open_position_count))
-    if n_open >= cap:
-        return False, f"At open position limit ({n_open}/{cap})"
 
     return True, "Active — searching for new positions"
 

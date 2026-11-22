@@ -7,9 +7,10 @@ from sqlalchemy.orm import Session
 
 from src.api.broadcast import broadcast_update
 from src.ai_provider import normalize_ai_provider
-from src.api.schemas import StopLossSellingRequest, StrategyKnobsRequest
+from src.api.schemas import StrategyKnobsRequest
 from src.config import (
     AI_PROVIDER,
+    APPROVED_MAX_OPEN_POSITIONS,
     DEFAULT_MAX_OPEN_POSITIONS,
     DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT,
     DEFAULT_MIN_EDGE_TO_BUY_PCT,
@@ -22,7 +23,6 @@ from src.util.datetimes import utc_iso_z, utc_now
 router = APIRouter(tags=["tuning"])
 
 _STRATEGY_FIELD_BOUNDS: dict[str, tuple[float, float]] = {
-    "stop_loss_drawdown_pct": (0.05, 0.90),
     "min_edge_to_buy_pct": (0.0, 95.0),
 }
 
@@ -37,24 +37,35 @@ def _coalesce_int(row, attr: str, default: int) -> int:
     return default if v is None else int(v)
 
 
+def effective_max_open_positions(value) -> int:
+    """Approved ceiling is 12. A stale 30 from an old file cannot raise it."""
+    if value is None:
+        value = DEFAULT_MAX_OPEN_POSITIONS
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = DEFAULT_MAX_OPEN_POSITIONS
+    return max(1, min(APPROVED_MAX_OPEN_POSITIONS, parsed))
+
+
 def _coalesce_ai_provider(row) -> str:
     return normalize_ai_provider(getattr(row, "ai_provider", None))
 
 
 def tuning_state_payload(row) -> dict:
     return {
-        "stop_loss_drawdown_pct": round(
-            float(getattr(row, "stop_loss_drawdown_pct", app_settings.stop_loss_drawdown_pct)),
-            4,
-        ),
         "min_edge_to_buy_pct": _coalesce_int(row, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT),
-        "stop_loss_selling_enabled": bool(getattr(row, "stop_loss_selling_enabled", False)),
+        "max_edge_to_buy_pct": int(getattr(app_settings, "max_edge_to_buy_pct", 22)),
         "min_ai_win_prob_buy_side_pct": _coalesce_int(
             row, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
         ),
-        "max_open_positions": _coalesce_int(row, "max_open_positions", DEFAULT_MAX_OPEN_POSITIONS),
         "ai_provider": AI_PROVIDER,
         "xai_model": str(getattr(app_settings, "xai_model", "grok-4.3")),
+        "config_source": "database",
+        "config_source_note": (
+            "These values come from the database Settings row. "
+            "The .env file is only the seed for a missing row, or after Restore configuration defaults."
+        ),
         "updated_at": utc_iso_z(row.updated_at),
     }
 
@@ -66,18 +77,9 @@ def sync_runtime_from_db(db: Session) -> None:
 
 
 def _sync_runtime_from_row(row) -> None:
-    app_settings.stop_loss_drawdown_pct = float(
-        getattr(row, "stop_loss_drawdown_pct", app_settings.stop_loss_drawdown_pct)
-    )
     app_settings.min_edge_to_buy_pct = _coalesce_int(row, "min_edge_to_buy_pct", DEFAULT_MIN_EDGE_TO_BUY_PCT)
-    app_settings.stop_loss_selling_enabled = bool(
-        getattr(row, "stop_loss_selling_enabled", getattr(app_settings, "stop_loss_selling_enabled", False))
-    )
     app_settings.min_ai_win_prob_buy_side_pct = _coalesce_int(
         row, "min_ai_win_prob_buy_side_pct", DEFAULT_MIN_AI_WIN_PROB_BUY_SIDE_PCT
-    )
-    app_settings.bot_max_open_positions = _coalesce_int(
-        row, "max_open_positions", DEFAULT_MAX_OPEN_POSITIONS
     )
 
 
@@ -85,11 +87,8 @@ def apply_config_defaults_to_tuning_state(db: Session) -> dict:
     fresh = Settings()
     row = ensure_tuning_state(db)
 
-    row.stop_loss_drawdown_pct = float(fresh.stop_loss_drawdown_pct)
     row.min_edge_to_buy_pct = int(fresh.min_edge_to_buy_pct)
-    row.stop_loss_selling_enabled = bool(fresh.stop_loss_selling_enabled)
     row.min_ai_win_prob_buy_side_pct = int(fresh.min_ai_win_prob_buy_side_pct)
-    row.max_open_positions = int(fresh.bot_max_open_positions)
     row.ai_provider = AI_PROVIDER
 
     row.updated_at = utc_now()
@@ -113,28 +112,10 @@ async def set_strategy_knobs(req: StrategyKnobsRequest, db: Session = Depends(ge
     row = ensure_tuning_state(db)
     if req.min_edge_to_buy_pct is not None:
         row.min_edge_to_buy_pct = int(_clamp("min_edge_to_buy_pct", float(req.min_edge_to_buy_pct)))
-    if req.stop_loss_drawdown_pct is not None:
-        row.stop_loss_drawdown_pct = _clamp("stop_loss_drawdown_pct", float(req.stop_loss_drawdown_pct))
     if req.min_ai_win_prob_buy_side_pct is not None:
         v = int(req.min_ai_win_prob_buy_side_pct)
         # Floor 51 = strictly above 50% on the buy side; cap 99 matches ``config.py`` validator.
         row.min_ai_win_prob_buy_side_pct = max(51, min(99, v))
-    if req.max_open_positions is not None:
-        row.max_open_positions = max(1, min(500, int(req.max_open_positions)))
-    row.updated_at = utc_now()
-    db.add(row)
-    db.commit()
-    _sync_runtime_from_row(row)
-    payload = tuning_state_payload(row)
-    await broadcast_update({"type": "tuning_update", "data": payload})
-    return payload
-
-
-@router.post("/tuning/stop-loss-selling")
-async def set_stop_loss_selling(req: StopLossSellingRequest, db: Session = Depends(get_db)):
-    """Enable or disable automatic stop-loss exits (manual sells unaffected)."""
-    row = ensure_tuning_state(db)
-    row.stop_loss_selling_enabled = bool(req.enabled)
     row.updated_at = utc_now()
     db.add(row)
     db.commit()

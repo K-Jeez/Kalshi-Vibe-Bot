@@ -260,15 +260,12 @@ def display_estimated_price_optional(pos: Position) -> Optional[float]:
     intrinsic ``0`` or ``1`` **even if** contractual ``close_time`` is still in the future (common for
     sports props where the event resolves before the series contractual end).
 
-    Otherwise, after the display **Ends** instant has passed: ``None`` until an official ``yes``/``no``
-    is available (outcome pending). Before that: Kalshi **last trade** on YES (stored ``estimated_price``)
-    or bid/current.
+    Until that official result exists, keep the live last trade (or bid). A closed
+    trading window does not blank the estimate.
     """
     intrinsic = resolution_intrinsic_mark_dollars(pos)
     if intrinsic is not None:
         return float(intrinsic)
-    if position_market_close_time_passed(pos):
-        return None
     ep = getattr(pos, "estimated_price", None)
     if ep is not None:
         return max(0.0, min(1.0, float(ep)))
@@ -291,9 +288,6 @@ def unrealized_pnl_display_optional(pos: Position) -> Optional[float]:
             entry_price=ep,
             fees_paid=fp,
         )
-    if position_market_close_time_passed(pos):
-        return None
-
     mark_live = display_estimated_price_optional(pos)
     assert mark_live is not None
     return unrealized_pnl_from_executable_mark_dollars(
@@ -305,74 +299,10 @@ def unrealized_pnl_display_optional(pos: Position) -> Optional[float]:
     )
 
 
-def stop_loss_value_drawdown_triggered(
-    *,
-    entry_price_per_contract: float,
-    estimated_price_per_contract: Optional[float],
-    stop_loss_drawdown_pct: float,
-) -> bool:
-    """True when per-contract mark drawdown meets stop threshold (same framing as dashboard).
-
-    ``drawdown = (entry_price − est_value) / entry_price`` on the held side (¢ vs ¢), **excluding fees**.
-    When entry and Est. Value match (e.g. both 52¢), drawdown is 0%. Uses ``display_estimated_price_optional``
-    for Est. Value. Returns False when entry is unusable or Est. Value is unknown.
-    """
-    entry_px = max(0.0, min(1.0, float(entry_price_per_contract or 0.0)))
-    if not math.isfinite(entry_px) or entry_px <= 1e-12:
-        return False
-    if estimated_price_per_contract is None:
-        return False
-    est_px = float(estimated_price_per_contract)
-    if not math.isfinite(est_px):
-        return False
-    est_px = max(0.0, min(1.0, est_px))
-    dd = (entry_px - est_px) / entry_px
-    sl = max(0.0, float(stop_loss_drawdown_pct))
-    return dd >= sl - 1e-9
-
-
-def stop_loss_entry_price_per_contract(pos: Position) -> float:
-    """Held-side entry $/contract for stop-loss (``entry_price``, else ``entry_cost`` / qty)."""
-    ep = float(pos.entry_price or 0.0)
-    if ep > 1e-12:
-        return max(0.0, min(1.0, ep))
-    q = max(0, int(pos.quantity or 0))
-    ec = max(0.0, float(pos.entry_cost or 0.0))
-    if q > 0 and ec > 1e-12:
-        return max(0.0, min(1.0, ec / float(q)))
-    return 0.0
-
-
-def stop_loss_mark_drawdown_fraction(
-    pos: Position,
-    *,
-    estimated_price_per_contract: Optional[float] = None,
-) -> Optional[float]:
-    """``(entry − est) / entry`` for UI preview; ``None`` when not computable."""
-    entry_px = stop_loss_entry_price_per_contract(pos)
-    if entry_px <= 1e-12:
-        return None
-    est = (
-        estimated_price_per_contract
-        if estimated_price_per_contract is not None
-        else display_estimated_price_optional(pos)
-    )
-    if est is None:
-        return None
-    est_px = max(0.0, min(1.0, float(est)))
-    if not math.isfinite(est_px):
-        return None
-    return (entry_px - est_px) / entry_px
-
-
-def stop_loss_triggered_from_position(pos: Position, *, stop_loss_drawdown_pct: float) -> bool:
-    """Stop-loss auto-exit: **entry price** vs display **Est. Value** (per contract, fees excluded)."""
-    est = display_estimated_price_optional(pos)
-    return stop_loss_value_drawdown_triggered(
-        entry_price_per_contract=stop_loss_entry_price_per_contract(pos),
-        estimated_price_per_contract=float(est) if est is not None else None,
-        stop_loss_drawdown_pct=stop_loss_drawdown_pct,
-    )
+def market_trading_closed(pos: Position) -> bool:
+    """True once Kalshi has closed, determined, or finalized the market."""
+    status = str(getattr(pos, "kalshi_market_status", None) or "").strip().lower()
+    return status in {"closed", "determined", "finalized", "settled"}
 
 
 def resolution_outcome_pending_display(pos: Position) -> bool:

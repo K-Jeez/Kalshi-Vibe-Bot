@@ -2,6 +2,9 @@
 
 import math
 import uuid
+from datetime import timezone
+from zoneinfo import ZoneInfo
+
 from src.util.datetimes import utc_iso_z, utc_now
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +19,16 @@ from src.logger import logger
 from src.reconcile.open_positions import get_open_position, normalize_market_id
 
 router = APIRouter(tags=["trades"])
+DENVER = ZoneInfo("America/Denver")
+
+
+def denver_close_date(ts):
+    """Calendar date in America/Denver. Naive timestamps are treated as UTC."""
+    if ts is None:
+        return None
+    if getattr(ts, "tzinfo", None) is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(DENVER).date()
 
 
 @router.post("/trade")
@@ -98,7 +111,45 @@ async def place_trade(
             raise HTTPException(status_code=400, detail="Effective IOC limit below ask")
 
         # Place the order using the raw market ticker when possible (some valid tickers can be mis-normalized).
-        result = await kc.place_buy_ioc_limit(raw_mid or mid, side_up, quantity, ioc_limit)
+        from src.activity_log import fresh_unresolved_order_hold, persist_order_intent, record_order_ack
+
+        buy_hold = fresh_unresolved_order_hold(mid, "buy")
+        if buy_hold:
+            raise HTTPException(status_code=409, detail=buy_hold)
+        intent_id = persist_order_intent(
+            {
+                "market_id": mid,
+                "side": side_up,
+                "action": "buy",
+                "quantity": int(quantity),
+                "limit_price": float(ioc_limit),
+                "detail": "manual IOC buy",
+            }
+        )
+        if not intent_id:
+            raise HTTPException(
+                status_code=503,
+                detail="Order was not sent because the activity log could not be saved.",
+            )
+        result = await kc.place_buy_ioc_limit(
+            raw_mid or mid,
+            side_up,
+            quantity,
+            ioc_limit,
+            client_order_id=intent_id,
+        )
+        record_order_ack(
+            result,
+            {
+                "market_id": mid,
+                "side": side_up,
+                "action": "buy",
+                "quantity": int(quantity),
+                "limit_price": float(ioc_limit),
+                "client_order_id": intent_id,
+                "detail": "manual IOC buy",
+            },
+        )
         if result.get("error"):
             raise HTTPException(status_code=502, detail=result["error"])
         filled = kalshi_order_filled_contracts(result)
@@ -213,32 +264,65 @@ async def get_performance_stats(db: Session = Depends(get_db)):
         win_rate = (wins / closed_n * 100) if closed_n > 0 else 0.0
         total_invested = sum(t.total_cost for t in buys)
 
-        # Cumulative realized P&L by calendar day (UTC), aligned with closed Position rows.
+        # Incremental realized P&L by America/Denver calendar day.
+        # A close at 5:33pm MST on Nov 8 is still Nov 8 in Denver, not the next UTC date.
         by_day: dict = {}
         for p in closed_positions:
-            ts = p.closed_at
-            if ts is None:
-                continue
             try:
-                day_key = ts.date() if hasattr(ts, "date") else ts
+                day_key = denver_close_date(p.closed_at)
             except Exception:
+                day_key = None
+            if day_key is None:
                 continue
             by_day[day_key] = by_day.get(day_key, 0.0) + _rp(p)
 
         cum = 0.0
         daily_pnl: list = []
         for day_key in sorted(by_day.keys()):
-            cum += by_day[day_key]
+            day_pnl = by_day[day_key]
+            cum += day_pnl
             daily_pnl.append(
                 {
                     "date": day_key.strftime("%b %d, %Y") if hasattr(day_key, "strftime") else str(day_key),
-                    "pnl": round(cum, 2),
+                    "pnl": round(day_pnl, 2),
+                    "cumulative": round(cum, 2),
+                    "timezone": "America/Denver",
                 }
             )
         if not daily_pnl and closed_n > 0:
             daily_pnl = [{"date": "All closed", "pnl": round(total_realized, 2)}]
 
+        from src.database.models import DecisionLog
+        from src.track_record import track_record_note
+
+        log_ids = [p.entry_decision_log_id for p in closed_positions if getattr(p, "entry_decision_log_id", None)]
+        logs = {}
+        if log_ids:
+            for log in db.query(DecisionLog).filter(DecisionLog.id.in_(log_ids)).all():
+                logs[log.id] = log
+        record_rows = []
+        for p in closed_positions:
+            log = logs.get(getattr(p, "entry_decision_log_id", None))
+            ai_yes = getattr(log, "ai_probability_yes_pct", None) if log is not None else None
+            side = str(getattr(p, "side", "") or "").upper()
+            result = str(getattr(p, "kalshi_market_result", "") or "").lower()
+            won = (side == "YES" and result == "yes") or (side == "NO" and result == "no")
+            ai_side = None
+            if ai_yes is not None:
+                ai_side = float(ai_yes) if side == "YES" else 100.0 - float(ai_yes)
+            record_rows.append(
+                {
+                    "won": won,
+                    "ai_side_pct": ai_side,
+                    "entry": getattr(p, "entry_price", None),
+                    "pnl": _rp(p),
+                }
+            )
+        record = track_record_note(record_rows)
+
         return {
+            "stats_scope": "all_closed_positions_in_this_database",
+            "fills_are_not_closed_positions": True,
             "fills_total": len(trades),
             "buy_count": len(buys),
             "sell_count": ledger_sell_rows,
@@ -251,6 +335,7 @@ async def get_performance_stats(db: Session = Depends(get_db)):
             "total_gained": round(total_gained, 4),
             "total_lost": round(total_lost, 4),
             "win_rate": round(win_rate, 4),
+            "track_record_note": record["note"],
             "daily_pnl": daily_pnl[-30:],
             "timestamp": utc_iso_z(utc_now()),
         }
